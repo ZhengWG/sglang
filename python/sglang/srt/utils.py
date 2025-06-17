@@ -2391,6 +2391,19 @@ class LazyValue:
         return self._value
 
 
+def dynamic_import(func_path: str):
+    parts = func_path.split(".")
+    if len(parts) < 2:
+        raise ValueError(
+            "func_path should contain both module name and func name (such as 'module.func')"
+        )
+    module_path = ".".join(parts[:-1])
+    func_name = parts[-1]
+    module = importlib.import_module(module_path)
+    func = getattr(module, func_name)
+    return func
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
