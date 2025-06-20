@@ -840,41 +840,6 @@ class Scheduler(
                             all_gather_group=self.attn_tp_group,
                         )
 
-                # receive outputs and post-process (filter finished reqs) the coming microbatch
-                next_mb_id = (mb_id + 1) % self.pp_size
-                next_pp_outputs = None
-                if mbs[next_mb_id] is not None:
-                    next_pp_outputs: Optional[PPProxyTensors] = PPProxyTensors(
-                        self.pp_group.recv_tensor_dict(
-                            all_gather_group=self.attn_tp_group
-                        )
-                    )
-                    mbs[next_mb_id].output_ids = next_pp_outputs["next_token_ids"]
-                    logits_output_args = {
-                        k[len("logits_output.") :]: v
-                        for k, v in next_pp_outputs.tensors.items()
-                        if k.startswith("logits_output.")
-                    }
-                    if len(logits_output_args) > 0:
-                        logits_output = LogitsProcessorOutput(**logits_output_args)
-                    else:
-                        logits_output = None
-                    output_result = GenerationBatchResult(
-                        logits_output=logits_output,
-                        pp_hidden_states_proxy_tensors=None,
-                        next_token_ids=next_pp_outputs["next_token_ids"],
-                        extend_input_len_per_req=next_pp_outputs.tensors.get(
-                            "extend_input_len_per_req", None
-                        ),
-                        extend_logprob_start_len_per_req=next_pp_outputs.tensors.get(
-                            "extend_logprob_start_len_per_req", None
-                        ),
-                        bid=bids[next_mb_id],
-                        can_run_cuda_graph=result.can_run_cuda_graph,
-                    )
-                    self.process_batch_result(mbs[next_mb_id], output_result)
-                    last_mbs[next_mb_id] = mbs[next_mb_id]
-
                 # (not last rank)
                 if not self.pp_group.is_last_rank:
                     if self.cur_batch:
