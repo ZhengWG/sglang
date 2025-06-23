@@ -19,14 +19,6 @@ from sglang.srt.managers.tokenizer_manager import TokenizerManager
 class OpenAIServingTokenization(OpenAIServingBase):
     """Handler for v1/tokenize requests"""
 
-    def __init__(
-        self,
-        tokenizer_manager: TokenizerManager,
-        template_manager: TemplateManager,
-    ):
-        super().__init__(tokenizer_manager)
-        self.template_manager = template_manager
-
     def _request_id_prefix(self) -> str:
         return "tokn-"
 
