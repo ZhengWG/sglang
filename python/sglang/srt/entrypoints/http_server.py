@@ -56,12 +56,14 @@ from sglang.srt.entrypoints.openai.protocol import (
     ModelList,
     ScoringRequest,
     V1RerankReqInput,
+    TokenizeRequest
 )
 from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 from sglang.srt.entrypoints.openai.serving_completions import OpenAIServingCompletion
 from sglang.srt.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from sglang.srt.entrypoints.openai.serving_rerank import OpenAIServingRerank
 from sglang.srt.entrypoints.openai.serving_score import OpenAIServingScore
+from sglang.srt.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -139,6 +141,9 @@ async def lifespan(fast_api_app: FastAPI):
         _global_state.tokenizer_manager
     )
     fast_api_app.state.openai_serving_rerank = OpenAIServingRerank(
+        _global_state.tokenizer_manager
+    )
+    fast_api_app.state.openai_serving_tokenization = OpenAIServingTokenization(
         _global_state.tokenizer_manager
     )
 
@@ -388,6 +393,11 @@ async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
         request, raw_request
     )
 
+@app.post("/tokenize")
+async def v1_tokenization_request(request: TokenizeRequest, raw_request: Request):
+    return await raw_request.app.state.openai_serving_tokenization.handle_request(
+        request, raw_request
+    )
 
 @app.api_route("/flush_cache", methods=["GET", "POST"])
 async def flush_cache():

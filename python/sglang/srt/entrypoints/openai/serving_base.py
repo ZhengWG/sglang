@@ -153,28 +153,17 @@ class OpenAIServingBase(ABC):
         )
         return json.dumps({"error": error.model_dump()})
 
-    def set_trace_id(request: OpenAIServingRequest, raw_request: Request):
+    def set_trace_id(self, request: OpenAIServingRequest, raw_request: Request):
         # 0. 判断是否包含rid属性
         if not hasattr(request, 'rid'):
             return
 
         trace_id = None
-        # 1. 优先取header中的
+        # 1. 取header中的
         if raw_request and raw_request.headers:
             trace_id = raw_request.headers.get(SOFA_TRACE_IN_HEADER, None)
 
-        # 2. 否则，再判断payload中的
-        if not trace_id and raw_request:
-            # 获取body中的参数
-            request_json = None
-            try:
-                request_json = await raw_request.json()
-            except Exception as e:
-                pass
-            if request_json:
-                trace_id = request_json.pop(SOFA_TRACE_IN_BODY, None)
-
-        # 3. 合法则写入请求
+        # 2. 合法则写入请求
         if trace_id:
             rid = trace_id + '_' + str(uuid.uuid4().hex)[:8]
             setattr(request, 'rid', rid)

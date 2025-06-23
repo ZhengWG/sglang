@@ -190,6 +190,9 @@ class CompletionRequest(BaseModel):
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
     session_params: Optional[Dict] = None
 
+    # The request id.
+    rid: Optional[str] = None
+
     # For PD disaggregation
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
@@ -421,7 +424,7 @@ class ChatCompletionRequest(BaseModel):
     stop_token_ids: Optional[List[int]] = None
     no_stop_trim: bool = False
     ignore_eos: bool = False
-    continue_final_message: bool = False
+    continue_final_message: bool = True
     skip_special_tokens: bool = True
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
     session_params: Optional[Dict] = None
@@ -579,6 +582,67 @@ class RerankResponse(BaseModel):
     index: int
     meta_info: Optional[dict] = None
 
+class TokenizeCompletionRequest(BaseModel):
+    model: Optional[str] = None
+    prompt: str
+
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
+    )
+
+class TokenizeChatRequest(BaseModel):
+    model: Optional[str] = None
+    messages: List[ChatCompletionMessageParam]
+
+    add_generation_prompt: bool = Field(
+        default=True,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
+    )
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."),
+    )
+    chat_template_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+            "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
+
+class TokenizeResponse(BaseModel):
+    count: int
+    max_model_len: int
+    tokens: list[int]
+
+TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
 
 OpenAIServingRequest = Union[
     ChatCompletionRequest,
@@ -586,4 +650,6 @@ OpenAIServingRequest = Union[
     EmbeddingRequest,
     ScoringRequest,
     V1RerankReqInput,
+    TokenizeCompletionRequest,
+    TokenizeChatRequest
 ]
