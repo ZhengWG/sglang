@@ -14,7 +14,7 @@
 """Pydantic models for OpenAI API protocol"""
 
 import time
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 from pydantic import (
     BaseModel,

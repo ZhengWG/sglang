@@ -697,12 +697,6 @@ async def openai_v1_chat_completions(
     )
 
 
-@app.post("/tokenize")
-async def openai_v1_tokenize(raw_request: Request):
-    # todo: 适配新的
-    return await v1_tokenize(_global_state.tokenizer_manager, raw_request)
-
-
 @app.post(
     "/v1/embeddings",
     response_class=ORJSONResponse,
