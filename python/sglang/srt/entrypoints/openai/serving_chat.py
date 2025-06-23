@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import time
@@ -94,6 +95,7 @@ class OpenAIServingChat(OpenAIServingBase):
             logprob_start_len=-1,
             top_logprobs_num=request.top_logprobs or 0,
             stream=request.stream,
+            rid=request.rid,
             return_text_in_logprobs=True,
             modalities=modalities,
             lora_path=request.lora_path,
@@ -292,7 +294,7 @@ class OpenAIServingChat(OpenAIServingBase):
         image_data = conv.image_data if conv.image_data else None
         audio_data = conv.audio_data if conv.audio_data else None
         modalities = conv.modalities if conv.modalities else []
-        stop = conv.stop_str or [] if not request.ignore_eos else []
+        stop = copy.copy(conv.stop_str or [] if not request.ignore_eos else [])
 
         if request.stop:
             if isinstance(request.stop, str):
@@ -428,8 +430,12 @@ class OpenAIServingChat(OpenAIServingBase):
 
                 # First chunk with role
                 if is_firsts.get(index, True):
+
+                    first_chunk_padding = self.tokenizer_manager.server_args.reasoning_padding
+                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
+
                     is_firsts[index] = False
-                    delta = DeltaMessage(role="assistant", content="")
+                    delta = DeltaMessage(role="assistant", content=first_chunk_content)
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=delta,
@@ -497,7 +503,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     ):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
-                            delta=DeltaMessage(content=delta if delta else None),
+                            delta=DeltaMessage(role="assistant", content=(delta or "")),
                             finish_reason=(
                                 None
                                 if request.stream_options
@@ -526,7 +532,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 choices=[
                     ChatCompletionResponseStreamChoice(
                         index=index,
-                        delta=DeltaMessage(),
+                        delta=DeltaMessage(role="assistant", content=""),
                         finish_reason=finish_reason_type,
                         matched_stop=(
                             finish_reason["matched"]
@@ -538,7 +544,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 model=request.model,
                 usage=None,
             )
-            yield f"data: {finish_reason_chunk.model_dump_json()}\n\n"
+            yield f"data: {finish_reason_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             # Send hidden states if requested
             if request.return_hidden_states and hidden_states:
@@ -635,6 +641,10 @@ class OpenAIServingChat(OpenAIServingBase):
             finish_reason = ret_item["meta_info"]["finish_reason"]
             text = ret_item["text"]
 
+            reasoning_padding = self.tokenizer_manager.server_args.reasoning_padding
+            if reasoning_padding and text is not None:
+                text = f"{reasoning_padding}\n{text}"
+
             # Handle reasoning content
             reasoning_text = None
             reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
@@ -664,7 +674,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 index=idx,
                 message=ChatMessage(
                     role="assistant",
-                    content=text if text else None,
+                    content=(text or ""),
                     tool_calls=tool_calls,
                     reasoning_content=reasoning_text if reasoning_text else None,
                 ),
@@ -853,7 +863,7 @@ class OpenAIServingChat(OpenAIServingBase):
         if normal_text:
             choice_data = ChatCompletionResponseStreamChoice(
                 index=index,
-                delta=DeltaMessage(content=normal_text),
+                delta=DeltaMessage(content=(normal_text or "")),
                 finish_reason=finish_reason_type,
             )
             chunk = ChatCompletionStreamResponse(

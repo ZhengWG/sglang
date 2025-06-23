@@ -13,6 +13,8 @@ from sglang.srt.managers.tokenizer_manager import TokenizerManager
 
 logger = logging.getLogger(__name__)
 
+SOFA_TRACE_IN_HEADER = "sofa-traceid"
+SOFA_TRACE_IN_BODY = "trace_id"
 
 # Base class for specific endpoint handlers
 class OpenAIServingBase(ABC):
@@ -30,6 +32,9 @@ class OpenAIServingBase(ABC):
             error_msg = self._validate_request(request)
             if error_msg:
                 return self.create_error_response(error_msg)
+
+            # 写入trace id
+            self.set_trace_id(request, raw_request)
 
             # Convert to internal format
             adapted_request, processed_request = self._convert_to_internal_request(
@@ -147,3 +152,29 @@ class OpenAIServingBase(ABC):
             code=status_code,
         )
         return json.dumps({"error": error.model_dump()})
+
+    def set_trace_id(request: OpenAIServingRequest, raw_request: Request):
+        # 0. 判断是否包含rid属性
+        if not hasattr(request, 'rid'):
+            return
+
+        trace_id = None
+        # 1. 优先取header中的
+        if raw_request and raw_request.headers:
+            trace_id = raw_request.headers.get(SOFA_TRACE_IN_HEADER, None)
+
+        # 2. 否则，再判断payload中的
+        if not trace_id and raw_request:
+            # 获取body中的参数
+            request_json = None
+            try:
+                request_json = await raw_request.json()
+            except Exception as e:
+                pass
+            if request_json:
+                trace_id = request_json.pop(SOFA_TRACE_IN_BODY, None)
+
+        # 3. 合法则写入请求
+        if trace_id:
+            rid = trace_id + '_' + str(uuid.uuid4().hex)[:8]
+            setattr(request, 'rid', rid)
