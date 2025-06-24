@@ -44,6 +44,7 @@ from sglang.srt.two_batch_overlap import TboCudaGraphRunnerPlugin
 from sglang.srt.utils import (
     empty_context,
     get_available_gpu_memory,
+    get_bool_env_var,
     get_device_memory_capacity,
     rank0_log,
     require_attn_tp_gather,
@@ -56,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
+
+ENABLE_DYNAMIC_TORCH_COMPILE = get_bool_env_var("SGLANG_ENABLE_DYNAMIC_TORCH_COMPILE", "false")
 
 # Detect whether the current forward pass is in capture mode
 is_capture_mode = False
@@ -109,7 +112,7 @@ def patch_model(
                 mode=os.environ.get(
                     "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
                 ),
-                dynamic=False,
+                dynamic=ENABLE_DYNAMIC_TORCH_COMPILE,
             )
         else:
             yield model.forward
@@ -229,6 +232,7 @@ class CudaGraphRunner:
         # Batch sizes to capture
         self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(model_runner)
         rank0_log(f"Capture cuda graph bs {self.capture_bs}")
+        rank0_log(f"Capture cuda graph: set dynamic={ENABLE_DYNAMIC_TORCH_COMPILE} in torch.compile()")
         self.capture_forward_mode = ForwardMode.DECODE
         self.capture_hidden_mode = CaptureHiddenMode.NULL
         self.num_tokens_per_bs = 1
