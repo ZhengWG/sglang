@@ -613,6 +613,7 @@ class Scheduler(
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
+                    "dp_rank": self.dp_rank,
                 },
             )
 
