@@ -88,6 +88,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
             bootstrap_port=request.bootstrap_port,
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
+            rid=request.rid,
         )
 
         return adapted_request, request
