@@ -199,6 +199,7 @@ class Scheduler(
         self.server_args = server_args
         self.tp_rank = tp_rank
         self.pp_rank = pp_rank
+        self.dp_rank = dp_rank
         self.tp_size = server_args.tp_size
         self.pp_size = server_args.pp_size
         self.dp_size = server_args.dp_size
@@ -567,7 +568,7 @@ class Scheduler(
                 labels={
                     "model_name": self.server_args.served_model_name,
                     "engine_type": engine_type,
-                    "dp_rank": self.dp_rank,
+                    "dp_rank": self.dp_rank if self.dp_rank is not None else 0,
                 },
             )
 
