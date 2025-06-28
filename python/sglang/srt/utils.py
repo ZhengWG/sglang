@@ -2640,6 +2640,16 @@ def configure_gc_logger():
     gc.callbacks.append(gc_callback)
 
 
+# COPIED FROM DeepGEMM
+def align(x: int, y: int) -> int:
+    return ceil_div(x, y) * y
+
+
+# COPIED FROM DeepGEMM
+def ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
