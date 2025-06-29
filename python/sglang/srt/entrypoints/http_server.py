@@ -358,8 +358,7 @@ async def generate_from_file_request(file: UploadFile, request: Request):
     obj = GenerateReqInput(
         input_embeds=input_embeds,
         sampling_params={
-            "repetition_penalty": 1.2,
-            "temperature": 0.2,
+            "temperature": 0.0,
             "max_new_tokens": 512,
         },
     )
@@ -397,15 +396,6 @@ async def classify_request(obj: EmbeddingReqInput, request: Request):
     except ValueError as e:
         return _create_error_response(e)
 
-
-@app.api_route(
-    "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
-)
-async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
-    """Endpoint for reranking documents based on query relevance."""
-    return await raw_request.app.state.openai_serving_rerank.handle_request(
-        request, raw_request
-    )
 
 @app.post("/tokenize")
 async def v1_tokenization_request(request: TokenizeRequest, raw_request: Request):
@@ -847,6 +837,16 @@ async def vertex_generate(vertex_req: VertexGenerateReqInput, raw_request: Reque
 async def v1_score_request(request: ScoringRequest, raw_request: Request):
     """Endpoint for the decoder-only scoring API. See Engine.score() for detailed documentation."""
     return await raw_request.app.state.openai_serving_score.handle_request(
+        request, raw_request
+    )
+
+
+@app.api_route(
+    "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
+)
+async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
+    """Endpoint for reranking documents based on query relevance."""
+    return await raw_request.app.state.openai_serving_rerank.handle_request(
         request, raw_request
     )
 
