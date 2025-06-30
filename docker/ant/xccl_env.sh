@@ -1,0 +1,26 @@
+[ -z ${NCCL_SOCKET_IFNAME+x} ] && export NCCL_SOCKET_IFNAME=bond0
+[ -z ${NCCL_IB_HCA+x} ] && export NCCL_IB_HCA=mlx5_bond
+[ -z ${NVSHMEM_HCA_PE_MAPPING+x} ] && export NVSHMEM_HCA_PE_MAPPING="mlx5_bond_0:1:2,mlx5_bond_1:1:2,mlx5_bond_2:1:2,mlx5_bond_3:1:2"
+[ -z ${GLOO_SOCKET_IFNAME+x} ] && export GLOO_SOCKET_IFNAME=eth0
+
+[ -z ${NCCL_NET_PLUGIN+x} ] && export NCCL_NET_PLUGIN=''
+[ -z ${NCCL_IB_GID_INDEX+x} ] && export NCCL_IB_GID_INDEX=3
+[ -z ${NCCL_IB_TIMEOUT+x} ] && export NCCL_IB_TIMEOUT=22
+[ -z ${NCCL_IB_RETRY_CNT+x} ] && export NCCL_IB_RETRY_CNT=7
+[ -z ${NCCL_IB_SL+x} ] && export NCCL_IB_SL=5
+[ -z ${NCCL_IB_TC+x} ] && export NCCL_IB_TC=136
+[ -z ${NCCL_DEBUG+x} ] && export NCCL_DEBUG=INFO
+[ -z ${NCCL_SET_THREAD_NAME+x} ] && export NCCL_SET_THREAD_NAME=1
+[ -z ${NCCL_IB_QPS_PER_CONNECTION+x} ] && export NCCL_IB_QPS_PER_CONNECTION=8
+[ -z ${NCCL_SET_THREAD_NAME+x} ] && export NCCL_SET_THREAD_NAME=1
+[ -z ${NCCL_DEBUG_SUBSYS+x} ] && export NCCL_DEBUG_SUBSYS=INIT,TUNING,GRAPH
+[ -z ${NCCL_RUNTIME_CONNECT+x} ] && export NCCL_RUNTIME_CONNECT=0
+
+[ -z ${NVSHMEM_DEBUG+x} ] && export NVSHMEM_DEBUG=INFO
+[ -z ${NVSHMEM_DEBUG_SUBSYS+x} ] && export NVSHMEM_DEBUG_SUBSYS=INIT
+[ -z ${NVSHMEM_IBRC_ROCE_LAG_PORT_SELECTION+x} ] && export NVSHMEM_IBRC_ROCE_LAG_PORT_SELECTION=3
+[ -z ${NVSHMEM_IB_GID_INDEX+x} ] && export NVSHMEM_IB_GID_INDEX=3
+[ -z ${NVSHMEM_IB_TRAFFIC_CLASS+x} ] && export NVSHMEM_IB_TRAFFIC_CLASS=16
+[ -z ${NVSHMEM_IB_SL+x} ] && export NVSHMEM_IB_SL=5
+[ -z ${NVSHMEM_ENABLE_NIC_PE_MAPPING+x} ] && export NVSHMEM_ENABLE_NIC_PE_MAPPING=1
+
