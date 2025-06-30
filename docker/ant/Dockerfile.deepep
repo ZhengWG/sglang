@@ -39,6 +39,7 @@ RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 to
 
 # Mooncake安装
 RUN pip3 uninstall -y mooncake-transfer-engine; curl -L -o ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl 'https://pypi.antfin-inc.com/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=cba85946286e5c8efd06e34676d457a3b953570ba854e36d7f7a9af6f4e7db73' && md5sum ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl && pip3 install --force-reinstall --no-cache-dir ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl
+RUN echo abc
 COPY ./docker/ant/h20-4nic-topo.json /etc/transfer-engine/h20-4nic-topo.json
 
 
