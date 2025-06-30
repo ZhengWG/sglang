@@ -30,6 +30,7 @@ RUN python3 -m pip install --upgrade pip --no-cache-dir
 
 # 安装运行sglang依赖的包
 RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 torchvision==0.22.1
+# 这些包会在安装sglang[all]的时候，作为deps装上正确版本，不需要提前安装
 #RUN pip3 install --no-cache-dir transformers openai py-spy setproctitle
 #RUN pip3 install --no-cache-dir cuda-bindings==12.9.0 cuda-python==12.9.0 uvloop compressed_tensors msgspec einops partial_json_parser pynvml
 #RUN pip3 install --no-cache-dir torchao xgrammar==0.1.19
@@ -60,26 +61,26 @@ ARG SGL_KERNEL_WHL_URL
 ARG SGLANG_WHL_URL
 RUN echo ${SGL_KERNEL_WHL_URL} " "  ${SGLANG_WHL_URL}
 
-# 安装sglang 和依赖
-#COPY . /sgl-workspace/SGLang
 
-#WORKDIR SGLang
-#RUN pip3 install --no-cache-dir -r docs/requirements.txt \
-#    -i http://mirrors.aliyun.com/pypi/simple/ \
-#    --trusted-host mirrors.aliyun.com
-
-#RUN pip3 install --force-reinstall  --no-deps ${SGLANG_WHL_URL}
+# 1. 删除atorch相关组件，atorch, atorch-addon依赖的torch版本不是2.7.1， 安装sglang时会冲突
+# 2. 安装sglang[all]， 安装sglang和依赖包
+# 3. 无论base镜像中是否存在sglang包，强制重新安装sglang包
+# 4. 清理pip cache，减少最终镜像大小
 RUN pip3 uninstall -y atorch atorch-addon && \
     pip3 install --no-cache-dir "sglang[all] @ ${SGLANG_WHL_URL}" && \
     pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[all] @ ${SGLANG_WHL_URL}" && \
     rm -rf /root/.cache/pip
 
-#RUN pip3 install --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
+# 同上， 强制重新安装sgl-kernel
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
 
+# sglang安装时，numpy会升级为2.x， 重新降级为1.26.4
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps numpy==1.26.4
+
 # For EPLB initialization
 COPY ./docker/ant/expert_workload.json /root/expert_workload.json
+
+# 配置环境变量，在gpu机器上启动容器时，无需在命令行中添加
 ENV NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /root/
 
