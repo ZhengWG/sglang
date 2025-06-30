@@ -8,59 +8,89 @@ WORKDIR /sgl-workspace
 
 RUN yum install -y libnl3 libnl3-devel mesa-libGL numactl && yum clean all
 RUN wget "https://gosspublic.alicdn.com/ossutil/v2/2.1.1/ossutil-2.1.1-linux-amd64.zip" && \
-    unzip ossutil-2.1.1-linux-amd64.zip -d /usr/local/ && \
+    unzip -o ossutil-2.1.1-linux-amd64.zip -d /usr/local/ && \
     chmod +x /usr/local/ossutil-2.1.1-linux-amd64/ossutil && \
-    ln -s /usr/local/ossutil-2.1.1-linux-amd64/ossutil /usr/local/bin/ossutil && \
-    rm -vf ossutil-2.1.1-linux-amd64.zip 
+    ln -sf /usr/local/ossutil-2.1.1-linux-amd64/ossutil /usr/local/bin/ossutil && \
+    rm -vf ossutil-2.1.1-linux-amd64.zip
 
 
-COPY ./docker/ant/.xccl_env.sh /root/
-RUN echo -e '\n#初始化XCCL相关网络环境变量\nsource /root/.xccl_env.sh\n' >> /root/.bashrc
+COPY ./docker/ant/.xccl_env.sh /root/.xccl_env.sh
+COPY ./docker/ant/.bashrc /root/.bashrc
+#RUN echo -e '\n#初始化XCCL相关网络环境变量\nsource /root/.xccl_env.sh\n' >> /root/.bashrc
 
 RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistudio%2Fgpu%2Frdma-a100.tgz" && \
     ls -alh rdma-a100.tgz && \
     tar --no-same-owner -xvf rdma-a100.tgz && \
-    rpm -Uvh rdma-a100/nic-libs-mellanox-rdma-5.2-2.x86_64.rpm && \
-    rm -rf rdma-a100 rdma-a100.tgz 
+    rpm -Uvh --force rdma-a100/nic-libs-mellanox-rdma-5.2-2.x86_64.rpm && \
+    rm -rf rdma-a100 rdma-a100.tgz
+# 安装nvshmem3, 不安装，以免deepep出错
+# RUN yum install -y libnvshmem3-cuda-12 libnvshmem3-devel-cuda-12 libnvshmem3-static-cuda-12 && yum clean all
 
-RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install --upgrade pip --no-cache-dir
 
 # 安装运行sglang依赖的包
-RUN pip install transformers openai
-RUN pip install cuda-bindings==12.9.0 cuda-python==12.9.0 uvloop compressed_tensors msgspec einops partial_json_parser pynvml
-RUN pip3 install torchao flashinfer-python xgrammar==0.1.19
+RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 torchvision==0.22.1
+# 这些包会在安装sglang[all]的时候，作为deps装上正确版本，不需要提前安装
+#RUN pip3 install --no-cache-dir transformers openai py-spy setproctitle
+#RUN pip3 install --no-cache-dir cuda-bindings==12.9.0 cuda-python==12.9.0 uvloop compressed_tensors msgspec einops partial_json_parser pynvml
+#RUN pip3 install --no-cache-dir torchao xgrammar==0.1.19
+#RUN pip3 install --no-cache-dir orjson uvicorn fastapi zmq dill python-multipart concurrent_log_handler prometheus_client aiter amdsmi anthropic bert_score bitsandbytes boto3 concurrent_log_handler opencv-python-headless datasets decord gemlite gguf guidance hf_transfer human_eval intel_extension_for_pytorch interegular litellm llguidance modelscope nixl nvtx other outlines outlines_core pandas peft prometheus_client pytest ray redis runai_model_streamer scipy sentence_transformers soundfile timm torch_memory_saver vector_quantize_pytorch vertexai vllm vocos
+#RUN pip3 install --no-cache-dir 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/flashinfer_python-0.2.5%2Bcu126torch2.6-cp38-abi3-linux_x86_64.whl'
 
-# RUN pip3 config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 # Mooncake安装
-RUN pip3 install ant-mooncake-transfer-engine==0.3.0 -i https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/
-# Mooncake 依赖包
+RUN pip3 uninstall -y mooncake-transfer-engine; curl -L -o ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl 'https://pypi.antfin-inc.com/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=cba85946286e5c8efd06e34676d457a3b953570ba854e36d7f7a9af6f4e7db73' && md5sum ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl && pip3 install --force-reinstall --no-cache-dir ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl
+COPY ./docker/ant/h20-4nic-topo.json /etc/transfer-engine/h20-4nic-topo.json
 
 
 # 编译安装FlashMLA
-RUN pip3 install 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl' 
+RUN pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl'
 
-# 安装deepep
-RUN pip install 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-0.0.2+7cad1c0-cp310-cp310-linux_x86_64.whl'
+# 安装deepep https://yuque.antfin.com/xccl/vzhd9o/mii8pkz6qeqwdf2x
+RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-1.1.0+77d3b44-cp310-cp310-linux_x86_64.whl'
 
 # 编译安装deep-gemm
-RUN pip3 install 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
+RUN pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
+
+# kvpool https://aci.alipay.com/project/161500038/pipeline/477954858?tenant_path=alipay&jobId=1380171006
+# 不安装kvpool, kvpool会替换掉 mooncake/engine.so, 且kvpool依赖GLIBC 2.34, 目前没有基础镜像支持
+# RUN pip3 install --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-kvpool/ant_kvpool-0.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl'
+
 
 # 重新安装deep-gemm之后，需要重装下sgl_kernel
 ARG SGL_KERNEL_WHL_URL
 ARG SGLANG_WHL_URL
 RUN echo ${SGL_KERNEL_WHL_URL} " "  ${SGLANG_WHL_URL}
-RUN pip3 install --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
 
 
-# 安装sglang 和依赖
-COPY . /sgl-workspace/SGLang
+# 1. 删除atorch相关组件，atorch, atorch-addon依赖的torch版本不是2.7.1， 安装sglang时会冲突
+# 2. 安装sglang[all]， 安装sglang和依赖包
+# 3. 无论base镜像中是否存在sglang包，强制重新安装sglang包
+# 4. 清理pip cache，减少最终镜像大小
+RUN pip3 uninstall -y atorch atorch-addon && \
+    pip3 install --no-cache-dir "sglang[all] @ ${SGLANG_WHL_URL}" && \
+    pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[all] @ ${SGLANG_WHL_URL}" && \
+    rm -rf /root/.cache/pip
 
-WORKDIR SGLang
-RUN pip3 install -r docs/requirements.txt \
-    -i http://mirrors.aliyun.com/pypi/simple/ \
-    --trusted-host mirrors.aliyun.com 
+# 同上， 强制重新安装sgl-kernel
+RUN pip3 install --no-cache-dir --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
 
-RUN pip3 install --force-reinstall  --no-deps ${SGLANG_WHL_URL}
+# sglang安装时，numpy会升级为2.x， 重新降级为1.26.4
+RUN pip3 install --no-cache-dir --force-reinstall --no-deps numpy==1.26.4
 
+# For EPLB initialization
+COPY ./docker/ant/expert_workload.json /root/expert_workload.json
+
+# 配置环境变量，在gpu机器上启动容器时，无需在命令行中添加
+ENV NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /root/
+
+# 安装x-runtime
+RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
+    cd /home/admin/runtime/ && \
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime/1.1.5/serving_runtime-1.1.5.tar -O serving_runtime-1.1.5.tar && \
+    tar xf serving_runtime-1.1.5.tar && \
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime_llm/1.1.2/serving_runtime_llm-1.1.2.tar -O serving_runtime_llm-1.1.2.tar && \
+    tar xf serving_runtime_llm-1.1.2.tar
+
+ENV ENGINE_TYPE sglang
 
