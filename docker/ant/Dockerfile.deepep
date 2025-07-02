@@ -68,7 +68,7 @@ RUN echo ${SGL_KERNEL_WHL_URL} " "  ${SGLANG_WHL_URL}
 # 3. 无论base镜像中是否存在sglang包，强制重新安装sglang包
 # 4. 清理pip cache，减少最终镜像大小
 RUN pip3 uninstall -y atorch atorch-addon && \
-    pip3 install --no-cache-dir "sglang[all] @ ${SGLANG_WHL_URL}" && \
+    pip3 install --no-cache-dir "sglang[all] @ ${SGLANG_WHL_URL}" --extra-index-url http://mirrors.cloud.aliyuncs.com/pypi/simple/  --trusted-host mirrors.cloud.aliyuncs.com && \
     pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[all] @ ${SGLANG_WHL_URL}" && \
     rm -rf /root/.cache/pip
 
