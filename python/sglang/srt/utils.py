@@ -1040,7 +1040,7 @@ def point_to_point_pyobj(
     if rank == src:
         if len(data) == 0:
             tensor_size = torch.tensor([0], dtype=torch.long, device=torch.cuda.current_device())
-            dist.isend(tensor_size, dst=dst, group=group)
+            dist.send(tensor_size, dst=dst, group=group)
         else:
             serialized_data = pickle.dumps(data)
             size = len(serialized_data)
@@ -1049,8 +1049,8 @@ def point_to_point_pyobj(
             ).cuda(device=torch.cuda.current_device())  # Move to GPU
             tensor_size = torch.tensor([size], dtype=torch.long, device=torch.cuda.current_device())
 
-            dist.isend(tensor_size, dst=dst, group=group)
-            dist.isend(tensor_data, dst=dst, group=group)
+            dist.send(tensor_size, dst=dst, group=group)
+            dist.send(tensor_data, dst=dst, group=group)
         return data
 
     elif rank == dst:

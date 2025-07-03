@@ -1,7 +1,7 @@
 version: "2.0"
 parameters: #（选填）定义全局变量
-  base_train_image: reg.docker.alibaba-inc.com/aii/aistudio
-  base_train_image_version: 11880160-20250409174319
+  base_train_image: reg.docker.alibaba-inc.com/atorch/runtime-test
+  base_train_image_version: gcc10-cu128-py310-torch260-os8u_x86_64-release-at1.6.1-addon0.0.4
   build_tag: test
   sgl_kernel_whl_url: 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/sgl_kernel-0.1.2.post1-cp39-abi3-linux_x86_64.whl'
   sglang_whl_url: 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/sglang-0.4.5.post3-py3-none-any.whl'

@@ -738,16 +738,6 @@ class BailingMoEForCausalLM(nn.Module):
         # tie_word_embeddings为true，复用tie_word_embeddings，反之是独立的
         if config.tie_word_embeddings:
             self.lm_head = self.model.word_embeddings
-            self.logits_processor = LogitsProcessor(config)
-        elif global_server_args_dict["enable_dp_attention"]:
-            self.lm_head = ReplicatedLinear(
-                config.hidden_size,
-                config.vocab_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=add_prefix("lm_head", prefix),
-            )
-            self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
         else:
             # TODO something wrong with ParallelLMHead with DP attention enabled
             self.lm_head = ParallelLMHead(
@@ -755,8 +745,9 @@ class BailingMoEForCausalLM(nn.Module):
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=add_prefix("lm_head", prefix),
+                use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
             )
-            self.logits_processor = LogitsProcessor(config)
+        self.logits_processor = LogitsProcessor(config)
 
     @property
     def start_layer(self):

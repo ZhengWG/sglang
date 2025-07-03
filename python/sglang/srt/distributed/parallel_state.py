@@ -706,10 +706,10 @@ class GroupCoordinator:
         )
 
         # Send object size
-        torch.distributed.isend(size_tensor, dst=self.ranks[dst], group=self.device_group)
+        torch.distributed.send(size_tensor, dst=self.ranks[dst], group=self.device_group)
 
         # Send object
-        torch.distributed.isend(object_tensor, dst=self.ranks[dst], group=self.device_group)
+        torch.distributed.send(object_tensor, dst=self.ranks[dst], group=self.device_group)
 
         return None
 
@@ -878,12 +878,12 @@ class GroupCoordinator:
 
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
-                torch.distributed.isend(
+                torch.distributed.send(
                     tensor, dst=self.ranks[dst], group=metadata_group
                 )
             else:
                 # use group for GPU tensors
-                torch.distributed.isend(tensor, dst=self.ranks[dst], group=group)
+                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
         return None
 
     def recv_tensor_dict(
@@ -967,7 +967,7 @@ class GroupCoordinator:
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.send(tensor, dst)
         else:
-            torch.distributed.isend(tensor, self.ranks[dst], self.device_group)
+            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
     def recv(
         self, size: torch.Size, dtype: torch.dtype, src: Optional[int] = None
