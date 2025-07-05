@@ -36,6 +36,11 @@ from sglang.srt.distributed import (
     parallel_state,
     tensor_model_parallel_all_reduce,
 )
+
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
+
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.communicator import (
     LayerCommunicator,
@@ -67,23 +72,19 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.managers.expert_distribution import (
-    get_global_expert_distribution_recorder,
-)
-from sglang.srt.managers.expert_location import ModelConfigForExpertLocation
-from sglang.srt.managers.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
     PPProxyTensors,
 )
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import DeepEPMode, add_prefix, make_layers
+from sglang.srt.utils import DeepEPMode, add_prefix, is_cuda, make_layers, is_non_idle_and_non_empty
 
 LoraConfig = None
 logger = logging.getLogger(__name__)
-
+_is_cuda = is_cuda()
 
 class BailingMoEMLP(nn.Module):
     def __init__(
@@ -124,7 +125,7 @@ class BailingMoEMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(
-        self, hidden_states: torch.Tensor, forward_mode: ForwardMode = None
+        self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
     ) -> torch.Tensor:
         if (self.tp_size == 1) and hidden_states.shape[0] == 0:
             return hidden_states
@@ -253,6 +254,15 @@ class BailingMoESparseMoeBlock(nn.Module):
                 if global_server_args_dict["enable_deepep_moe"]
                 else {}
             ),
+            # Additional args for FusedMoE
+            **(
+                dict(
+                    enable_flashinfer_moe=True,
+                    enable_ep_moe=global_server_args_dict["enable_ep_moe"],
+                )
+                if global_server_args_dict["enable_flashinfer_moe"]
+                else {}
+            ),
         )
         # shared expert
         if config.num_shared_experts is not None:
@@ -289,12 +299,12 @@ class BailingMoESparseMoeBlock(nn.Module):
             )
 
     def forward(
-        self, hidden_states: torch.Tensor, forward_mode: Optional[ForwardMode] = None
+        self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
     ) -> torch.Tensor:
         if not global_server_args_dict["enable_deepep_moe"]:
             return self.forward_normal(hidden_states)
         else:
-            return self.forward_deepep(hidden_states, forward_mode)
+            return self.forward_deepep(hidden_states, forward_batch)
 
     def get_moe_weights(self):
         return [
@@ -325,14 +335,11 @@ class BailingMoESparseMoeBlock(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
     def forward_deepep(
-        self, hidden_states: torch.Tensor, forward_mode: ForwardMode
+        self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         shared_output = None
-        if (
-            forward_mode is not None
-            and not forward_mode.is_idle()
-            and hidden_states.shape[0] > 0
-        ):
+        forward_mode = forward_batch.forward_mode
+        if is_non_idle_and_non_empty(forward_mode, hidden_states):
             router_logits = self.gate(hidden_states)
             if self.num_shared_experts > 0:
                 shared_output = self.shared_experts(hidden_states)
@@ -372,7 +379,7 @@ class BailingMoESparseMoeBlock(nn.Module):
                 hidden_states,
                 topk_idx,
                 topk_weights,
-                forward_mode=forward_mode,
+                forward_batch=forward_batch,
             )
 
         final_hidden_states = self.experts(
@@ -384,14 +391,14 @@ class BailingMoESparseMoeBlock(nn.Module):
             masked_m=masked_m,
             expected_m=expected_m,
             num_recv_tokens_per_expert=num_recv_tokens_per_expert,
-            forward_mode=forward_mode,
+            forward_batch=forward_batch,
         )
         if self.ep_size > 1:
             final_hidden_states = self.deepep_dispatcher.combine(
                 final_hidden_states,
                 topk_idx,
                 topk_weights,
-                forward_mode=forward_mode,
+                forward_batch=forward_batch,
             )
 
         final_hidden_states *= self.routed_scaling_factor
@@ -409,6 +416,7 @@ class BailingMoEAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
         prefix: str = "",
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__()
         # hidden_states大小
@@ -492,14 +500,27 @@ class BailingMoEAttention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
+        self.alt_stream = alt_stream
+
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        q_by_head = q.reshape(-1, self.head_dim)
-        q_by_head = self.query_layernorm(q_by_head)
+        # overlap qk norm
+        if self.alt_stream is not None and get_is_capture_mode():
+            current_stream = torch.cuda.current_stream()
+            self.alt_stream.wait_stream(current_stream)
+            q_by_head = q.reshape(-1, self.head_dim)
+            q_by_head = self.query_layernorm(q_by_head)
+            with torch.cuda.stream(self.alt_stream):
+                k_by_head = k.reshape(-1, self.head_dim)
+                k_by_head = self.key_layernorm(k_by_head)
+            current_stream.wait_stream(self.alt_stream)
+        else:
+            q_by_head = q.reshape(-1, self.head_dim)
+            q_by_head = self.query_layernorm(q_by_head)
+            k_by_head = k.reshape(-1, self.head_dim)
+            k_by_head = self.key_layernorm(k_by_head)
         q = q_by_head.view(q.shape)
-        k_by_head = k.reshape(-1, self.head_dim)
-        k_by_head = self.key_layernorm(k_by_head)
         k = k_by_head.view(k.shape)
         return q, k
 
@@ -528,6 +549,7 @@ class BailingMoEBlock(nn.Module):
         layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -540,6 +562,7 @@ class BailingMoEBlock(nn.Module):
             quant_config,
             reduce_results=False,
             prefix=add_prefix("attention", prefix),
+            alt_stream=alt_stream
         )
         self.layer_id = layer_id
         self.attn_tp_size = get_attention_tp_size()
@@ -623,7 +646,7 @@ class BailingMoEBlock(nn.Module):
             forward_batch=forward_batch,
         )
 
-        hidden_states = self.mlp(hidden_states, forward_batch.forward_mode)
+        hidden_states = self.mlp(hidden_states, forward_batch)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states=hidden_states,
@@ -643,6 +666,7 @@ class BailingMoEModel(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        alt_stream = torch.cuda.Stream() if _is_cuda else None
         self.pp_group = get_pp_group()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -668,6 +692,7 @@ class BailingMoEModel(nn.Module):
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
             prefix=add_prefix("layers", prefix),
+            alt_stream=alt_stream,
         )
         if self.pp_group.is_last_rank:
             self.norm = RMSNorm(self.embed_dim, eps=config.rms_norm_eps)
