@@ -38,19 +38,22 @@ RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 to
 #RUN pip3 install --no-cache-dir 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/flashinfer_python-0.2.5%2Bcu126torch2.6-cp38-abi3-linux_x86_64.whl'
 
 # Mooncake安装
-RUN pip3 uninstall -y mooncake-transfer-engine; curl -L -o ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl 'https://pypi.antfin-inc.com/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=cba85946286e5c8efd06e34676d457a3b953570ba854e36d7f7a9af6f4e7db73' && md5sum ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl && pip3 install --force-reinstall --no-cache-dir ./ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl
-RUN echo abc
+ARG TRANSFER_ENGINE_WHL_URL='https://pypi.antfin-inc.com/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=cba85946286e5c8efd06e34676d457a3b953570ba854e36d7f7a9af6f4e7db73'
+RUN pip3 uninstall -y mooncake-transfer-engine; pip3 install --force-reinstall --no-cache-dir ${TRANSFER_ENGINE_WHL_URL}
 COPY ./docker/ant/h20-4nic-topo.json /etc/transfer-engine/h20-4nic-topo.json
 
 
 # 编译安装FlashMLA
-RUN pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl'
+ARG FLASHMLA_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl'
+RUN pip3 install --force-reinstall --no-cache-dir ${FLASHMLA_WHL_URL}
 
 # 安装deepep https://yuque.antfin.com/xccl/vzhd9o/mii8pkz6qeqwdf2x
-RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-1.1.0+77d3b44-cp310-cp310-linux_x86_64.whl'
+ARG DEEPEP_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-1.1.0+77d3b44-cp310-cp310-linux_x86_64.whl'
+RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-cache-dir ${DEEPEP_WHL_URL}
 
 # 编译安装deep-gemm
-RUN pip3 install --force-reinstall --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
+ARG DEEPGEMM_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
+RUN pip3 install --force-reinstall --no-cache-dir ${DEEPGEMM_WHL_URL}
 
 # kvpool https://aci.alipay.com/project/161500038/pipeline/477954858?tenant_path=alipay&jobId=1380171006
 # 不安装kvpool, kvpool会替换掉 mooncake/engine.so, 且kvpool依赖GLIBC 2.34, 目前没有基础镜像支持
