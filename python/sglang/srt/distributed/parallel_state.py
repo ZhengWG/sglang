@@ -42,8 +42,10 @@ from torch.distributed import Backend, ProcessGroup
 from sglang.srt.utils import (
     direct_register_custom_op,
     get_bool_env_var,
+    get_int_env_var,
     is_cuda_alike,
     is_npu,
+    is_shm_available,
     supports_custom_op,
 )
 
@@ -222,6 +224,7 @@ class GroupCoordinator:
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
+        self.local_size = get_int_env_var("LOCAL_SIZE", 0)
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -440,9 +443,12 @@ class GroupCoordinator:
             return input_
 
         if input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-
-            ipex.distributed.all_reduce(input_, group=self.device_group)
+            if is_shm_available(input_.dtype, self.world_size, self.local_size):
+                torch.ops.sgl_kernel.shm_allreduce(
+                    input_, torch.distributed.ReduceOp.SUM
+                )
+            else:
+                torch.distributed.all_reduce(input_, group=self.device_group)
             return input_
 
         if not supports_custom_op():
@@ -523,17 +529,25 @@ class GroupCoordinator:
         self,
         input_: torch.Tensor,
         dim: int = -1,
-        tensor_list: List[torch.Tensor] = None,
+        output_tensor_list: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
-            return input_
+            if output_tensor_list is not None:
+                logger.warning(
+                    "Performing in-place all-gather with a group size of 1. "
+                    "This may be unnecessary; consider bypassing it for better efficiency."
+                )
+                output_tensor_list[0].copy_(input_)
+                return None
+            else:
+                return input_
 
-        if tensor_list is not None:
+        if output_tensor_list is not None:
             # TODO(ch-wan): support other backends
             return torch.distributed.all_gather(
-                tensor_list, input_, group=self.device_group
+                output_tensor_list, input_, group=self.device_group
             )
 
         assert (
@@ -562,6 +576,16 @@ class GroupCoordinator:
         output_tensor = torch.empty(
             output_size, dtype=input_.dtype, device=input_.device
         )
+
+        if input_.is_cpu:
+            if is_shm_available(input_.dtype, self.world_size, self.local_size):
+                return torch.ops.sgl_kernel.shm_allgather(input_, dim)
+            else:
+                torch.distributed.all_gather_into_tensor(
+                    output_tensor, input_, group=self.device_group
+                )
+                return output_tensor
+
         # All-gather.
         self.all_gather_into_tensor(output_tensor, input_)
         # Reshape
@@ -675,17 +699,25 @@ class GroupCoordinator:
         )
 
         # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).cuda(device=torch.cuda.current_device())
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8).cuda(
+            device=torch.cuda.current_device()
+        )
 
         size_tensor = torch.tensor(
-            [object_tensor.numel()], dtype=torch.long, device=torch.cuda.current_device()
+            [object_tensor.numel()],
+            dtype=torch.long,
+            device=torch.cuda.current_device(),
         )
 
         # Send object size
-        torch.distributed.send(size_tensor, dst=self.ranks[dst], group=self.device_group)
+        torch.distributed.send(
+            size_tensor, dst=self.ranks[dst], group=self.device_group
+        )
 
         # Send object
-        torch.distributed.send(object_tensor, dst=self.ranks[dst], group=self.device_group)
+        torch.distributed.send(
+            object_tensor, dst=self.ranks[dst], group=self.device_group
+        )
 
         return None
 
@@ -699,7 +731,9 @@ class GroupCoordinator:
             src != self.rank_in_group
         ), "Invalid source rank. Source rank is the same as the current rank."
 
-        size_tensor = torch.empty(1, dtype=torch.long, device=torch.cuda.current_device())
+        size_tensor = torch.empty(
+            1, dtype=torch.long, device=torch.cuda.current_device()
+        )
 
         # Receive object size
         rank_size = torch.distributed.recv(
