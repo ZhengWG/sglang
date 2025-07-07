@@ -61,6 +61,7 @@ srt = [
     "flashinfer_python==0.2.7.post1",
     "concurrent-log-handler",
     "datasets",
+    "py-spy",
 ]
 
 blackwell = [
