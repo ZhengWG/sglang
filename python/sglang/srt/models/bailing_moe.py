@@ -36,11 +36,9 @@ from sglang.srt.distributed import (
     parallel_state,
     tensor_model_parallel_all_reduce,
 )
-
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
-
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.communicator import (
     LayerCommunicator,
@@ -80,11 +78,18 @@ from sglang.srt.model_executor.forward_batch_info import (
     PPProxyTensors,
 )
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import DeepEPMode, add_prefix, is_cuda, make_layers, is_non_idle_and_non_empty
+from sglang.srt.utils import (
+    DeepEPMode,
+    add_prefix,
+    is_cuda,
+    is_non_idle_and_non_empty,
+    make_layers,
+)
 
 LoraConfig = None
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
+
 
 class BailingMoEMLP(nn.Module):
     def __init__(
@@ -562,7 +567,7 @@ class BailingMoEBlock(nn.Module):
             quant_config,
             reduce_results=False,
             prefix=add_prefix("attention", prefix),
-            alt_stream=alt_stream
+            alt_stream=alt_stream,
         )
         self.layer_id = layer_id
         self.attn_tp_size = get_attention_tp_size()
@@ -687,12 +692,15 @@ class BailingMoEModel(nn.Module):
         self.layers, self.start_layer, self.end_layer = make_layers(
             config.num_hidden_layers,
             lambda idx, prefix: BailingMoEBlock(
-                layer_id=idx, config=config, quant_config=quant_config, prefix=prefix
+                layer_id=idx,
+                config=config,
+                quant_config=quant_config,
+                prefix=prefix,
+                alt_stream=alt_stream,
             ),
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
             prefix=add_prefix("layers", prefix),
-            alt_stream=alt_stream,
         )
         if self.pp_group.is_last_rank:
             self.norm = RMSNorm(self.embed_dim, eps=config.rms_norm_eps)
@@ -906,7 +914,7 @@ class BailingMoEForCausalLM(nn.Module):
         return ModelConfigForExpertLocation(
             num_layers=config.num_hidden_layers,
             num_logical_experts=config.num_experts,
-            num_groups= None if num_groups == 0 else num_groups,
+            num_groups=None if num_groups == 0 else num_groups,
         )
 
 
