@@ -1290,7 +1290,10 @@ class Scheduler(
         kv_metrics.gpu_prefix_cache_hit_rate = self.stats.cache_hit_rate
         kv_metrics.data_parallel_rank = self.dp_rank if self.dp_rank is not None else 0
 
-        if not self.send_metrics_from_scheduler.closed:
+        if (
+            self.send_metrics_from_scheduler
+            and not self.send_metrics_from_scheduler.closed
+        ):
             self.send_metrics_from_scheduler.send_pyobj(kv_metrics)
 
     def log_prefill_stats(
