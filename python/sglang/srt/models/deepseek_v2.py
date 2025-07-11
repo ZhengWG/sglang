@@ -16,6 +16,7 @@
 # https://github.com/vllm-project/vllm/blob/fb6af8bc086328ca6659e72d11ffd4309ce4de22/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2 model."""
 
+import concurrent.futures
 import logging
 import os
 from enum import IntEnum, auto
@@ -2385,6 +2386,8 @@ class DeepseekV2ForCausalLM(nn.Module):
             assert self.num_fused_shared_experts == 1
             log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+        futures = []
         params_dict = dict(self.named_parameters())
         weight_names = []
         for name, loaded_weight in weights:
@@ -2445,7 +2448,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                futures.append(
+                    executor.submit(weight_loader, param, loaded_weight, shard_id)
+                )
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -2455,12 +2460,15 @@ class DeepseekV2ForCausalLM(nn.Module):
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
+                    futures.append(
+                        executor.submit(
+                            weight_loader,
+                            param,
+                            loaded_weight,
+                            name,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
                     )
                     break
                 else:
@@ -2510,7 +2518,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                             weight_loader = getattr(
                                 param, "weight_loader", default_weight_loader
                             )
-                            weight_loader(param, fused_weight)
+                            futures.append(
+                                executor.submit(weight_loader, param, fused_weight)
+                            )
                             cached_a_proj.pop(q_a_proj_name)
                             cached_a_proj.pop(kv_a_proj_name)
                     else:
@@ -2532,7 +2542,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
-                        weight_loader(param, loaded_weight)
+                        futures.append(
+                            executor.submit(weight_loader, param, loaded_weight)
+                        )
+
+        concurrent.futures.wait(futures)
+        executor.shutdown()
 
         self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
 

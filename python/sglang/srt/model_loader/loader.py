@@ -429,9 +429,19 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config,
                 )
 
-            self.load_weights_and_postprocess(
-                model, self._get_all_weights(model_config, model), target_device
-            )
+            if get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT"):
+                # copy from DummyModelLoader
+                for _, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    if quant_method is not None:
+                        quant_method.process_weights_after_loading(module)
+
+                if hasattr(model, "post_load_weights"):
+                    model.post_load_weights()
+            else:
+                self.load_weights_and_postprocess(
+                    model, self._get_all_weights(model_config, model), target_device
+                )
 
         return model.eval()
 

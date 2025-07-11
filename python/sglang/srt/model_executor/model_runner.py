@@ -14,6 +14,7 @@
 """ModelRunner runs the forward passes of the models."""
 
 import datetime
+import concurrent.futures
 import gc
 import inspect
 import json
@@ -130,6 +131,9 @@ SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
 
 # Detect stragger ranks in model loading
 UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
+
+# Whether to enable post model weight loading
+POST_LOAD_MODEL_WEIGHT = get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT")
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +279,22 @@ class ModelRunner:
         self.sampler = Sampler()
         self.load_model()
 
+        if POST_LOAD_MODEL_WEIGHT:
+            load_config = LoadConfig(load_format=self.server_args.load_format)
+
+            # Only support DefaultModelLoader for now
+            loader = get_model_loader(load_config)
+            assert isinstance(loader, DefaultModelLoader)
+
+            def get_weights(config):
+                iter = loader._get_weights_iterator(
+                    DefaultModelLoader.Source.init_new(config, self.model)
+                )
+                return [weight for weight in iter]
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(get_weights, self.model_config)
+
         self.start_layer = getattr(self.model, "start_layer", 0)
         self.end_layer = getattr(
             self.model, "end_layer", self.model_config.num_hidden_layers
@@ -339,6 +359,24 @@ class ModelRunner:
                 eagle_aux_hidden_state_layer_ids = None
 
             self.model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
+
+        if POST_LOAD_MODEL_WEIGHT:
+            weights = future.result()
+            executor.shutdown()
+
+            tic = time.perf_counter()
+            logger.info(f"Update weight begin. This can take up to several seconds.")
+
+            success, message = self.update_weights_from_disk(
+                model_path=server_args.model_path,
+                load_format=server_args.load_format,
+                weights=weights,
+            )
+            assert success, message
+
+            logger.info(
+                f"Update weight end. Time elapsed: {time.perf_counter() - tic:.2f} s. "
+            )
 
     def model_specific_adjustment(self):
         server_args = self.server_args
@@ -688,7 +726,7 @@ class ModelRunner:
         )
 
     def update_weights_from_disk(
-        self, model_path: str, load_format: str
+        self, model_path: str, load_format: str, weights=None
     ) -> tuple[bool, str]:
         """Update engine weights in-place from the disk."""
         logger.info(
@@ -717,13 +755,17 @@ class ModelRunner:
             return model
 
         with set_default_torch_dtype(self.model_config.dtype):
+            if weights is None:
+                try:
+                    iter = get_weight_iter(self.model_config)
+                except Exception as e:
+                    message = f"Failed to get weights iterator: {e}."
+                    return False, message
             try:
-                iter = get_weight_iter(self.model_config)
-            except Exception as e:
-                message = f"Failed to get weights iterator: {e}."
-                return False, message
-            try:
-                model = model_load_weights(self.model, iter)
+                if weights is None:
+                    model = model_load_weights(self.model, iter)
+                else:
+                    model = model_load_weights(self.model, weights)
             except Exception as e:
                 message = (
                     f"Failed to update weights: {e}.\nRolling back to original weights."
