@@ -55,9 +55,10 @@ RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-c
 ARG DEEPGEMM_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
 RUN pip3 install --force-reinstall --no-cache-dir ${DEEPGEMM_WHL_URL}
 
+ARG KVPOOL_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-kvpool/ant_kvpool-0.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl'
 # kvpool https://aci.alipay.com/project/161500038/pipeline/477954858?tenant_path=alipay&jobId=1380171006
 # 不安装kvpool, kvpool会替换掉 mooncake/engine.so, 且kvpool依赖GLIBC 2.34, 目前没有基础镜像支持
-# RUN pip3 install --no-cache-dir 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-kvpool/ant_kvpool-0.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl'
+RUN pip3 uninstall -y ant_kvpool kvpool; pip3 install --no-cache-dir ${KVPOOL_WHL_URL}
 
 
 # 重新安装deep-gemm之后，需要重装下sgl_kernel
