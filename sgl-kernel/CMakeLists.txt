@@ -34,6 +34,13 @@ elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "11.8")
     message("CUDA_VERSION ${CUDA_VERSION} >= 11.8")
 endif()
 
+option(SGL_KERNEL_ENABLE_SM100A           "Enable SM100A"           OFF)
+option(SGL_KERNEL_ENABLE_SM90A            "Enable SM90A"            OFF)
+option(SGL_KERNEL_ENABLE_BF16             "Enable BF16"             ON)
+option(SGL_KERNEL_ENABLE_FP8              "Enable FP8"              ON)
+option(SGL_KERNEL_ENABLE_FP4              "Enable FP4"              OFF)
+option(SGL_KERNEL_ENABLE_FA3              "Enable FA3"              OFF)
+
 # Torch
 find_package(Torch REQUIRED)
 # clean Torch Flag
@@ -51,7 +58,7 @@ FetchContent_Declare(
 FetchContent_Populate(repo-cutlass)
 
 # DeepGEMM
-if("${CUDA_VERSION}" VERSION_EQUAL "12.8")
+if("${CUDA_VERSION}" VERSION_EQUAL "12.8" AND SGL_KERNEL_ENABLE_SM100A)
   set(DeepGEMM_REPO "https://github.com/sgl-project/DeepGEMM")
   set(DeepGEMM_TAG "blackwell")
 else()
@@ -145,13 +152,6 @@ set(SGL_KERNEL_CUDA_FLAGS
     # "--ptxas-options=-v"
     # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
 )
-
-option(SGL_KERNEL_ENABLE_SM100A           "Enable SM100A"           OFF)
-option(SGL_KERNEL_ENABLE_SM90A            "Enable SM90A"            OFF)
-option(SGL_KERNEL_ENABLE_BF16             "Enable BF16"             ON)
-option(SGL_KERNEL_ENABLE_FP8              "Enable FP8"              ON)
-option(SGL_KERNEL_ENABLE_FP4              "Enable FP4"              OFF)
-option(SGL_KERNEL_ENABLE_FA3              "Enable FA3"              OFF)
 
 if (ENABLE_BELOW_SM90)
     list(APPEND SGL_KERNEL_CUDA_FLAGS
