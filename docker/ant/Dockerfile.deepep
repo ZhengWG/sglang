@@ -37,9 +37,9 @@ RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 to
 #RUN pip3 install --no-cache-dir orjson uvicorn fastapi zmq dill python-multipart concurrent_log_handler prometheus_client aiter amdsmi anthropic bert_score bitsandbytes boto3 concurrent_log_handler opencv-python-headless datasets decord gemlite gguf guidance hf_transfer human_eval intel_extension_for_pytorch interegular litellm llguidance modelscope nixl nvtx other outlines outlines_core pandas peft prometheus_client pytest ray redis runai_model_streamer scipy sentence_transformers soundfile timm torch_memory_saver vector_quantize_pytorch vertexai vllm vocos
 #RUN pip3 install --no-cache-dir 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/flashinfer_python-0.2.5%2Bcu126torch2.6-cp38-abi3-linux_x86_64.whl'
 
-# 编译安装deep-gemm
-ARG DEEPGEMM_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
-RUN pip3 install --force-reinstall --no-cache-dir ${DEEPGEMM_WHL_URL}
+# 编译安装deep-gemm, 不再需要安装deepgemm， sgl-kernel whl包中已经包含了
+# ARG DEEPGEMM_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
+# RUN pip3 install --force-reinstall --no-cache-dir ${DEEPGEMM_WHL_URL}
 
 # 重新安装deep-gemm之后，需要重装下sgl_kernel
 ARG SGL_KERNEL_WHL_URL
