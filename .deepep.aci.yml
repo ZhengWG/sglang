@@ -5,7 +5,7 @@ parameters: #（选填）定义全局变量
   build_tag: test
   sgl_kernel_whl_url: 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/sgl_kernel-0.1.2.post1-cp39-abi3-linux_x86_64.whl'
   sglang_whl_url: 'http://antsys-sigmatest.cn-heyuan-alipay-office.oss-alipay.aliyuncs.com/tmp/sglang/sglang-0.4.5.post3-py3-none-any.whl'
-  transfer_engine_whl_url: 'https://pypi.antfin-inc.com/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.1rc3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=cba85946286e5c8efd06e34676d457a3b953570ba854e36d7f7a9af6f4e7db73'
+  transfer_engine_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.4.post2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=519e4bb382be5a750c87ef93af66aa46606500f6832f946800d52b0786cf50d1'
   kvpool_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-kvpool/ant_kvpool-0.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl'
   flashmla_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl'
   deepep_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-1.1.0+77d3b44-cp310-cp310-linux_x86_64.whl'
