@@ -514,7 +514,7 @@ class ModelRunner:
             server_args.disable_radix_cache = True
 
     def init_torch_distributed(self):
-        logger.info("Init torch distributed begin.")
+        logger.info("[SpanLogs] Init torch distributed begin.")
 
         try:
             torch.get_device_module(self.device).set_device(self.gpu_id)
@@ -607,14 +607,14 @@ class ModelRunner:
                     )
 
         logger.info(
-            f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
+            f"[SpanLogs] Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
         )
         return min_per_gpu_memory
 
     def load_model(self):
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
-            f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            f"[SpanLogs] Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
         # This can reduce thread conflicts and speed up weight loading.
@@ -693,7 +693,7 @@ class ModelRunner:
         after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         self.weight_load_mem_usage = before_avail_memory - after_avail_memory
         logger.info(
-            f"Load weight end. "
+            f"[SpanLogs] Load weight end. "
             f"type={type(self.model).__name__}, "
             f"dtype={self.dtype}, "
             f"avail mem={after_avail_memory:.2f} GB, "
@@ -1410,13 +1410,13 @@ class ModelRunner:
         tic = time.perf_counter()
         before_mem = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
-            f"Capture cuda graph begin. This can take up to several minutes. avail mem={before_mem:.2f} GB"
+            f"[SpanLogs] Capture cuda graph begin. This can take up to several minutes. avail mem={before_mem:.2f} GB"
         )
         self.cuda_graph_runner = CudaGraphRunner(self)
         after_mem = get_available_gpu_memory(self.device, self.gpu_id)
         self.cuda_graph_mem_usage = before_mem - after_mem
         logger.info(
-            f"Capture cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. "
+            f"[SpanLogs] Capture cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. "
             f"mem usage={self.cuda_graph_mem_usage:.2f} GB. avail mem={after_mem:.2f} GB."
         )
 

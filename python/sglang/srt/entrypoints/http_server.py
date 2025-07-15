@@ -1086,7 +1086,7 @@ def _wait_and_warmup(
         ):
             return
 
-    logger.info("The server is fired up and ready to roll!")
+    logger.info("[SpanLogs] The server is fired up and ready to roll!")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

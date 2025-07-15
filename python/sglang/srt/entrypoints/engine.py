@@ -692,7 +692,7 @@ def _launch_subprocesses(
     # Allocate ports for inter-process communications
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
-        logger.info(f"{server_args=}")
+        logger.info(f"[SpanLogs] {server_args=}")
 
     # If using model from www.modelscope.cn, first download the model.
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
