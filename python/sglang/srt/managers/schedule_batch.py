@@ -778,11 +778,10 @@ class Req:
             for mm_item in self.multimodal_inputs.mm_items:
                 if mm_item is None:
                     continue
-                # TODO(yudian.zy): 暂时删除了图像类的，后续要加入语音视频等
-                pixel_values = getattr(mm_item, "pixel_values", None)
+                pixel_values = getattr(mm_item, "feature", None)
                 if not isinstance(pixel_values, torch.Tensor):
                     continue
-                del mm_item.pixel_values
+                del mm_item.feature
             del self.multimodal_inputs.mm_items
         self.multimodal_inputs = None
 
