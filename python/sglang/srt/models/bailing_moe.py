@@ -682,7 +682,7 @@ class BailingMoEModel(nn.Module):
                 self.embed_dim,
                 quant_config=quant_config,
                 prefix=add_prefix("word_embeddings", prefix),
-                enable_tp=not global_server_args_dict["enable_dp_attention"],
+                use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
             )
         else:
             self.word_embeddings = PPMissingLayer()

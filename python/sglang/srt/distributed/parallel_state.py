@@ -1119,7 +1119,16 @@ def graph_capture():
     with get_tp_group().graph_capture() as context, get_pp_group().graph_capture(
         context
     ):
-        yield context
+        from sglang.srt.layers.dp_attention import (
+            attention_tp_all_reduce_enabled,
+            get_attention_tp_group,
+        )
+
+        if attention_tp_all_reduce_enabled():
+            with get_attention_tp_group().graph_capture(context):
+                yield context
+        else:
+            yield context
 
 
 logger = logging.getLogger(__name__)
