@@ -28,6 +28,7 @@ _ATTN_DP_RANK = None
 _ATTN_DP_SIZE = None
 _LOCAL_ATTN_DP_SIZE = None
 _LOCAL_ATTN_DP_RANK = None
+_ATTN_TP_ENABLE_ALL_REDUCE = None
 
 
 def compute_dp_attention_world_info(enable_dp_attention, tp_rank, tp_size, dp_size):
@@ -68,6 +69,7 @@ def initialize_dp_attention(
 ):
     global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK, _ATTN_DP_SIZE
     global _LOCAL_ATTN_DP_SIZE, _LOCAL_ATTN_DP_RANK
+    global _ATTN_TP_ENABLE_ALL_REDUCE
 
     from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
 
@@ -89,6 +91,7 @@ def initialize_dp_attention(
         _LOCAL_ATTN_DP_SIZE = 1
 
     tp_group = get_tp_group()
+    _ATTN_TP_ENABLE_ALL_REDUCE = enable_dp_attention and _ATTN_TP_SIZE != 1
     _ATTN_TP_GROUP = GroupCoordinator(
         [
             list(range(head, head + _ATTN_TP_SIZE))
@@ -98,7 +101,7 @@ def initialize_dp_attention(
         torch.distributed.get_backend(tp_group.device_group),
         use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
         use_pymscclpp=False,
-        use_custom_allreduce=False,
+        use_custom_allreduce=_ATTN_TP_ENABLE_ALL_REDUCE,
         use_hpu_communicator=False,
         use_xpu_communicator=False,
         use_npu_communicator=False,
@@ -139,6 +142,11 @@ def get_local_attention_dp_rank():
 def get_local_attention_dp_size():
     assert _LOCAL_ATTN_DP_SIZE is not None, "dp attention not initialized!"
     return _LOCAL_ATTN_DP_SIZE
+
+
+def attention_tp_all_reduce_enabled():
+    assert _ATTN_TP_ENABLE_ALL_REDUCE is not None, "dp attention not initialized!"
+    return _ATTN_TP_ENABLE_ALL_REDUCE
 
 
 @contextmanager

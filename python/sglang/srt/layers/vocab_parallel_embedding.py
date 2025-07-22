@@ -11,10 +11,15 @@ from sglang.srt.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.layers.amx_utils import PackWeightMethod
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_group,
+    get_attention_tp_rank,
+    get_attention_tp_size,
+)
 from sglang.srt.layers.parameter import BasevLLMParameter
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
@@ -237,9 +242,11 @@ class VocabParallelEmbedding(torch.nn.Module):
             if use_attn_tp_group:
                 tp_rank = get_attention_tp_rank()
                 self.tp_size = get_attention_tp_size()
+                self.tp_group = get_attention_tp_group()
             else:
                 tp_rank = get_tensor_model_parallel_rank()
                 self.tp_size = get_tensor_model_parallel_world_size()
+                self.tp_group = get_tp_group()
         else:
             assert use_attn_tp_group is False
             tp_rank = 0
@@ -501,10 +508,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Get the embeddings.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
         # Mask the output embedding.
-        if self.tp_size > 1:
+        if self.tp_size > 1 and output_parallel.shape[0] != 0:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
             # Reduce across all the model parallel GPUs.
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            output = self.tp_group.all_reduce(output_parallel)
         else:
             output = output_parallel
         return output
