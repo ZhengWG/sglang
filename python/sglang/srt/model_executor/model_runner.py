@@ -280,7 +280,10 @@ class ModelRunner:
         self.load_model()
 
         if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
-            load_config = LoadConfig(load_format=self.server_args.load_format)
+            load_config = LoadConfig(
+                load_format=self.server_args.load_format,
+                model_loader_extra_config=self.server_args.model_loader_extra_config,
+            )
 
             # Only support DefaultModelLoader for now
             loader = get_model_loader(load_config)

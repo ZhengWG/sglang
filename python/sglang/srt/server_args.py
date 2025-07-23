@@ -48,7 +48,7 @@ class ServerArgs:
     skip_tokenizer_init: bool = False
     skip_server_warmup: bool = False
     load_format: str = "auto"
-    model_loader_extra_config: str = "{}"
+    model_loader_extra_config: str = '{"enable_multithread_load": true}'
     trust_remote_code: bool = False
     dtype: str = "auto"
     kv_cache_dtype: str = "auto"
