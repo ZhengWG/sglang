@@ -279,7 +279,7 @@ class ModelRunner:
         self.sampler = Sampler()
         self.load_model()
 
-        if POST_LOAD_MODEL_WEIGHT:
+        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
             load_config = LoadConfig(load_format=self.server_args.load_format)
 
             # Only support DefaultModelLoader for now
@@ -360,7 +360,7 @@ class ModelRunner:
 
             self.model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
 
-        if POST_LOAD_MODEL_WEIGHT:
+        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
             weights = future.result()
             executor.shutdown()
 

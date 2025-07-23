@@ -142,6 +142,7 @@ class ModelConfig:
             and is_multimodal_chunked_prefill_supported(self.hf_config.architectures)
         )
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
+        self.is_post_loading_model = is_post_loading_model(self.hf_config.architectures)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
         # Derive context length
@@ -642,6 +643,20 @@ def is_multimodal_chunked_prefill_supported(model_architectures: List[str]):
         return False
     else:
         return True
+
+
+def is_post_loading_model(model_architectures: List[str]):
+    """Check if model supports post loading."""
+    supported = [
+        "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
+    ]
+    if any(arch in supported for arch in model_architectures):
+        return True
+    else:
+        return False
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:

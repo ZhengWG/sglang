@@ -429,7 +429,10 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config,
                 )
 
-            if get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT"):
+            if (
+                get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT")
+                or model_config.is_post_loading_model
+            ):
                 # copy from DummyModelLoader
                 for _, module in model.named_modules():
                     quant_method = getattr(module, "quant_method", None)
