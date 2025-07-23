@@ -1,5 +1,6 @@
 # Adapted from qwen2.py
 
+import concurrent.futures
 import logging
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -385,6 +386,8 @@ class Qwen3ForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+        futures = []
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "Embedding" in self.config.name_or_path:
@@ -428,7 +431,9 @@ class Qwen3ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                futures.append(
+                    executor.submit(weight_loader, param, loaded_weight, shard_id)
+                )
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -440,9 +445,14 @@ class Qwen3ForCausalLM(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, loaded_weight)
+                    futures.append(
+                        executor.submit(weight_loader, param, loaded_weight)
+                    )
                 else:
                     logger.warning(f"Parameter {name} not found in params_dict")
+
+        concurrent.futures.wait(futures)
+        executor.shutdown()
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
