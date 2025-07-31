@@ -30,7 +30,6 @@ from sglang.srt.mem_cache.mooncake_store.mooncake_store import (
     MooncakeStore,
     get_hash_str_mooncake,
 )
-from sglang.srt.mem_cache.storage.hf3fs.storage_hf3fs import HiCacheHF3FS
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +270,9 @@ class HiCacheController:
                 self.storage_backend.register_buffer(self.mem_pool_host.kv_buffer)
             elif storage_backend == "hf3fs":
                 from sglang.srt.distributed import get_tensor_model_parallel_rank
+                from sglang.srt.mem_cache.storage.hf3fs.storage_hf3fs import (
+                    HiCacheHF3FS,
+                )
 
                 rank = get_tensor_model_parallel_rank()
                 bytes_per_page = (
