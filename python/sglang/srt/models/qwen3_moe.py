@@ -17,6 +17,7 @@
 
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
+import concurrent.futures
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -767,6 +768,8 @@ class Qwen3MoeForCausalLM(nn.Module):
             num_experts=self.config.num_experts,
         )
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+        futures = []
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             layer_id = get_layer_id(name)
@@ -803,7 +806,9 @@ class Qwen3MoeForCausalLM(nn.Module):
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                futures.append(
+                    executor.submit(weight_loader, param, loaded_weight, shard_id)
+                )
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -813,12 +818,15 @@ class Qwen3MoeForCausalLM(nn.Module):
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
+                    futures.append(
+                        executor.submit(
+                            weight_loader,
+                            param,
+                            loaded_weight,
+                            name,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
                     )
                     break
                 else:
@@ -833,9 +841,14 @@ class Qwen3MoeForCausalLM(nn.Module):
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
-                        weight_loader(param, loaded_weight)
+                        futures.append(
+                            executor.submit(weight_loader, param, loaded_weight)
+                        )
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+        concurrent.futures.wait(futures)
+        executor.shutdown()
 
         # TODO mimic deepseek
         self.routed_experts_weights_of_layer = {

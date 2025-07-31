@@ -72,8 +72,6 @@ from sglang.srt.utils import (
 
 _is_npu = is_npu()
 
-ENABLE_WEIGHTS_PREFETCH = get_bool_env_var("SGLANG_ENABLE_WEIGHTS_PREFETCH", "true")
-
 @contextmanager
 def device_loading_context(module: torch.nn.Module, target_device: torch.device):
     if target_device.type == "cpu":
@@ -384,7 +382,7 @@ class DefaultModelLoader(BaseModelLoader):
                     disable_mmap=weight_loader_disable_mmap,
                 )
             else:
-                if ENABLE_WEIGHTS_PREFETCH or self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
                     prefetch_weight_files(hf_weights_files)
                 weights_iterator = safetensors_weights_iterator(
                     hf_weights_files, disable_mmap=weight_loader_disable_mmap
@@ -399,7 +397,7 @@ class DefaultModelLoader(BaseModelLoader):
                     ),
                 )
             else:
-                if ENABLE_WEIGHTS_PREFETCH or self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
                     prefetch_weight_files(hf_weights_files)
                 weights_iterator = pt_weights_iterator(hf_weights_files)
 
@@ -440,7 +438,10 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config,
                 )
 
-            if get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT"):
+            if (
+                get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT")
+                or model_config.is_post_loading_model
+            ):
                 # copy from DummyModelLoader
                 for _, module in model.named_modules():
                     quant_method = getattr(module, "quant_method", None)

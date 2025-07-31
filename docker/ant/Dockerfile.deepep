@@ -89,12 +89,17 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /root/
 
 # 安装x-runtime
+ARG RUNTIME_VERSION
+ARG RUNTIME_LLM_VERSION
 RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
     cd /home/admin/runtime/ && \
-    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime/1.1.5/serving_runtime-1.1.5.tar -O serving_runtime-1.1.5.tar && \
-    tar xf serving_runtime-1.1.5.tar && \
-    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime_llm/1.1.2/serving_runtime_llm-1.1.2.tar -O serving_runtime_llm-1.1.2.tar && \
-    tar xf serving_runtime_llm-1.1.2.tar
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime/${RUNTIME_VERSION}/serving_runtime-${RUNTIME_VERSION}.tar -O serving_runtime-${RUNTIME_VERSION}.tar && \
+    tar xf serving_runtime-${RUNTIME_VERSION}.tar && \
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime_llm/${RUNTIME_LLM_VERSION}/serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar -O serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar && \
+    tar xf serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar
+
+RUN yum install -y gdb && \
+    pip install pystack-debugger
 
 ENV ENGINE_TYPE sglang
 

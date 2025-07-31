@@ -51,7 +51,7 @@ class ServerArgs:
     tokenizer_mode: str = "auto"
     skip_tokenizer_init: bool = False
     load_format: str = "auto"
-    model_loader_extra_config: str = "{}"
+    model_loader_extra_config: str = '{"enable_multithread_load": true}'
     trust_remote_code: bool = False
     context_length: Optional[int] = None
     is_embedding: bool = False
@@ -508,7 +508,7 @@ class ServerArgs:
                 )
 
             model_arch = self.get_hf_config().architectures[0]
-            if model_arch in ["DeepseekV3ForCausalLM", "Glm4MoeForCausalLM"]:
+            if model_arch in ["DeepseekV3ForCausalLM", "Glm4MoeForCausalLM", "BailingMoeForCausalLM"]:
                 # Auto set draft_model_path DeepSeek-V3/R1
                 if self.speculative_draft_model_path is None:
                     self.speculative_draft_model_path = self.model_path
@@ -2131,7 +2131,7 @@ def auto_choose_speculative_params(self: ServerArgs):
     if arch in ["LlamaForCausalLM"]:
         # The default value for llama
         return (5, 4, 8)
-    elif arch in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"]:
+    elif arch in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM", "BailingMoeForCausalLM"]:
         # The default value for deepseek
         return (3, 1, 4)
     elif arch in ["Grok1ForCausalLM", "Grok1VForCausalLM"]:

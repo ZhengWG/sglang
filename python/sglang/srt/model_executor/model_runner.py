@@ -293,8 +293,11 @@ class ModelRunner:
             if architectures and not any("Llama4" in arch for arch in architectures):
                 self.is_hybrid = self.model_config.is_hybrid = True
 
-        if POST_LOAD_MODEL_WEIGHT:
-            load_config = LoadConfig(load_format=self.server_args.load_format)
+        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
+            load_config = LoadConfig(
+                load_format=self.server_args.load_format,
+                model_loader_extra_config=self.server_args.model_loader_extra_config,
+            )
 
             # Only support DefaultModelLoader for now
             loader = get_model_loader(load_config)
@@ -380,7 +383,7 @@ class ModelRunner:
 
             self.model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
 
-        if POST_LOAD_MODEL_WEIGHT:
+        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
             weights = future.result()
             executor.shutdown()
 
