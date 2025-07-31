@@ -41,6 +41,7 @@ from sglang.srt.configs import (
     ExaoneConfig,
     KimiVLConfig,
     MultiModalityConfig,
+    Step3VLConfig,
     GLMConfig,
 )
 from sglang.srt.configs.internvl import InternVLChatConfig
@@ -55,6 +56,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     MultiModalityConfig.model_type: MultiModalityConfig,
     KimiVLConfig.model_type: KimiVLConfig,
     InternVLChatConfig.model_type: InternVLChatConfig,
+    Step3VLConfig.model_type: Step3VLConfig,
     GLMConfig.model_type: GLMConfig,
 }
 
