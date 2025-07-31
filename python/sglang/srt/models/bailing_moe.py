@@ -790,6 +790,21 @@ class BailingMoEForCausalLM(nn.Module):
     def end_layer(self):
         return self.model.end_layer
 
+    def get_embed_and_head(self):
+        """ Used by the eagle_worker.
+        """
+        return self.model.word_embeddings.weight, self.lm_head.weight
+
+    def set_embed_and_head(self, embed, head):
+        """ Used by the eagle_worker.
+        """
+        del self.model.word_embeddings.weight
+        del self.lm_head.weight
+        self.model.word_embeddings.weight = embed
+        self.lm_head.weight = head
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
     @torch.no_grad()
     def forward(
         self,
@@ -813,13 +828,34 @@ class BailingMoEForCausalLM(nn.Module):
         else:
             return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
+        if is_nextn:
+            if hasattr(self.config, "num_nextn_predict_layers"):
+                num_nextn_layers = self.config.num_nextn_predict_layers
+                assert num_nextn_layers == 1, "Only 1 nextn layer is supported"
+                # compatible with old design
+                nextn_layer_id = (
+                    0
+                    if self.config.num_hidden_layers == 1
+                    else self.config.num_hidden_layers
+                )
+            else:
+                raise ValueError("num_nextn_predict_layers is not in the config")
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        if is_nextn:
+            nextn_layer_prefix = f"model.layers.{nextn_layer_id}"
+            nextn_spec_weight_names = [
+                "final_layernorm",
+                "eh_proj",
+                "enorm",
+                "hnorm",
+            ]
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = get_moe_impl_class().make_expert_params_mapping(
@@ -844,6 +880,25 @@ class BailingMoEForCausalLM(nn.Module):
                 import torch.nn.functional as F
 
                 loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
+
+            if is_nextn:
+                if not name.startswith(nextn_layer_prefix):
+                    continue
+
+                # Use shared head and embed weights from target model
+                if "shared_head.head" in name or "embed_tokens" in name:
+                    continue
+
+                is_decoder = True
+                # For nextn specific weights
+                for weight_name in nextn_spec_weight_names:
+                    if weight_name in name:
+                        name = name.replace(nextn_layer_prefix, "model")
+                        is_decoder = False
+                        break
+                # For decoder layer weights
+                if is_decoder:
+                    name = name.replace(nextn_layer_prefix, "model.decoder")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -901,12 +956,13 @@ class BailingMoEForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
 
-        self.routed_experts_weights_of_layer = {
-            layer_id: layer.mlp.get_moe_weights()
-            for layer_id, layer in enumerate(self.model.layers)
-            if not isinstance(layer, PPMissingLayer)
-            and isinstance(layer.mlp, BailingMoESparseMoeBlock)
-        }
+        if not is_nextn:
+            self.routed_experts_weights_of_layer = {
+                layer_id: layer.mlp.get_moe_weights()
+                for layer_id, layer in enumerate(self.model.layers)
+                if not isinstance(layer, PPMissingLayer)
+                and isinstance(layer.mlp, BailingMoESparseMoeBlock)
+            }
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):

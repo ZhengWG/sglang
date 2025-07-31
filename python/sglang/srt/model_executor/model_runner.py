@@ -1235,7 +1235,11 @@ class ModelRunner:
                         get_attention_tp_size()
                     ),
                     head_dim=self.model_config.head_dim,
-                    layer_num=self.num_effective_layers,
+                    layer_num=(
+                        self.model_config.num_hidden_layers
+                        if not self.is_draft_worker
+                        else self.model_config.hf_config.num_nextn_predict_layers
+                    ),
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
                     start_layer=self.start_layer,

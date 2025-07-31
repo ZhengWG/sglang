@@ -483,7 +483,7 @@ class ServerArgs:
             model_arch = get_model_arch(self)
 
             # Auto set draft_model_path DeepSeek-V3/R1
-            if model_arch == "DeepseekV3ForCausalLM":
+            if model_arch == "DeepseekV3ForCausalLM" or model_arch == "BailingMoeForCausalLM":
                 if self.speculative_draft_model_path is None:
                     self.speculative_draft_model_path = self.model_path
                 else:
@@ -1883,7 +1883,7 @@ def auto_choose_speculative_params(self: ServerArgs):
     if arch in ["LlamaForCausalLM"]:
         # The default value for llama
         return (5, 4, 8)
-    elif arch in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"]:
+    elif arch in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM", "BailingMoeForCausalLM"]:
         # The default value for deepseek
         return (3, 1, 4)
     elif arch in ["Grok1ForCausalLM", "Grok1VForCausalLM"]:
