@@ -11,8 +11,12 @@ from sglang.srt.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    parallel_state,
     get_tp_group,
     tensor_model_parallel_all_reduce,
+)
+from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+    use_symmetric_memory,
 )
 from sglang.srt.layers.amx_utils import PackWeightMethod
 from sglang.srt.layers.dp_attention import (
@@ -471,7 +475,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        with use_symmetric_memory(parallel_state.get_tp_group()) as sm:
+            output_parallel = self.quant_method.embedding(self, masked_input.long())
+            sm.tag(output_parallel)
         # Mask the output embedding.
         if self.tp_size > 1 and output_parallel.shape[0] != 0:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
