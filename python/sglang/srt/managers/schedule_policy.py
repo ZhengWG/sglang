@@ -455,7 +455,6 @@ class PrefillAdder:
         if not self.is_hybrid:
             # Skip this logic for swa. The SWA has different memory management, and
             # this mechanism is underestimating the memory usage.
-            # ? cur_rem_tokens = self.cur_rem_tokens - req.extend_input_len
             cur_rem_tokens = self.cur_rem_tokens - self.ceil_paged_tokens(
                 req.extend_input_len
             )
