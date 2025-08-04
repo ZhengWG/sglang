@@ -6,7 +6,7 @@ use sglang_router_rs::openai_api_types::{
     ChatCompletionRequest, ChatMessage, CompletionRequest, GenerateParameters, GenerateRequest,
     SamplingParams, StringOrArray, UserMessageContent,
 };
-use sglang_router_rs::routers::request_adapter::{RouteableRequest, ToPdRequest};
+use sglang_router_rs::request_adapter::{RouteableRequest, ToPdRequest};
 
 #[test]
 fn test_benchmark_request_creation() {
@@ -50,7 +50,6 @@ fn test_benchmark_request_creation() {
         top_p: Some(1.0),
         n: Some(1),
         stream: false,
-        stream_options: None,
         stop: None,
         presence_penalty: Some(0.0),
         frequency_penalty: Some(0.0),
@@ -76,7 +75,6 @@ fn test_benchmark_request_creation() {
         top_p: Some(1.0),
         n: Some(1),
         stream: false,
-        stream_options: None,
         logprobs: None,
         echo: false,
         stop: None,
@@ -86,7 +84,6 @@ fn test_benchmark_request_creation() {
         logit_bias: None,
         user: None,
         seed: None,
-        other: serde_json::Map::new(),
     };
 
     // Test serialization works
@@ -146,7 +143,6 @@ fn test_benchmark_request_adaptation() {
         top_p: Some(1.0),
         n: Some(1),
         stream: false,
-        stream_options: None,
         stop: None,
         presence_penalty: Some(0.0),
         frequency_penalty: Some(0.0),
@@ -172,7 +168,6 @@ fn test_benchmark_request_adaptation() {
         top_p: Some(1.0),
         n: Some(1),
         stream: false,
-        stream_options: None,
         logprobs: None,
         echo: false,
         stop: None,
@@ -182,7 +177,6 @@ fn test_benchmark_request_adaptation() {
         logit_bias: None,
         user: None,
         seed: None,
-        other: serde_json::Map::new(),
     };
 
     // Test PD adaptation (should not panic)

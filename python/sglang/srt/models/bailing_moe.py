@@ -61,7 +61,7 @@ from sglang.srt.layers.linear import (
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
-from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
@@ -240,24 +240,18 @@ class BailingMoESparseMoeBlock(nn.Module):
                 self.score_function == "sigmoid" and self.correction_bias is not None
             ), "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"
 
-        self.topk = TopK(
-            top_k=self.top_k,
-            renormalize=self.norm_topk_prob,
-            use_grouped_topk=self.use_grouped_topk,
-            num_expert_group=self.num_expert_group,
-            # num_fused_shared_experts=self.num_fused_shared_experts,
-            topk_group=self.topk_group,
-            correction_bias=self.correction_bias,
-            routed_scaling_factor=self.routed_scaling_factor,
-        )
-
         self.experts = get_moe_impl_class()(
             num_experts=self.num_experts,
             top_k=self.top_k,
             layer_id=self.layer_id,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            renormalize=self.norm_topk_prob,
             quant_config=quant_config,
+            use_grouped_topk=self.use_grouped_topk,
+            num_expert_group=self.num_expert_group,
+            topk_group=self.topk_group,
+            correction_bias=self.correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
             **(
@@ -332,8 +326,9 @@ class BailingMoESparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states)
 
-        topk_output = self.topk(hidden_states, router_logits)
-        final_hidden_states = self.experts(hidden_states, topk_output)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
 
         # final_hidden_states *= self.routed_scaling_factor
 
@@ -354,10 +349,15 @@ class BailingMoESparseMoeBlock(nn.Module):
             if self.num_shared_experts > 0:
                 shared_output = self.shared_experts(hidden_states)
 
-            topk_weights, topk_idx, _ = self.topk(
-                hidden_states,
-                router_logits,
-                num_token_non_padded=forward_batch.num_token_non_padded,
+            topk_weights, topk_idx = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=self.use_grouped_topk,
+                renormalize=self.norm_topk_prob,
+                num_expert_group=self.num_expert_group,
+                correction_bias=self.correction_bias,
+                routed_scaling_factor=self.routed_scaling_factor,
                 expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
                     layer_id=self.layer_id,
                 ),

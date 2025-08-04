@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import dataclasses
 import logging
 from dataclasses import replace
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import torch
 
@@ -13,18 +11,14 @@ from sglang.srt.layers.communicator import (
     CommunicateSummableTensorPairFn,
     ScatterMode,
 )
-from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
-from sglang.srt.layers.moe.utils import DeepEPMode
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.managers.schedule_batch import ScheduleBatch, global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.operations import execute_operations, execute_overlapped_operations
 from sglang.srt.operations_strategy import OperationsStrategy
 from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
-from sglang.srt.utils import BumpAllocator, get_bool_env_var
-
-if TYPE_CHECKING:
-    from sglang.srt.layers.moe.token_dispatcher import DispatchOutput
+from sglang.srt.utils import BumpAllocator, DeepEPMode, get_bool_env_var
 
 _tbo_debug = get_bool_env_var("SGLANG_TBO_DEBUG")
 
@@ -311,7 +305,7 @@ class TboDPAttentionPreparer:
                     and not local_batch.forward_mode.is_target_verify()
                 )
                 and enable_deepep_moe
-                and (resolved_deepep_mode == DeepEPMode.LOW_LATENCY)
+                and (resolved_deepep_mode == DeepEPMode.low_latency)
             )
         else:
             self.local_tbo_split_seq_index = 0
@@ -347,18 +341,15 @@ class TboDPAttentionPreparer:
 
     @staticmethod
     def _compute_global_forward_mode(forward_modes):
-        forward_modes_excluding_idle = [
-            x for x in forward_modes if x != ForwardMode.IDLE.value
+        converted_forward_modes = [
+            ForwardMode.DECODE.value if x == ForwardMode.IDLE.value else x
+            for x in forward_modes
         ]
-
-        if not forward_modes_excluding_idle:
-            return ForwardMode.IDLE, False
-
         forward_mode_agree = TboDPAttentionPreparer._is_all_same(
-            forward_modes_excluding_idle
+            converted_forward_modes
         )
         global_forward_mode = (
-            ForwardMode(forward_modes_excluding_idle[0]) if forward_mode_agree else None
+            ForwardMode(converted_forward_modes[0]) if forward_mode_agree else None
         )
         return global_forward_mode, forward_mode_agree
 
@@ -468,7 +459,7 @@ class TboForwardBatchPreparer:
             "extend_prefix_lens_cpu",
             "extend_seq_lens_cpu",
             "extend_logprob_start_lens_cpu",
-            "lora_ids",
+            "lora_paths",
         ]:
             old_value = getattr(batch, key)
             if old_value is None:
@@ -499,7 +490,6 @@ class TboForwardBatchPreparer:
         output_dict["spec_info"] = output_spec_info
         for key in [
             "forward_mode",
-            "is_extend_in_batch",
             "return_logprob",
             "req_to_token_pool",
             "token_to_kv_pool",
@@ -509,7 +499,6 @@ class TboForwardBatchPreparer:
             "capture_hidden_mode",
             "padded_static_len",
             "mrope_positions",  # only used by qwen2-vl, thus not care
-            "split_index",  # for split prefill
         ]:
             output_dict[key] = getattr(batch, key)
         if not batch.forward_mode.is_target_verify():
@@ -551,7 +540,6 @@ class TboForwardBatchPreparer:
                 tbo_children=None,
                 global_num_tokens_gpu=None,
                 global_num_tokens_cpu=None,
-                dp_padding_mode=None,
                 gathered_buffer=gathered_buffer,
                 global_num_tokens_for_logprob_gpu=None,
                 global_num_tokens_for_logprob_cpu=None,
@@ -564,7 +552,6 @@ class TboForwardBatchPreparer:
                 mm_inputs=None,
                 top_logprobs_nums=None,
                 token_ids_logprobs=None,
-                next_token_logits_buffer=None,
             )
         )
 
@@ -809,7 +796,7 @@ class MaybeTboDeepEPDispatcher:
     def _execute(self, name, tbo_subbatch_index: Optional[int] = None, **kwargs):
         return getattr(self._inners[tbo_subbatch_index or 0], name)(**kwargs)
 
-    def dispatch(self, **kwargs) -> DispatchOutput:
+    def dispatch(self, **kwargs):
         return self._execute("dispatch", **kwargs)
 
     def dispatch_a(self, **kwargs):
@@ -818,7 +805,7 @@ class MaybeTboDeepEPDispatcher:
     def dispatch_b(self, **kwargs):
         return self._execute("dispatch_b", **kwargs)
 
-    def combine(self, **kwargs) -> torch.Tensor:
+    def combine(self, **kwargs):
         return self._execute("combine", **kwargs)
 
     def combine_a(self, **kwargs):

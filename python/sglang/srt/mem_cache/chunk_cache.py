@@ -61,7 +61,7 @@ class ChunkCache(BasePrefixCache):
     def inc_lock_ref(self, node: Any):
         return 0
 
-    def dec_lock_ref(self, node: Any, swa_uuid_for_lock: Optional[str] = None):
+    def dec_lock_ref(self, node: Any):
         return 0
 
     def pretty_print(self):
@@ -80,7 +80,7 @@ class SWAChunkCache(ChunkCache):
         super().__init__(req_to_token_pool, token_to_kv_pool_allocator, page_size)
         assert isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator)
 
-    def evict_swa(
+    def evict(
         self,
         req: Req,
         prelen: int,
@@ -95,6 +95,3 @@ class SWAChunkCache(ChunkCache):
             ]
             self.token_to_kv_pool_allocator.free_swa(free_slots)
             req.evicted_seqlen_local = new_evicted_seqlen_local
-
-    def evict(self, num_tokens: int):
-        pass

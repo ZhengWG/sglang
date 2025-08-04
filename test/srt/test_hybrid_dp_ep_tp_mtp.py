@@ -16,7 +16,7 @@ from sglang.test.test_utils import (
 )
 
 
-class Test00(CustomTestCase):
+class Test0(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -47,120 +47,23 @@ class Test00(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
 
-
-class Test01(CustomTestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
-        cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=[
-                "--trust-remote-code",
-                "--tp",
-                "8",
-                "--enable-dp-attention",
-                "--dp",
-                "4",
-            ],
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        kill_process_tree(cls.process.pid)
-
-    def test_mmlu(self):
+    def test_mgsm_en(self):
         args = SimpleNamespace(
             base_url=self.base_url,
             model=self.model,
-            eval_name="mmlu",
-            num_examples=64,
-            num_threads=32,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
         )
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test02(CustomTestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
-        cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=[
-                "--trust-remote-code",
-                "--tp",
-                "8",
-                "--enable-dp-attention",
-                "--dp",
-                "8",
-            ],
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        kill_process_tree(cls.process.pid)
-
-    def test_mmlu(self):
-        args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="mmlu",
-            num_examples=64,
-            num_threads=32,
-        )
-
-        metrics = run_eval(args)
-        print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
-
-
-class Test03(CustomTestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
-        cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=[
-                "--trust-remote-code",
-                "--tp",
-                "8",
-                "--moe-dense-tp-size",
-                "1",
-            ],
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        kill_process_tree(cls.process.pid)
-
-    def test_mmlu(self):
-        args = SimpleNamespace(
-            base_url=self.base_url,
-            model=self.model,
-            eval_name="mmlu",
-            num_examples=64,
-            num_threads=32,
-        )
-
-        metrics = run_eval(args)
-        print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
-
-
-class Test04(CustomTestCase):
+class Test1(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -176,6 +79,103 @@ class Test04(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "4",
+            ],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_mmlu(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mmlu",
+            num_examples=64,
+            num_threads=32,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
+
+
+class Test2(CustomTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=[
+                "--trust-remote-code",
+                "--tp",
+                "8",
+                "--enable-dp-attention",
+                "--dp",
+                "8",
+            ],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_mmlu(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mmlu",
+            num_examples=64,
+            num_threads=32,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
+
+
+class Test3(CustomTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=[
+                "--trust-remote-code",
+                "--tp",
+                "8",
                 "--moe-dense-tp-size",
                 "1",
             ],
@@ -196,10 +196,75 @@ class Test04(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test05(CustomTestCase):
+class Test4(CustomTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=[
+                "--trust-remote-code",
+                "--tp",
+                "8",
+                "--enable-dp-attention",
+                "--dp",
+                "4",
+                "--moe-dense-tp-size",
+                "1",
+            ],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_mmlu(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mmlu",
+            num_examples=64,
+            num_threads=32,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
+
+
+class Test5(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -235,10 +300,23 @@ class Test05(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test06(CustomTestCase):
+class Test6(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -273,10 +351,23 @@ class Test06(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test07(CustomTestCase):
+class Test7(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -311,10 +402,23 @@ class Test07(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test08(CustomTestCase):
+class Test8(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -351,10 +455,23 @@ class Test08(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
-class Test09(CustomTestCase):
+class Test9(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_MLA_MODEL_NAME_FOR_TEST
@@ -391,7 +508,20 @@ class Test09(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test10(CustomTestCase):
@@ -407,8 +537,9 @@ class Test10(CustomTestCase):
                 "--trust-remote-code",
                 "--tp",
                 "8",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -429,7 +560,20 @@ class Test10(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test11(CustomTestCase):
@@ -448,8 +592,9 @@ class Test11(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "4",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -470,7 +615,20 @@ class Test11(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test12(CustomTestCase):
@@ -489,8 +647,9 @@ class Test12(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "8",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -511,7 +670,20 @@ class Test12(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test13(CustomTestCase):
@@ -529,8 +701,9 @@ class Test13(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -551,7 +724,20 @@ class Test13(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test14(CustomTestCase):
@@ -572,8 +758,9 @@ class Test14(CustomTestCase):
                 "4",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -594,7 +781,20 @@ class Test14(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test15(CustomTestCase):
@@ -615,8 +815,9 @@ class Test15(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -637,7 +838,20 @@ class Test15(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test16(CustomTestCase):
@@ -657,8 +871,9 @@ class Test16(CustomTestCase):
                 "--dp",
                 "4",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -679,7 +894,20 @@ class Test16(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test17(CustomTestCase):
@@ -699,8 +927,9 @@ class Test17(CustomTestCase):
                 "--dp",
                 "8",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -721,7 +950,20 @@ class Test17(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test18(CustomTestCase):
@@ -743,8 +985,9 @@ class Test18(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -765,7 +1008,20 @@ class Test18(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test19(CustomTestCase):
@@ -787,8 +1043,9 @@ class Test19(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "128",
             ],
@@ -809,7 +1066,20 @@ class Test19(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test20(CustomTestCase):
@@ -825,8 +1095,7 @@ class Test20(CustomTestCase):
                 "--trust-remote-code",
                 "--tp",
                 "8",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -845,7 +1114,20 @@ class Test20(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test21(CustomTestCase):
@@ -864,8 +1146,7 @@ class Test21(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "4",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -884,7 +1165,20 @@ class Test21(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test22(CustomTestCase):
@@ -903,8 +1197,7 @@ class Test22(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "8",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -923,7 +1216,20 @@ class Test22(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test23(CustomTestCase):
@@ -941,8 +1247,7 @@ class Test23(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -961,7 +1266,20 @@ class Test23(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test24(CustomTestCase):
@@ -982,8 +1300,7 @@ class Test24(CustomTestCase):
                 "4",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1002,7 +1319,20 @@ class Test24(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test25(CustomTestCase):
@@ -1023,8 +1353,7 @@ class Test25(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1043,7 +1372,20 @@ class Test25(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test26(CustomTestCase):
@@ -1063,8 +1405,7 @@ class Test26(CustomTestCase):
                 "--dp",
                 "4",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1083,7 +1424,20 @@ class Test26(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test27(CustomTestCase):
@@ -1103,8 +1457,7 @@ class Test27(CustomTestCase):
                 "--dp",
                 "8",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1123,7 +1476,20 @@ class Test27(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test28(CustomTestCase):
@@ -1145,8 +1511,7 @@ class Test28(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1165,7 +1530,20 @@ class Test28(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test29(CustomTestCase):
@@ -1187,8 +1565,7 @@ class Test29(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
             ],
         )
 
@@ -1207,7 +1584,20 @@ class Test29(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test30(CustomTestCase):
@@ -1224,7 +1614,7 @@ class Test30(CustomTestCase):
                 "--tp",
                 "8",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1251,7 +1641,20 @@ class Test30(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test31(CustomTestCase):
@@ -1271,7 +1674,7 @@ class Test31(CustomTestCase):
                 "--dp",
                 "4",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1298,7 +1701,20 @@ class Test31(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test32(CustomTestCase):
@@ -1318,7 +1734,7 @@ class Test32(CustomTestCase):
                 "--dp",
                 "8",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1345,7 +1761,20 @@ class Test32(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test33(CustomTestCase):
@@ -1364,7 +1793,7 @@ class Test33(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1391,7 +1820,20 @@ class Test33(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test34(CustomTestCase):
@@ -1413,7 +1855,7 @@ class Test34(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1440,7 +1882,20 @@ class Test34(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test35(CustomTestCase):
@@ -1462,7 +1917,7 @@ class Test35(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1489,7 +1944,20 @@ class Test35(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test36(CustomTestCase):
@@ -1510,7 +1978,7 @@ class Test36(CustomTestCase):
                 "4",
                 "--enable-dp-lm-head",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1537,7 +2005,20 @@ class Test36(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test37(CustomTestCase):
@@ -1558,7 +2039,7 @@ class Test37(CustomTestCase):
                 "8",
                 "--enable-dp-lm-head",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1585,7 +2066,20 @@ class Test37(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test38(CustomTestCase):
@@ -1608,7 +2102,7 @@ class Test38(CustomTestCase):
                 "1",
                 "--enable-dp-lm-head",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1635,7 +2129,20 @@ class Test38(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test39(CustomTestCase):
@@ -1658,7 +2165,7 @@ class Test39(CustomTestCase):
                 "1",
                 "--enable-dp-lm-head",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1685,7 +2192,20 @@ class Test39(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test40(CustomTestCase):
@@ -1701,14 +2221,15 @@ class Test40(CustomTestCase):
                 "--trust-remote-code",
                 "--tp",
                 "8",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1735,7 +2256,20 @@ class Test40(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test41(CustomTestCase):
@@ -1754,14 +2288,15 @@ class Test41(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "4",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1788,7 +2323,20 @@ class Test41(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test42(CustomTestCase):
@@ -1807,14 +2355,15 @@ class Test42(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "8",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1841,7 +2390,20 @@ class Test42(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test43(CustomTestCase):
@@ -1859,14 +2421,15 @@ class Test43(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1893,7 +2456,20 @@ class Test43(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test44(CustomTestCase):
@@ -1914,14 +2490,15 @@ class Test44(CustomTestCase):
                 "4",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -1948,7 +2525,20 @@ class Test44(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test45(CustomTestCase):
@@ -1969,14 +2559,15 @@ class Test45(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2003,7 +2594,20 @@ class Test45(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test46(CustomTestCase):
@@ -2023,14 +2627,15 @@ class Test46(CustomTestCase):
                 "--dp",
                 "4",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2057,7 +2662,20 @@ class Test46(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test47(CustomTestCase):
@@ -2077,14 +2695,15 @@ class Test47(CustomTestCase):
                 "--dp",
                 "8",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2111,7 +2730,20 @@ class Test47(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test48(CustomTestCase):
@@ -2133,14 +2765,15 @@ class Test48(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2167,7 +2800,20 @@ class Test48(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test49(CustomTestCase):
@@ -2189,14 +2835,15 @@ class Test49(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
+                "--deepep-mode",
+                "auto",
                 "--cuda-graph-max-bs",
                 "32",
                 "--max-running-requests",
                 "32",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2223,7 +2870,20 @@ class Test49(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test50(CustomTestCase):
@@ -2239,10 +2899,9 @@ class Test50(CustomTestCase):
                 "--trust-remote-code",
                 "--tp",
                 "8",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2269,7 +2928,20 @@ class Test50(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test51(CustomTestCase):
@@ -2288,10 +2960,9 @@ class Test51(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "4",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2318,7 +2989,20 @@ class Test51(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test52(CustomTestCase):
@@ -2337,10 +3021,9 @@ class Test52(CustomTestCase):
                 "--enable-dp-attention",
                 "--dp",
                 "8",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2367,7 +3050,20 @@ class Test52(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test53(CustomTestCase):
@@ -2385,10 +3081,9 @@ class Test53(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2415,7 +3110,20 @@ class Test53(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test54(CustomTestCase):
@@ -2436,10 +3144,9 @@ class Test54(CustomTestCase):
                 "4",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2466,7 +3173,20 @@ class Test54(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test55(CustomTestCase):
@@ -2487,10 +3207,9 @@ class Test55(CustomTestCase):
                 "8",
                 "--moe-dense-tp-size",
                 "1",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2517,7 +3236,20 @@ class Test55(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test56(CustomTestCase):
@@ -2537,10 +3269,9 @@ class Test56(CustomTestCase):
                 "--dp",
                 "4",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2567,7 +3298,20 @@ class Test56(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test57(CustomTestCase):
@@ -2587,10 +3331,9 @@ class Test57(CustomTestCase):
                 "--dp",
                 "8",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2617,7 +3360,20 @@ class Test57(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test58(CustomTestCase):
@@ -2639,10 +3395,9 @@ class Test58(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2669,7 +3424,20 @@ class Test58(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 class Test59(CustomTestCase):
@@ -2691,10 +3459,9 @@ class Test59(CustomTestCase):
                 "--moe-dense-tp-size",
                 "1",
                 "--enable-dp-lm-head",
-                "--ep",
-                "8",
+                "--enable-ep-moe",
                 "--speculative-algo",
-                "EAGLE",
+                "NEXTN",
                 "--speculative-draft",
                 "lmsys/DeepSeek-V3-0324-NextN",
                 "--speculative-num-steps",
@@ -2721,7 +3488,20 @@ class Test59(CustomTestCase):
 
         metrics = run_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["score"], 0.48)
+        self.assertGreater(metrics["score"], 0.5)
+
+    def test_mgsm_en(self):
+        args = SimpleNamespace(
+            base_url=self.base_url,
+            model=self.model,
+            eval_name="mgsm_en",
+            num_examples=None,
+            num_threads=1024,
+        )
+
+        metrics = run_eval(args)
+        print(f"{metrics=}")
+        self.assertGreater(metrics["score"], 0.8)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,6 @@ from transformers import (
     AutoConfig,
     AutoProcessor,
     AutoTokenizer,
-    GenerationConfig,
     PretrainedConfig,
     PreTrainedTokenizer,
     PreTrainedTokenizerBase,
@@ -40,12 +39,11 @@ from sglang.srt.configs import (
     ExaoneConfig,
     KimiVLConfig,
     MultiModalityConfig,
-    Step3VLConfig,
     GLMConfig,
 )
 from sglang.srt.configs.internvl import InternVLChatConfig
 from sglang.srt.connector import create_remote_connector
-from sglang.srt.utils import is_remote_url, logger, lru_cache_frozenset
+from sglang.srt.utils import is_remote_url, lru_cache_frozenset
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     ChatGLMConfig.model_type: ChatGLMConfig,
@@ -55,7 +53,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     MultiModalityConfig.model_type: MultiModalityConfig,
     KimiVLConfig.model_type: KimiVLConfig,
     InternVLChatConfig.model_type: InternVLChatConfig,
-    Step3VLConfig.model_type: Step3VLConfig,
     GLMConfig.model_type: GLMConfig,
 }
 
@@ -156,21 +153,6 @@ def get_config(
         config.update({"architectures": [model_type]})
 
     return config
-
-
-@lru_cache_frozenset(maxsize=32)
-def get_generation_config(
-    model: str,
-    trust_remote_code: bool,
-    revision: Optional[str] = None,
-    **kwargs,
-):
-    try:
-        return GenerationConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
-        )
-    except OSError as e:
-        return None
 
 
 # Models don't use the same configuration key for determining the maximum
@@ -318,31 +300,15 @@ def get_processor(
 
     if config.model_type not in {"llava", "clip"}:
         kwargs["use_fast"] = use_fast
-    try:
-        processor = AutoProcessor.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            **kwargs,
-        )
 
-    except ValueError as e:
-        error_message = str(e)
-        if "does not have a slow version" in error_message:
-            logger.info(
-                f"Processor {tokenizer_name} does not have a slow version. Automatically use fast version"
-            )
-            kwargs["use_fast"] = True
-            processor = AutoProcessor.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                **kwargs,
-            )
-        else:
-            raise e
+    processor = AutoProcessor.from_pretrained(
+        tokenizer_name,
+        *args,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        **kwargs,
+    )
+
     tokenizer = get_tokenizer_from_processor(processor)
 
     attach_additional_stop_token_ids(tokenizer)
