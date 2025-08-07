@@ -65,6 +65,8 @@ srt = [
     "concurrent-log-handler",
     "datasets",
     "py-spy",
+    "httpx-aiohttp>=0.1.8",
+    "mcp",
 ]
 
 blackwell = [
