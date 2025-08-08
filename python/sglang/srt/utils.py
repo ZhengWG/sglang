@@ -3024,6 +3024,11 @@ class ConcurrentCounter:
         self.wait_for(lambda count: count == 0)
 
 
+@lru_cache(maxsize=1)
+def is_triton_kernels_available() -> bool:
+    return importlib.util.find_spec("triton_kernels") is not None
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
