@@ -1183,6 +1183,8 @@ def _wait_and_warmup(
             pipe_finish_writer,
         ):
             return
+    else:
+        _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
     logger.info("[SpanLogs] The server is fired up and ready to roll!")
 
