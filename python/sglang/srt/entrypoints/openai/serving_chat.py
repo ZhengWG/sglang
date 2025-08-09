@@ -500,7 +500,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
 
                     is_firsts[index] = False
-                    delta = DeltaMessage(role="assistant", content=first_chunk_content)
+                    delta = DeltaMessage(role="assistant", content=first_chunk_content, reasoning_content="")
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=delta,
@@ -530,7 +530,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     if is_analysis:
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
-                            delta=DeltaMessage(reasoning_content=delta),
+                            delta=DeltaMessage(role="assistant", content="", reasoning_content=delta),
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
@@ -544,7 +544,7 @@ class OpenAIServingChat(OpenAIServingBase):
 
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
-                        delta=DeltaMessage(content=delta if delta else None),
+                        delta=DeltaMessage(role="assistant", content=delta or ""),
                         finish_reason=None,
                         matched_stop=None,
                         logprobs=choice_logprobs,
@@ -574,7 +574,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     if reasoning_text:
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
-                            delta=DeltaMessage(reasoning_content=reasoning_text),
+                            delta=DeltaMessage(role="assistant", content="", reasoning_content=reasoning_text),
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
@@ -588,7 +588,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 if self.use_harmony and not is_final:
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
-                        delta=DeltaMessage(reasoning_content=delta),
+                        delta=DeltaMessage(role="assistant", content="", reasoning_content=delta or ""),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
