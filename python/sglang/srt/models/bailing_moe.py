@@ -60,8 +60,9 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
-from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
+from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.moe.utils import DeepEPMode
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
@@ -79,7 +80,6 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import (
-    DeepEPMode,
     add_prefix,
     is_cuda,
     is_non_idle_and_non_empty,
@@ -262,16 +262,16 @@ class BailingMoESparseMoeBlock(nn.Module):
             prefix=add_prefix("experts", prefix),
             **(
                 dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
-                if global_server_args_dict["enable_deepep_moe"]
+                if global_server_args_dict["moe_a2a_backend"].is_deepep()
                 else {}
             ),
             # Additional args for FusedMoE
             **(
                 dict(
-                    enable_flashinfer_moe=True,
+                    enable_flashinfer_cutlass_moe=True,
                     enable_ep_moe=global_server_args_dict["enable_ep_moe"],
                 )
-                if global_server_args_dict["enable_flashinfer_moe"]
+                if global_server_args_dict["enable_flashinfer_cutlass_moe"]
                 else {}
             ),
         )
@@ -287,12 +287,12 @@ class BailingMoESparseMoeBlock(nn.Module):
                 prefix=add_prefix("shared_experts", prefix),
                 **(
                     dict(tp_rank=0, tp_size=1)
-                    if global_server_args_dict["enable_deepep_moe"]
+                    if global_server_args_dict["moe_a2a_backend"].is_deepep()
                     else {}
                 ),
             )
         # dispatcher
-        if global_server_args_dict["enable_deepep_moe"]:
+        if global_server_args_dict["moe_a2a_backend"].is_deepep():
             # TODO: we will support tp < ep in the future
             self.ep_size = get_tensor_model_parallel_world_size()
 
@@ -312,7 +312,7 @@ class BailingMoESparseMoeBlock(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
     ) -> torch.Tensor:
-        if not global_server_args_dict["enable_deepep_moe"]:
+        if not global_server_args_dict["moe_a2a_backend"].is_deepep():
             return self.forward_normal(hidden_states)
         else:
             return self.forward_deepep(hidden_states, forward_batch)
