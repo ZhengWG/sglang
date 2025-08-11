@@ -562,6 +562,7 @@ class ModelRunner:
                     server_args.decode_attention_backend = (
                         "flashinfer" if is_sm100_supported() else "triton"
                     )
+                logger.info(f"{server_args.decode_attention_backend=} updated!")
             elif server_args.decode_attention_backend == "fa3":
                 server_args.hicache_io_backend = "direct"
                 logger.warning(
