@@ -559,6 +559,7 @@ class ModelRunner:
                         "flashinfer" if is_flashinfer_available() else "triton"
                     )
                 else:
+                    # todo(yudian.zy): 为啥是sm100？
                     server_args.decode_attention_backend = (
                         "flashinfer" if is_sm100_supported() else "triton"
                     )
