@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
-ENABLE_DYNAMIC_TORCH_COMPILE = get_bool_env_var("SGLANG_ENABLE_DYNAMIC_TORCH_COMPILE", "false")
+ENABLE_DYNAMIC_TORCH_COMPILE = get_bool_env_var("SGLANG_ENABLE_DYNAMIC_TORCH_COMPILE", "true")
 
 # Detect whether the current forward pass is in capture mode
 is_capture_mode = False
