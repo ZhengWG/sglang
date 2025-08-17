@@ -310,10 +310,13 @@ class BailingMoESparseMoeBlock(nn.Module):
             )
 
     def forward(
-        self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: Optional[ForwardBatch] = None,
+        use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
         if not global_server_args_dict["moe_a2a_backend"].is_deepep():
-            return self.forward_normal(hidden_states)
+            return self.forward_normal(hidden_states, use_reduce_scatter)
         else:
             return self.forward_deepep(hidden_states, forward_batch)
 
@@ -324,7 +327,11 @@ class BailingMoESparseMoeBlock(nn.Module):
             if name not in ["correction_bias"]
         ]
 
-    def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward_normal(
+        self,
+        hidden_states: torch.Tensor,
+        use_reduce_scatter: bool = False,
+    ) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
         if self.num_shared_experts > 0:
@@ -340,7 +347,7 @@ class BailingMoESparseMoeBlock(nn.Module):
         if self.num_shared_experts > 0:
             final_hidden_states = final_hidden_states + shared_output
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not use_reduce_scatter:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -617,6 +624,7 @@ class BailingMoEBlock(nn.Module):
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
+            allow_reduce_scatter=True,
         )
 
     def _is_layer_sparse(
@@ -651,7 +659,12 @@ class BailingMoEBlock(nn.Module):
             forward_batch=forward_batch,
         )
 
-        hidden_states = self.mlp(hidden_states, forward_batch)
+        # For DP with padding, reduce scatter can be used instead of all-reduce.
+        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
+            forward_batch
+        )
+
+        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states=hidden_states,
