@@ -76,12 +76,7 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import (
-    add_prefix,
-    is_cuda,
-    is_non_idle_and_non_empty,
-    make_layers,
-)
+from sglang.srt.utils import add_prefix, is_cuda, is_non_idle_and_non_empty, make_layers
 
 LoraConfig = None
 logger = logging.getLogger(__name__)
@@ -260,7 +255,11 @@ class BailingMoESparseMoeBlock(nn.Module):
         )
         # shared expert
         if config.num_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.num_shared_experts
+            if hasattr(config, "moe_shared_expert_intermediate_size"):
+                intermediate_size = config.moe_shared_expert_intermediate_size
+            else:
+                intermediate_size = config.moe_intermediate_size
+            intermediate_size *= config.num_shared_experts
             # disable tp for shared experts when enable deepep moe
             self.shared_experts = BailingMoEMLP(
                 intermediate_size=intermediate_size,
@@ -786,13 +785,11 @@ class BailingMoEForCausalLM(nn.Module):
         return self.model.end_layer
 
     def get_embed_and_head(self):
-        """ Used by the eagle_worker.
-        """
+        """Used by the eagle_worker."""
         return self.model.word_embeddings.weight, self.lm_head.weight
 
     def set_embed_and_head(self, embed, head):
-        """ Used by the eagle_worker.
-        """
+        """Used by the eagle_worker."""
         del self.model.word_embeddings.weight
         del self.lm_head.weight
         self.model.word_embeddings.weight = embed
