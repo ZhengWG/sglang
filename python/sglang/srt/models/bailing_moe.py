@@ -49,7 +49,6 @@ from sglang.srt.layers.dp_attention import (
     get_attention_dp_size,
     get_attention_tp_rank,
     get_attention_tp_size,
-    get_local_attention_dp_size,
 )
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
@@ -59,7 +58,9 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.moe.utils import DeepEPMode
@@ -73,11 +74,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.graph_runner import get_is_capture_mode
-from sglang.srt.model_executor.forward_batch_info import (
-    ForwardBatch,
-    ForwardMode,
-    PPProxyTensors,
-)
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import (
     add_prefix,
@@ -260,20 +257,6 @@ class BailingMoESparseMoeBlock(nn.Module):
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
-            **(
-                dict(deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]])
-                if global_server_args_dict["moe_a2a_backend"].is_deepep()
-                else {}
-            ),
-            # Additional args for FusedMoE
-            **(
-                dict(
-                    enable_flashinfer_cutlass_moe=True,
-                    enable_ep_moe=global_server_args_dict["enable_ep_moe"],
-                )
-                if global_server_args_dict["enable_flashinfer_cutlass_moe"]
-                else {}
-            ),
         )
         # shared expert
         if config.num_shared_experts is not None:
@@ -292,7 +275,7 @@ class BailingMoESparseMoeBlock(nn.Module):
                 ),
             )
         # dispatcher
-        if global_server_args_dict["moe_a2a_backend"].is_deepep():
+        if get_moe_a2a_backend().is_deepep():
             # TODO: we will support tp < ep in the future
             self.ep_size = get_tensor_model_parallel_world_size()
 
@@ -315,7 +298,7 @@ class BailingMoESparseMoeBlock(nn.Module):
         forward_batch: Optional[ForwardBatch] = None,
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
-        if not global_server_args_dict["moe_a2a_backend"].is_deepep():
+        if not get_moe_a2a_backend().is_deepep():
             return self.forward_normal(hidden_states, use_reduce_scatter)
         else:
             return self.forward_deepep(hidden_states, forward_batch)
@@ -579,7 +562,6 @@ class BailingMoEBlock(nn.Module):
         self.layer_id = layer_id
         self.attn_tp_size = get_attention_tp_size()
         self.attn_tp_rank = get_attention_tp_rank()
-        self.local_dp_size = get_local_attention_dp_size()
 
         self.is_layer_sparse = self._is_layer_sparse(
             config, layer_id=layer_id, is_nextn=False
@@ -871,7 +853,7 @@ class BailingMoEForCausalLM(nn.Module):
             ]
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = get_moe_impl_class().make_expert_params_mapping(
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
