@@ -454,6 +454,11 @@ class OpenAIServingChat(OpenAIServingBase):
                 if is_firsts.get(index, True):
 
                     first_chunk_padding = self.tokenizer_manager.server_args.reasoning_padding
+
+                    thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
+                    if (thinking_trigger and
+                        not self._get_enable_thinking_from_request(request, thinking_trigger)):
+                        first_chunk_padding = ""
                     first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
 
                     is_firsts[index] = False
@@ -473,7 +478,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 stream_buffer = stream_buffers.get(index, "")
-                delta = content["text"][len(stream_buffer) :]
+                delta = content["text"][len(stream_buffer):]
                 stream_buffers[index] = stream_buffer + delta
 
                 # Handle reasoning content
@@ -665,6 +670,12 @@ class OpenAIServingChat(OpenAIServingBase):
             text = ret_item["text"]
 
             reasoning_padding = self.tokenizer_manager.server_args.reasoning_padding
+
+            thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
+            if (thinking_trigger and
+                not self._get_enable_thinking_from_request(request, thinking_trigger)):
+                reasoning_padding = ""
+
             if reasoning_padding and text is not None:
                 text = f"{reasoning_padding}\n{text}"
 
@@ -856,7 +867,11 @@ class OpenAIServingChat(OpenAIServingBase):
         reasoning_parser = reasoning_parser_dict[index]
         return reasoning_parser.parse_stream_chunk(delta)
 
-    def _get_enable_thinking_from_request(self, request: ChatCompletionRequest) -> bool:
+    def _get_enable_thinking_from_request(
+        self,
+        request: ChatCompletionRequest,
+        thinking_trigger: str = "enable_thinking"
+    ) -> bool:
         """Extracts the 'enable_thinking' flag from request chat_template_kwargs.
 
         NOTE: This parameter is only useful for models that support enable_thinking
@@ -870,9 +885,9 @@ class OpenAIServingChat(OpenAIServingBase):
         if (
             hasattr(request, "chat_template_kwargs")
             and request.chat_template_kwargs
-            and request.chat_template_kwargs.get("enable_thinking") is not None
+            and request.chat_template_kwargs.get(thinking_trigger) is not None
         ):
-            return request.chat_template_kwargs.get("enable_thinking")
+            return request.chat_template_kwargs.get(thinking_trigger)
         return False
 
     async def _process_tool_call_stream(

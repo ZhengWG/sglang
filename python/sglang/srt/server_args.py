@@ -135,7 +135,9 @@ class ServerArgs:
     reasoning_parser: Optional[str] = None
     tool_call_parser: Optional[str] = None
     tool_server: Optional[str] = None
+
     reasoning_padding: Optional[str] = None
+    thinking_trigger: Optional[str] = None
 
     # Data parallelism
     dp_size: int = 1
@@ -1252,6 +1254,12 @@ class ServerArgs:
             type=str,
             default=ServerArgs.reasoning_padding,
             help="Output padding for reasoning models before generation, e.g. '<think>\n' ",
+        )
+        parser.add_argument(
+            "--thinking-trigger",
+            type=str,
+            default=ServerArgs.thinking_trigger,
+            help="Thinking mode trigger for hybrid model.",
         )
 
         # Data parallelism
