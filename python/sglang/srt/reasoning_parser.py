@@ -536,7 +536,7 @@ class ReasoningParser:
         "kimi": KimiDetector,
         "step3": DeepSeekR1Detector,
         "gpt-oss": GptOssDetector,
-        "seed-oss": SeedOssDetector,
+        "seed_oss": SeedOssDetector,
     }
 
     def __init__(
