@@ -184,7 +184,7 @@ class KimiDetector(BaseReasoningFormatDetector):
             force_reasoning=False,
             stream_reasoning=stream_reasoning,
         )
-        
+
 class SeedOssDetector(BaseReasoningFormatDetector):
     """
     Detector for SeedOSS model.
@@ -198,7 +198,7 @@ class SeedOssDetector(BaseReasoningFormatDetector):
         super().__init__(
             "<seed:think>",
             "</seed:think>",
-            force_reasoning=force_reasoning,
+            force_reasoning=True,
             stream_reasoning=stream_reasoning,
         )
 
