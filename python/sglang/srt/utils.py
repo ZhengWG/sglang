@@ -3017,6 +3017,16 @@ def is_triton_kernels_available() -> bool:
     return importlib.util.find_spec("triton_kernels") is not None
 
 
+def check_cuda_result(raw_output):
+    import cuda.bindings.runtime as cuda_rt
+
+    err, *results = raw_output
+    if err != cuda_rt.cudaError_t.cudaSuccess:
+        raise Exception(f"CUDA error: {err}")
+
+    return results
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
