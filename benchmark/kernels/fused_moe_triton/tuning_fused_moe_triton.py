@@ -287,7 +287,7 @@ class BenchmarkWorker:
             )
         else:
             config = op_config[min(op_config.keys(), key=lambda x: abs(x - num_tokens))]
-        with torch.cuda.device(self.device_id) if _is_hip else nullcontext():
+        with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             kernel_time = benchmark_config(
                 config,
                 num_tokens,
@@ -319,7 +319,7 @@ class BenchmarkWorker:
     ) -> Dict[str, int]:
         best_config = None
         best_time = float("inf")
-        with torch.cuda.device(self.device_id) if _is_hip else nullcontext():
+        with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
