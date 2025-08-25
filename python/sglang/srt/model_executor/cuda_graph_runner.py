@@ -271,7 +271,7 @@ class CudaGraphRunner:
         # Batch sizes to capture
         self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(model_runner)
         log_info_on_rank0(logger, f"Capture cuda graph bs {self.capture_bs}")
-        log_info_on_rank0(f"Capture cuda graph: set dynamic={ENABLE_DYNAMIC_TORCH_COMPILE} in torch.compile()")
+        log_info_on_rank0(logger, f"Capture cuda graph: set dynamic={ENABLE_DYNAMIC_TORCH_COMPILE} in torch.compile()")
         self.capture_forward_mode = ForwardMode.DECODE
         self.capture_hidden_mode = CaptureHiddenMode.NULL
         self.num_tokens_per_bs = 1
