@@ -73,8 +73,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
-from sglang.srt.model_executor.graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.graph_runner import get_is_capture_mode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, is_cuda, is_non_idle_and_non_empty, make_layers
 
@@ -443,9 +443,6 @@ class BailingMoEAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
-        self.split_qkv = getattr(config, "using_split_qkv_in_self_attention", False)
-        assert not self.split_qkv  # TODO vllm中有，可能需要适配，但暂时没有
-
         # 使用qk norm
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
 
@@ -476,7 +473,12 @@ class BailingMoEAttention(nn.Module):
             tp_size=attn_tp_size,
         )
 
-        self.rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        if hasattr(config, "partial_rotary_factor"):
+            self.rotary_dim = int(self.head_dim * config.partial_rotary_factor)
+        elif hasattr(config, "rotary_dim"):
+            self.rotary_dim = config.rotary_dim
+        else:
+            self.rotary_dim = self.head_dim
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_dim,
@@ -868,7 +870,11 @@ class BailingMoEForCausalLM(nn.Module):
                 continue
 
             # 如果是norm head的方式，需要在初始化的时候对lm_head进行处理
-            if self.config.norm_head and "lm_head.weight" in name:
+            if (
+                hasattr(self.config, "norm_head")
+                and self.config.norm_head
+                and "lm_head.weight" in name
+            ):
                 import torch.nn.functional as F
 
                 loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
@@ -970,4 +976,8 @@ class BailingMoeForCausalLM(BailingMoEForCausalLM):
     pass
 
 
-EntryClass = [BailingMoEForCausalLM, BailingMoeForCausalLM]
+class BailingMoeV2ForCausalLM(BailingMoEForCausalLM):
+    pass
+
+
+EntryClass = [BailingMoEForCausalLM, BailingMoeForCausalLM, BailingMoeV2ForCausalLM]
