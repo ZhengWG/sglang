@@ -2293,6 +2293,7 @@ class ServerArgs:
             if is_mxfp4_quant_format:
                 # use bf16 for mxfp4 triton kernels
                 self.dtype = "bfloat16"
+
         elif "Llama4" in model_arch:
             assert self.attention_backend in {
                 "fa3",
