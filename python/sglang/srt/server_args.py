@@ -110,7 +110,7 @@ class ServerArgs:
     log_level: str = "info"
     log_level_http: Optional[str] = None
     log_requests: bool = True
-    log_requests_level: int = 2
+    log_requests_level: int = 0
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = True

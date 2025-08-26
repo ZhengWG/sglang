@@ -1350,8 +1350,8 @@ class TokenizerManager:
                         "input_embeds",
                         "image_data",
                         "audio_data",
-                        "lora_path",
-                        "sampling_params",
+                        # "lora_path",
+                        # "sampling_params",
                     ]
                 )
                 out_skip_names = set(
