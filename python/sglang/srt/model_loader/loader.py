@@ -461,7 +461,13 @@ class DefaultModelLoader(BaseModelLoader):
                         quant_method.process_weights_after_loading(module)
 
                 if hasattr(model, "post_load_weights"):
-                    model.post_load_weights()
+                    if (
+                        model_config.hf_config.architectures[0]
+                        == "DeepseekV3ForCausalLMNextN"
+                    ):
+                        model.post_load_weights(is_nextn=True)
+                    else:
+                        model.post_load_weights()
             else:
                 self.load_weights_and_postprocess(
                     model, self._get_all_weights(model_config, model), target_device
