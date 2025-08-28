@@ -122,7 +122,10 @@ class BailingMoEMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(
-        self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: Optional[ForwardBatch] = None,
+        use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
         if (self.tp_size == 1) and hidden_states.shape[0] == 0:
             return hidden_states
