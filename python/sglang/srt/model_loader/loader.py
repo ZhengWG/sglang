@@ -263,7 +263,7 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        allowed_keys = {"disable_multithread_load", "num_threads"}
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -403,7 +403,7 @@ class DefaultModelLoader(BaseModelLoader):
                 "weight_loader_disable_mmap"
             )
 
-            if extra_config.get("enable_multithread_load"):
+            if not extra_config.get("disable_multithread_load"):
                 weights_iterator = multi_thread_safetensors_weights_iterator(
                     hf_weights_files,
                     max_workers=extra_config.get(
@@ -419,7 +419,7 @@ class DefaultModelLoader(BaseModelLoader):
                 )
 
         else:
-            if extra_config.get("enable_multithread_load"):
+            if not extra_config.get("disable_multithread_load"):
                 weights_iterator = multi_thread_pt_weights_iterator(
                     hf_weights_files,
                     max_workers=extra_config.get(
@@ -479,7 +479,13 @@ class DefaultModelLoader(BaseModelLoader):
                         quant_method.process_weights_after_loading(module)
 
                 if hasattr(model, "post_load_weights"):
-                    model.post_load_weights()
+                    if (
+                        model_config.hf_config.architectures[0]
+                        == "DeepseekV3ForCausalLMNextN"
+                    ):
+                        model.post_load_weights(is_nextn=True)
+                    else:
+                        model.post_load_weights()
             else:
                 self.load_weights_and_postprocess(
                     model, self._get_all_weights(model_config, model), target_device

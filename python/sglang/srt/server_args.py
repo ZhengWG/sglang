@@ -56,7 +56,7 @@ class ServerArgs:
     tokenizer_mode: str = "auto"
     skip_tokenizer_init: bool = False
     load_format: str = "auto"
-    model_loader_extra_config: str = '{"enable_multithread_load": true}'
+    model_loader_extra_config: str = "{}"
     trust_remote_code: bool = False
     context_length: Optional[int] = None
     is_embedding: bool = False
