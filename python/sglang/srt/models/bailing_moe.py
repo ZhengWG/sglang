@@ -154,6 +154,7 @@ class BailingMoEGate(nn.Module):
             ),
         )
         if getattr(config, "moe_router_enable_expert_bias", False):
+            # 默认fp32跟ds算子对齐
             self.expert_bias = nn.Parameter(
                 torch.empty((config.num_experts,), dtype=torch.float32),
             )
