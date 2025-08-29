@@ -1,10 +1,10 @@
 # coding=utf-8
-# Adapted from
-# https://huggingface.co/models?filter=glm
-# todo(yudian.zy): should_use_flashinfer_trtllm_moe
-# Copyright 2023 The vLLM team.
-# Copyright 2018 The OpenAI Team Authors and HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
+# Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,11 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
+""" SGLang BailingMoE model."""
 import logging
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
@@ -154,7 +150,6 @@ class BailingMoEGate(nn.Module):
             ),
         )
         if getattr(config, "moe_router_enable_expert_bias", False):
-            # 默认fp32跟ds算子对齐
             self.expert_bias = nn.Parameter(
                 torch.empty((config.num_experts,), dtype=torch.float32),
             )
@@ -417,37 +412,26 @@ class BailingMoEAttention(nn.Module):
         alt_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__()
-        # hidden_states大小
         self.hidden_size = config.hidden_size
-        # q头数
         self.total_num_heads = config.num_attention_heads
-        # kv头数（mha下跟total_num_heads相等，mqa或gqa小于total_num_heads）
         self.total_kv_heads = config.num_key_value_heads
-        # 并发数
         self.dp_size = get_attention_dp_size()
         attn_tp_rank = get_attention_tp_rank()
         attn_tp_size = get_attention_tp_size()
 
-        # q 头或 kv头数要被tp整除
         assert self.total_num_heads % attn_tp_size == 0
         assert self.total_kv_heads % attn_tp_size == 0
         assert self.total_num_heads >= self.total_kv_heads
 
-        # 当前gpu rank下的q头
         self.num_heads = self.total_num_heads // attn_tp_size
-        # 每个q头的维度
         self.head_dim = config.head_dim or (self.hidden_size // self.total_num_heads)
-        # 当前gpu的q_size
         self.q_size = self.head_dim * self.num_heads
 
-        # 当前gpu rank下的kv头
         self.num_kv_heads = self.total_kv_heads // attn_tp_size
-        # 当前gpu的k/v维度
         self.kv_size = max(1, self.num_kv_heads * self.head_dim)
 
         self.scale = self.head_dim**-0.5
 
-        # 使用qk norm
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
 
         self.query_key_value = QKVParallelLinear(
@@ -865,7 +849,6 @@ class BailingMoEForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            # lm_head 在tie_word_embeddings=true时跳过，与embeddings共享；反之则独立加载
             if (
                 ("v_head" in name)
                 or ("inv_freq" in name)
@@ -873,7 +856,6 @@ class BailingMoEForCausalLM(nn.Module):
             ):
                 continue
 
-            # 如果是norm head的方式，需要在初始化的时候对lm_head进行处理
             if (
                 hasattr(self.config, "norm_head")
                 and self.config.norm_head
@@ -917,7 +899,6 @@ class BailingMoEForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # 跳过不存在的module key
                 if name not in params_dict:
                     continue
 
@@ -931,7 +912,6 @@ class BailingMoEForCausalLM(nn.Module):
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
-                    # 跳过不存在的module key
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
@@ -948,7 +928,6 @@ class BailingMoEForCausalLM(nn.Module):
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
-                    # 跳过不存在的module key
                     if name not in params_dict:
                         continue
 
