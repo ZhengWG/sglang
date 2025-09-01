@@ -2859,7 +2859,7 @@ def get_worker_ids_from_req_rids(rids):
 
 
 def get_origin_rid(rid):
-    return rid.split("_", 1)[1] if "_" in rid else rid
+    return rid.split("#", 1)[1] if "#" in rid else rid
 
 
 def apply_module_patch(target_module, target_function, wrappers):
