@@ -26,7 +26,7 @@ RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistu
 # 安装nvshmem3, 不安装，以免deepep出错
 # RUN yum install -y libnvshmem3-cuda-12 libnvshmem3-devel-cuda-12 libnvshmem3-static-cuda-12 && yum clean all
 
-RUN python3 -m pip install --upgrade pip --no-cache-dir
+RUN python3 -m pip install --upgrade pip --no-cache-dir && pip install -U setuptools
 
 # 安装运行sglang依赖的包
 RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 torchvision==0.22.1
