@@ -30,6 +30,10 @@ RUN python3 -m pip install --upgrade pip --no-cache-dir && pip install -U setupt
 
 # 安装运行sglang依赖的包
 RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 torchvision==0.22.1
+
+# for torch compile remote cache: https://yuque.antfin.com/deepxpu/uiwv6l/rtifd09662zz2u5k
+RUN pip3 install --no-cache-dir redis
+
 # 这些包会在安装sglang[all]的时候，作为deps装上正确版本，不需要提前安装
 #RUN pip3 install --no-cache-dir transformers openai py-spy setproctitle
 #RUN pip3 install --no-cache-dir cuda-bindings==12.9.0 cuda-python==12.9.0 uvloop compressed_tensors msgspec einops partial_json_parser pynvml
