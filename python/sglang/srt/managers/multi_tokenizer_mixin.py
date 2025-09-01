@@ -469,7 +469,7 @@ class MultiTokenizerManager(TokenizerManager, MultiTokenizerMixin):
         """Register this worker to the main TokenizerManager"""
         # create a handle loop to receive messages from the main TokenizerManager
         self.auto_create_handle_loop()
-        req = MultiTokenizerRegisterReq(rids=[f"{self.worker_id}_register"])
+        req = MultiTokenizerRegisterReq(rids=[f"{self.worker_id}#register"])
         req.ipc_name = self.tokenizer_ipc_name
         _Communicator.enable_multi_tokenizer = True
         await self.register_multi_tokenizer_communicator(req)
