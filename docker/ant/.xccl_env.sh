@@ -2,7 +2,6 @@
 
 if [ -z ${NCCL_SOCKET_IFNAME+x} ]; then export NCCL_SOCKET_IFNAME=bond0;fi
 if [ -z ${NCCL_IB_HCA+x} ]; then export NCCL_IB_HCA=mlx5_bond;fi
-if [ -z ${NVSHMEM_HCA_PE_MAPPING+x} ]; then export NVSHMEM_HCA_PE_MAPPING="mlx5_bond_0:1:2,mlx5_bond_1:1:2,mlx5_bond_2:1:2,mlx5_bond_3:1:2";fi
 if [ -z ${GLOO_SOCKET_IFNAME+x} ]; then export GLOO_SOCKET_IFNAME=eth0;fi
 
 if [ -z ${NCCL_NET_PLUGIN+x} ]; then export NCCL_NET_PLUGIN='';fi
@@ -22,7 +21,21 @@ if [ -z ${NVSHMEM_DEBUG_SUBSYS+x} ]; then export NVSHMEM_DEBUG_SUBSYS=INIT;fi
 if [ -z ${NVSHMEM_IB_GID_INDEX+x} ]; then export NVSHMEM_IB_GID_INDEX=3;fi
 if [ -z ${NVSHMEM_IB_TRAFFIC_CLASS+x} ]; then export NVSHMEM_IB_TRAFFIC_CLASS=16;fi
 if [ -z ${NVSHMEM_IB_SL+x} ]; then export NVSHMEM_IB_SL=5;fi
-if [ -z ${NVSHMEM_ENABLE_NIC_PE_MAPPING+x} ]; then export NVSHMEM_ENABLE_NIC_PE_MAPPING=1;fi
 
 if [ -z ${IB_DEVICE_LIST+x} ]; then export IB_DEVICE_LIST="mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3";fi
+
+gpu_card_type=$(nvidia-smi -L | head -n 1 | awk -F ' ' '{print $4}')
+if [ -z ${NVSHMEM_HCA_PE_MAPPING+x} ]; then
+  if [ "${gpu_card_type}" == "H20" ]; then
+    export NVSHMEM_HCA_PE_MAPPING="mlx5_bond_0:1:2,mlx5_bond_1:1:2,mlx5_bond_2:1:2,mlx5_bond_3:1:2"
+  fi
+fi
+
+if [ -z ${NVSHMEM_ENABLE_NIC_PE_MAPPING+x} ]; then
+  if [ "${gpu_card_type}" == "H20" ]; then
+    export NVSHMEM_ENABLE_NIC_PE_MAPPING=1
+  else
+    export NVSHMEM_ENABLE_NIC_PE_MAPPING=0
+  fi
+fi
 
