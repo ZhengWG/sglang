@@ -2848,16 +2848,6 @@ def lru_cache_frozenset(maxsize=128):
     return decorator
 
 
-def get_worker_ids_from_req_rids(rids):
-    if isinstance(rids, list):
-        worker_ids = [int(rid.split("#")[0]) for rid in rids]
-    elif isinstance(rids, str):
-        worker_ids = [int(rids.split("#")[0])]
-    else:
-        worker_ids = []
-    return worker_ids
-
-
 def get_origin_rid(rid):
     return rid.split("#", 1)[1] if "#" in rid else rid
 
