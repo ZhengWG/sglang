@@ -133,7 +133,10 @@ class ModelConfig:
 
         if is_draft_model and self.hf_config.architectures[0] == "MiMoForCausalLM":
             self.hf_config.architectures[0] = "MiMoMTP"
-        if is_draft_model and self.hf_config.architectures[0] == "BailingMoeForCausalLM":
+        if is_draft_model and self.hf_config.architectures[0] in {
+            "BailingMoeForCausalLM",
+            "BailingMoeV2ForCausalLM",
+        }:
             self.hf_config.architectures[0] = "BailingMoeForCausalLMNextN"
         if (
             is_draft_model
