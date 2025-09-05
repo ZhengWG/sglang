@@ -94,7 +94,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     LoRAUpdateResult,
-    MultiTokenizerWarpper,
+    MultiTokenizerWrapper,
     OpenSessionReqInput,
     OpenSessionReqOutput,
     ProfileReq,
@@ -1119,7 +1119,7 @@ class TokenizerManager:
         self, obj: UpdateWeightFromDiskReqInput
     ) -> Tuple[bool, str]:
         if self.server_args.tokenizer_worker_num > 1:
-            obj = MultiTokenizerWarpper(self.worker_id, obj)
+            obj = MultiTokenizerWrapper(self.worker_id, obj)
         self.send_to_scheduler.send_pyobj(obj)
         self.model_update_result = asyncio.Future()
         if self.server_args.dp_size == 1:
@@ -1340,7 +1340,7 @@ class TokenizerManager:
             return None
 
         if self.server_args.tokenizer_worker_num > 1:
-            obj = MultiTokenizerWarpper(self.worker_id, obj)
+            obj = MultiTokenizerWrapper(self.worker_id, obj)
         self.send_to_scheduler.send_pyobj(obj)
 
         self.session_futures[obj.session_id] = asyncio.Future()
@@ -2168,7 +2168,7 @@ class _Communicator(Generic[T]):
 
         if obj:
             if _Communicator.enable_multi_tokenizer:
-                obj = MultiTokenizerWarpper(worker_id=os.getpid(), obj=obj)
+                obj = MultiTokenizerWrapper(worker_id=os.getpid(), obj=obj)
             self._sender.send_pyobj(obj)
 
         self._result_event = asyncio.Event()
