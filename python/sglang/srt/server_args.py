@@ -105,6 +105,8 @@ ATTENTION_BACKEND_CHOICES = [
 
 DISAGG_TRANSFER_BACKEND_CHOICES = ["mooncake", "nixl", "ascend", "fake"]
 
+GRAMMAR_BACKEND_CHOICES = ["xgrammar", "outlines", "llguidance", "none"]
+
 
 # Allow external code to add more choices
 def add_load_format_choices(choices):
@@ -121,6 +123,10 @@ def add_attention_backend_choices(choices):
 
 def add_disagg_transfer_backend_choices(choices):
     DISAGG_TRANSFER_BACKEND_CHOICES.extend(choices)
+
+
+def add_grammar_backend_choices(choices):
+    GRAMMAR_BACKEND_CHOICES.extend(choices)
 
 
 @dataclasses.dataclass
@@ -253,6 +259,7 @@ class ServerArgs:
     # Speculative decoding
     speculative_algorithm: Optional[str] = None
     speculative_draft_model_path: Optional[str] = None
+    speculative_draft_model_revision: Optional[str] = None
     speculative_num_steps: Optional[int] = None
     speculative_eagle_topk: Optional[int] = None
     speculative_num_draft_tokens: Optional[int] = None
@@ -300,6 +307,8 @@ class ServerArgs:
     hicache_storage_backend: Optional[str] = None
     hicache_storage_prefetch_policy: str = "best_effort"
     hicache_storage_backend_extra_config: Optional[str] = None
+    # LMCache
+    enable_lmcache: bool = False
 
     # Double Sparsity
     enable_double_sparsity: bool = False
@@ -1501,7 +1510,7 @@ class ServerArgs:
         parser.add_argument(
             "--grammar-backend",
             type=str,
-            choices=["xgrammar", "outlines", "llguidance", "none"],
+            choices=GRAMMAR_BACKEND_CHOICES,
             default=ServerArgs.grammar_backend,
             help="Choose the backend for grammar-guided decoding.",
         )
@@ -1524,6 +1533,14 @@ class ServerArgs:
             "--speculative-draft-model-path",
             type=str,
             help="The path of the draft model weights. This can be a local folder or a Hugging Face repo ID.",
+        )
+        parser.add_argument(
+            "--speculative-draft-model-revision",
+            type=str,
+            default=None,
+            help="The specific draft model version to use. It can be a branch "
+            "name, a tag name, or a commit id. If unspecified, will use "
+            "the default version.",
         )
         parser.add_argument(
             "--speculative-num-steps",
@@ -1746,6 +1763,12 @@ class ServerArgs:
             type=str,
             default=ServerArgs.hicache_storage_backend_extra_config,
             help="A dictionary in JSON string format containing extra configuration for the storage backend.",
+        )
+        # LMCache
+        parser.add_argument(
+            "--enable-lmcache",
+            action="store_true",
+            help="Using LMCache as an alternative hierarchical cache solution",
         )
 
         # Double Sparsity
