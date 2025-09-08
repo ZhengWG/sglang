@@ -86,5 +86,5 @@ jobs:
     component: push-image-to-keeper
     id: push-image-to-keeper
     inputs:
-      mainSiteImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      mainSiteImage: reg.docker.alibaba-inc.com/augusto/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       aidcSiteImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
