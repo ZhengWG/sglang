@@ -95,6 +95,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.multi_tokenizer_mixin import (
     MultiTokenizerManager,
     get_main_process_id,
+    monkey_patch_uvicorn_multiprocessing,
     read_from_shared_memory,
     write_data_for_multi_tokenizer,
 )
@@ -1230,6 +1231,9 @@ def launch_server(
                 "level": "INFO",
                 "propagate": False,
             }
+
+            monkey_patch_uvicorn_multiprocessing()
+
             uvicorn.run(
                 "sglang.srt.entrypoints.http_server:app",
                 host=server_args.host,
