@@ -103,7 +103,7 @@ RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
     tar xf serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar
 
 RUN yum install -y gdb && \
-    pip install pystack-debugger
+    pip install pystack-debugger py-spy
 
 ENV ENGINE_TYPE sglang
 
