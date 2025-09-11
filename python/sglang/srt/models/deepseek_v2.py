@@ -1835,9 +1835,8 @@ class DeepseekV2AttentionMLA(nn.Module):
                 self.attn_mha.layer_id
             )
             latent_cache = (
-                latent_cache_buf[forward_batch.prefix_chunk_kv_indices[i]]
-                .contiguous()
-                .to(q.dtype)
+                latent_cache_buf[forward_batch.prefix_chunk_kv_indices[i]].contiguous()
+                # .to(q.dtype)   # for fa3 fp8 mha chunked prefix
             )
 
             kv_a_normed, k_pe = latent_cache.split(
