@@ -328,7 +328,7 @@ class BailingMoESparseMoeBlock(nn.Module):
     ) -> torch.Tensor:
         current_stream = torch.cuda.current_stream()
         self.alt_stream.wait_stream(current_stream)
-        shared_output = self._forward_shared_experts(hidden_states)
+        shared_output = self._forward_shared_experts(hidden_states.clone())
 
         with torch.cuda.stream(self.alt_stream):
             router_output = self._forward_router_experts(hidden_states)
@@ -347,8 +347,9 @@ class BailingMoESparseMoeBlock(nn.Module):
         DUAL_STREAM_TOKEN_THRESHOLD = 1024
         if (
             self.alt_stream is not None
-            and num_tokens > 0
-            and num_tokens <= DUAL_STREAM_TOKEN_THRESHOLD
+            and hidden_states.shape[0] > 0
+            and hidden_states.shape[0] <= DUAL_STREAM_TOKEN_THRESHOLD
+            and get_is_capture_mode()
         ):
             final_hidden_states, shared_output = self.forward_normal_dual_stream(
                 hidden_states
