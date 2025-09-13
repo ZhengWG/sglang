@@ -483,6 +483,8 @@ class SchedulerOutputProcessorMixin:
         rids = []
         finished_reasons: List[BaseFinishReason] = []
 
+        first_scheduled_times = []
+
         decoded_texts = []
         decode_ids_list = []
         read_offsets = []
@@ -563,6 +565,7 @@ class SchedulerOutputProcessorMixin:
                 finished_reasons.append(
                     req.finished_reason.to_json() if req.finished_reason else None
                 )
+                first_scheduled_times.append(req.first_scheduled_time)
                 decoded_texts.append(req.decoded_text)
                 decode_ids, read_offset = req.init_incremental_detokenize()
 
@@ -705,6 +708,7 @@ class SchedulerOutputProcessorMixin:
                     output_hidden_states,
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
+                    first_scheduled_times=first_scheduled_times,
                 )
             )
 

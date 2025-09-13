@@ -817,6 +817,9 @@ class BatchTokenIDOut:
     placeholder_tokens_idx: List[Optional[List[int]]]
     placeholder_tokens_val: List[Optional[List[int]]]
 
+    # perf stats
+    first_scheduled_times: List[float]
+
 
 @dataclass
 class BatchMultimodalDecodeReq:
@@ -883,6 +886,9 @@ class BatchStrOut:
 
     placeholder_tokens_idx: List[Optional[List[int]]]
     placeholder_tokens_val: List[Optional[List[int]]]
+
+    # perf stats
+    first_scheduled_times: List[float]
 
 
 @dataclass

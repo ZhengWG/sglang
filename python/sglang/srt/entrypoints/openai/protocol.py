@@ -286,6 +286,7 @@ class CompletionStreamResponse(BaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionMessageContentTextPart(BaseModel):
@@ -618,6 +619,7 @@ class ChatCompletionStreamResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class MultimodalEmbeddingInput(BaseModel):

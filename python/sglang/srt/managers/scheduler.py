@@ -1300,6 +1300,7 @@ class Scheduler(
 
         if add_to_grammar_queue:
             req.queue_time_start = time.perf_counter()
+            req.time_stats.wait_queue_entry_time = time.time()
             self.grammar_queue.append(req)
         else:
             self._add_request_to_queue(req)
@@ -1317,6 +1318,7 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
+        req.time_stats.wait_queue_entry_time = time.time()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
@@ -1699,7 +1701,10 @@ class Scheduler(
         if self.enable_metrics:
             # only record queue time when enable_metrics is True to avoid overhead
             for req in can_run_list:
-                req.queue_time_end = time.perf_counter()
+                # chunked prefill will be added to waiting queue for several times
+                if req.queue_time_end is None:
+                    req.queue_time_end = time.perf_counter()
+                    req.time_stats.forward_entry_time = time.time()
 
         self.waiting_queue = [
             x for x in self.waiting_queue if x not in set(can_run_list)
@@ -2403,7 +2408,7 @@ class Scheduler(
                 # Abort method 3: set `to_abort=True`
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
-                logger.info(f"Abort running request. {req.rid=}")
+                logger.info(f"Abort running request. {req.rid=}, {req.first_scheduled_time=}")
                 req.to_abort = True
 
     def _pause_engine(self) -> Tuple[List[Req], int]:

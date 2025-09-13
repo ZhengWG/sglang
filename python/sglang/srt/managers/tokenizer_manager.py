@@ -1273,6 +1273,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
                 state.finished_time = time.time()
                 meta_info["e2e_latency"] = state.finished_time - state.created_time
+
+                first_token_time = state.first_token_time \
+                    if state.first_token_time > 0.0 else time.time()
+                meta_info["ttft_latency"] = first_token_time - state.created_time
+
+                if getattr(recv_obj, "first_scheduled_times", None):
+                    meta_info["queue_latency"] = recv_obj.first_scheduled_times[i]
+
                 state.finish_reason = recv_obj.finished_reasons[i]["type"]
                 del self.rid_to_state[rid]
 

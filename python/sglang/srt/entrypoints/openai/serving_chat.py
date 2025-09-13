@@ -666,6 +666,12 @@ class OpenAIServingChat(OpenAIServingBase):
                     choices=[],  # Empty choices array as per OpenAI spec
                     model=request.model,
                     usage=usage,
+                    metadata={
+                        "weight_version": content["meta_info"]["weight_version"],
+                        "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
+                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
+                        "queue_latency": content["meta_info"].get("queue_latency", 0.0) * 1000,
+                    },
                 )
                 yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
@@ -797,7 +803,12 @@ class OpenAIServingChat(OpenAIServingBase):
             model=request.model,
             choices=choices,
             usage=usage,
-            metadata={"weight_version": ret[0]["meta_info"]["weight_version"]},
+            metadata={
+                "weight_version": ret[0]["meta_info"]["weight_version"],
+                "e2e_latency": ret[0]["meta_info"]["e2e_latency"] * 1000,
+                "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
+                "queue_latency": ret[0]["meta_info"].get("queue_latency", 0.0) * 1000,
+            },
         )
 
     def _process_logprobs_tokens(

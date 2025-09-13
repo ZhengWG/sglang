@@ -197,6 +197,11 @@ def _handle_output_by_index(output, i):
             ),
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
+            first_scheduled_times=(
+                [output.first_scheduled_times[i]]
+                if len(output.first_scheduled_times) > i
+                else None
+            ),
         )
     elif isinstance(output, BatchEmbeddingOut):
         new_output = BatchEmbeddingOut(
@@ -309,6 +314,11 @@ def _handle_output_by_index(output, i):
             output_hidden_states=(
                 [output.output_hidden_states[i]]
                 if output.output_hidden_states
+                else None
+            ),
+            first_scheduled_times=(
+                [output.first_scheduled_times[i]]
+                if len(output.first_scheduled_times) > i
                 else None
             ),
             placeholder_tokens_idx=None,

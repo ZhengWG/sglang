@@ -292,6 +292,12 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     choices=[],
                     model=request.model,
                     usage=usage,
+                    metadata={
+                        "weight_version": content["meta_info"]["weight_version"],
+                        "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
+                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
+                        "queue_latency": content["meta_info"].get("queue_latency", 0.0) * 1000,
+                    },
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
@@ -402,7 +408,12 @@ class OpenAIServingCompletion(OpenAIServingBase):
             created=created,
             choices=choices,
             usage=usage,
-            metadata={"weight_version": ret[0]["meta_info"]["weight_version"]},
+            metadata={
+                "weight_version": ret[0]["meta_info"]["weight_version"],
+                "e2e_latency": ret[0]["meta_info"]["e2e_latency"] * 1000,
+                "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
+                "queue_latency": ret[0]["meta_info"].get("queue_latency", 0.0) * 1000,
+            },
         )
 
     def _get_echo_text(self, request: CompletionRequest, index: int) -> str:

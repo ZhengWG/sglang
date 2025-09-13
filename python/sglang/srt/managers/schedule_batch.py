@@ -616,6 +616,11 @@ class Req:
         self.metadata_buffer_index: int = -1
 
     @property
+    def first_scheduled_time(self):
+        return (self.queue_time_end - self.queue_time_start) \
+            if self.queue_time_end else 0.0
+
+    @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
