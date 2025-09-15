@@ -52,7 +52,12 @@ class DpPaddingMode(IntEnum):
         return self == DpPaddingMode.SUM_LEN
 
     @classmethod
-    def get_dp_padding_mode(cls, global_num_tokens: List[int]) -> DpPaddingMode:
+    def get_dp_padding_mode(
+        cls, is_extend_in_batch, global_num_tokens: List[int]
+    ) -> DpPaddingMode:
+        if is_extend_in_batch:
+            return DpPaddingMode.SUM_LEN
+
         # we choose the mode that minimizes the communication cost
         max_len = max(global_num_tokens)
         sum_len = sum(global_num_tokens)
@@ -120,6 +125,18 @@ class _DpGatheredBufferWrapper:
     def get_dp_global_num_tokens(cls) -> List[int]:
         return cls._global_num_tokens
 
+    @classmethod
+    def get_dp_hidden_size(cls) -> int:
+        return cls._hidden_size
+
+    @classmethod
+    def get_dp_dtype(cls) -> torch.dtype:
+        return cls._dtype
+
+    @classmethod
+    def get_dp_device(cls) -> torch.device:
+        return cls._device
+
 
 def set_dp_buffer_len(
     global_dp_buffer_len: int,
@@ -149,6 +166,18 @@ def get_local_dp_buffer_len() -> int:
 
 def get_dp_global_num_tokens() -> List[int]:
     return _DpGatheredBufferWrapper.get_dp_global_num_tokens()
+
+
+def get_dp_hidden_size() -> int:
+    return _DpGatheredBufferWrapper.get_dp_hidden_size()
+
+
+def get_dp_dtype() -> torch.dtype:
+    return _DpGatheredBufferWrapper.get_dp_dtype()
+
+
+def get_dp_device() -> torch.device:
+    return _DpGatheredBufferWrapper.get_dp_device()
 
 
 def compute_dp_attention_world_info(enable_dp_attention, tp_rank, tp_size, dp_size):
@@ -237,7 +266,7 @@ def initialize_dp_attention(
     _DpGatheredBufferWrapper.set_metadata(
         hidden_size=model_config.hidden_size,
         dtype=model_config.dtype,
-        device=torch.device("cuda"),
+        device=torch.device(server_args.device),
     )
 
 

@@ -19,7 +19,7 @@
 # limitations under the License.
 """ SGLang BailingMoE model."""
 import logging
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -69,8 +69,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
-from sglang.srt.model_executor.graph_runner import get_is_capture_mode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, is_cuda, is_non_idle_and_non_empty, make_layers
 
@@ -128,7 +128,9 @@ class BailingMoEMLP(nn.Module):
 
         gate_up, _ = self.gate_up_proj(hidden_states)
         hidden_states = self.act_fn(gate_up)
-        hidden_states, _ = self.down_proj(hidden_states)
+        hidden_states, _ = self.down_proj(
+            hidden_states, skip_all_reduce=use_reduce_scatter
+        )
         return hidden_states
 
 
@@ -169,10 +171,12 @@ class BailingMoESparseMoeBlock(nn.Module):
         layer_id: int,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        alt_stream: Optional[torch.cuda.Stream] = None,
         prefix: str = "",
     ):
         super().__init__()
         self.layer_id = layer_id
+        self.alt_stream = alt_stream
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
@@ -242,7 +246,7 @@ class BailingMoESparseMoeBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-        self.experts = get_moe_impl_class()(
+        self.experts = get_moe_impl_class(quant_config)(
             num_experts=self.num_experts,
             top_k=self.top_k,
             layer_id=self.layer_id,
@@ -308,6 +312,32 @@ class BailingMoESparseMoeBlock(nn.Module):
             if name not in ["correction_bias"]
         ]
 
+    def _forward_shared_experts(self, hidden_states: torch.Tensor):
+        shared_output = None
+        if self.num_shared_experts > 0:
+            shared_output = self.shared_experts(hidden_states)
+        return shared_output
+
+    def _forward_router_experts(self, hidden_states: torch.Tensor):
+        # router_logits: (num_tokens, n_experts)
+        router_logits = self.gate(hidden_states)
+        topk_output = self.topk(hidden_states, router_logits)
+        return self.experts(hidden_states, topk_output)
+
+    def forward_normal_dual_stream(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        current_stream = torch.cuda.current_stream()
+        self.alt_stream.wait_stream(current_stream)
+        shared_output = self._forward_shared_experts(hidden_states.clone())
+
+        with torch.cuda.stream(self.alt_stream):
+            router_output = self._forward_router_experts(hidden_states)
+        current_stream.wait_stream(self.alt_stream)
+
+        return router_output, shared_output
+
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
@@ -315,15 +345,20 @@ class BailingMoESparseMoeBlock(nn.Module):
     ) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.num_shared_experts > 0:
-            shared_output = self.shared_experts(hidden_states)
-        # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states)
 
-        topk_output = self.topk(hidden_states, router_logits)
-        final_hidden_states = self.experts(hidden_states, topk_output)
-
-        # final_hidden_states *= self.routed_scaling_factor
+        DUAL_STREAM_TOKEN_THRESHOLD = 1024
+        if (
+            self.alt_stream is not None
+            and hidden_states.shape[0] > 0
+            and hidden_states.shape[0] <= DUAL_STREAM_TOKEN_THRESHOLD
+            and get_is_capture_mode()
+        ):
+            final_hidden_states, shared_output = self.forward_normal_dual_stream(
+                hidden_states
+            )
+        else:
+            shared_output = self._forward_shared_experts(hidden_states)
+            final_hidden_states = self._forward_router_experts(hidden_states)
 
         if self.num_shared_experts > 0:
             final_hidden_states = final_hidden_states + shared_output
@@ -573,6 +608,7 @@ class BailingMoEBlock(nn.Module):
                 layer_id=layer_id,
                 config=config,
                 quant_config=quant_config,
+                alt_stream=alt_stream,
                 prefix=add_prefix("mlp", prefix),
             )
         else:
@@ -652,10 +688,10 @@ class BailingMoEModel(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        alt_stream: Optional[torch.cuda.Stream] = None,
         prefix: str = "",
     ):
         super().__init__()
-        alt_stream = torch.cuda.Stream() if _is_cuda else None
         self.pp_group = get_pp_group()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -746,9 +782,12 @@ class BailingMoEForCausalLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
+        alt_stream = torch.cuda.Stream() if _is_cuda else None
+
         self.model = BailingMoEModel(
             config,
             quant_config,
+            alt_stream=alt_stream,
             prefix=add_prefix("model", ""),
         )
 
