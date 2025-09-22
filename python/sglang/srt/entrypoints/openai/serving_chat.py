@@ -151,7 +151,6 @@ class OpenAIServingChat(OpenAIServingBase):
             rid=request.rid,
             priority=request.priority,
             customer_labels=customer_labels,
-            mm_sampling_kwargs=(request.mm_sampling_kwargs if is_multimodal else None),
         )
 
         return adapted_request, request

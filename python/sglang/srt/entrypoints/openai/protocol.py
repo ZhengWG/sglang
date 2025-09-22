@@ -544,8 +544,6 @@ class ChatCompletionRequest(BaseModel):
     stream_reasoning: bool = True
     chat_template_kwargs: Optional[Dict] = None
 
-    mm_sampling_kwargs: Optional[Dict] = None
-
     # For request id
     rid: Optional[Union[List[str], str]] = None
     # Priority for the request

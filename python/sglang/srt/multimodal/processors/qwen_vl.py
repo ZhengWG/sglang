@@ -163,14 +163,11 @@ def smart_nframes(
 async def preprocess_video(
     vr,
     image_factor: int = IMAGE_FACTOR,
-    mm_sampling_kwargs: dict = {},
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     ele = {}
-    if mm_sampling_kwargs:
-        ele.update(mm_sampling_kwargs)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
-    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
     idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
     video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
@@ -251,8 +248,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             multimodal_tokens=self.mm_tokens,
         )
 
-        mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
-
         # Qwen-specific: resize images if they are raw Image objects
         if base_output.images and isinstance(base_output.images[0], Image.Image):
             resize_tasks = [resize_image_async(image) for image in base_output.images]
@@ -260,7 +255,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         if base_output.videos:
             base_output.videos = [
-                await preprocess_video(video, mm_sampling_kwargs=mm_sampling_kwargs) for video in base_output.videos
+                await preprocess_video(video) for video in base_output.videos
             ]
 
         mm_items, input_ids, ret = self.process_and_combine_mm_data(

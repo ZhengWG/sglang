@@ -144,9 +144,6 @@ class GenerateReqInput:
     # For customer metric labels
     customer_labels: Optional[Dict[str, str]] = None
 
-    # Multimodal sampling kwargs
-    mm_sampling_kwargs: Optional[Dict] = None
-
     def contains_mm_input(self) -> bool:
         return (
             has_valid_data(self.image_data)
