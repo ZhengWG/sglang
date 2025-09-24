@@ -23,6 +23,7 @@ class OpenAIServingTokenization(OpenAIServingBase):
     def _convert_to_internal_request(
         self,
         request: TokenizeRequest,
+        raw_request: Request = None,
     ) -> tuple[GenerateReqInput, TokenizeRequest]:
         """Convert OpenAI tokenize request to internal format"""
         return None, request
