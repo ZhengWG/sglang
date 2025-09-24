@@ -340,7 +340,7 @@ class FunctionResponse(BaseModel):
     """Function response."""
 
     name: Optional[str] = None
-    arguments: Optional[str] = None
+    arguments: Optional[str | Dict[str, Any]] = None
 
 
 class ToolCall(BaseModel):
