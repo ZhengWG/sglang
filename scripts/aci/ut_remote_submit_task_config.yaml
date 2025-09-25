@@ -1,0 +1,81 @@
+# 1.1 支持local_run（运行环境已ready，直接启动框架）
+# 1.2 支持PythonJobBuilder（先提交AIS job，在AIS job的Pod启动框架）
+# task_type: local_run
+task_type: PythonJobBuilder
+
+# task_submitter: # 工号list，用于钉钉通知（通知包含：执行结果及测试报告）
+app_name: 'theta/sglang-ut'
+
+# 2、（可选）用于提交任务，仅在task_type: PythonJobBuilder时使用
+PythonJobBuildConfig:
+  exec_conf: 
+    cpu: 16
+    num: 1
+    gpu_num: 1
+    memory: 196608 # 单位M
+    disk_m: 204800 # 单位M
+    gpu_type: ${GPU_TYPE}
+
+  km_conf: 
+    # 对应KubemakerConf的参数配置
+    # __init__(self, image=ConfigConstants.DEFAULT_IMAGE, pool="kubemaker", cluster="auto", retry_strategy=None)
+    image: ${IMAGE}
+
+  other_conf: 
+    # runtime: 'pytorch'参考参数
+    k8s_priority: "high"
+    k8s_app_name: ${K8S_APP_NAME}
+    runtime: 'pytorch'
+    rdma: True
+    host_network: True
+    tag: "theta-sglang-ut"
+
+  pre_custom_command: # （可选）框架执行前的自定义command， eg：git clone等操作 
+    ## 注：执行cd/popd后需切换到 PythonJobBuilder pod的根路径/workspace/bin/
+    - 'export OSS_TEST_ACCESS_KEY_ID=${OSS_TEST_ACCESS_KEY_ID}'
+    - 'export OSS_TEST_ACCESS_KEY_SECRET=${OSS_TEST_ACCESS_KEY_SECRET}'
+    - 'export DD_APP_SECRET=${DD_APP_SECRET}'
+    - 'git clone https://git:${GIT_TOKEN}@code.alipay.com/Theta/SGLang.git'
+    - 'cd SGLang'
+    - 'git checkout ${SGLANG_COMMIT_ID}'
+    - 'cd ..'
+    - 'pip show sgl-kernel'
+    - 'export PYTHONPATH=${RC_IMAGE_PYTHONPATH}:/root/SGLang/python:$PYTHONPATH'
+    - 'pwd'
+    - 'nvidia-smi'
+    - 'export PIPELINE_ID=${PIPELINE_ID}'
+    # - 'pip show sglang && pip uninstall sglang -y'
+    # - 'pip show sgl-kernel && pip uninstall sgl-kernel -y'
+    # - 'echo "SGL_KERNEL_PIP_URL:${SGL_KERNEL_PIP_URL}"'
+    # - 'curl -L -o sgl_kernel-0.1.8.post1-cp39-abi3-linux_x86_64.whl  "${SGL_KERNEL_PIP_URL}"'
+    # - 'pip install sgl_kernel-0.1.8.post1-cp39-abi3-linux_x86_64.whl -i https://pypi.antfin-inc.com/simple'
+
+  post_custom_command: # （可选）框架执行后的自定义command， eg：覆盖率上传oss等操作
+    - 'cd /root'
+    - 'ls'
+    - 'wget -q http://antsys-oss-tools-dev.cn-hangzhou-alipay-b.oss-cdn.aliyun-inc.com/ossutil64'
+    - 'chmod 755 ossutil64'
+    - './ossutil64 --access-key-secret ${OSS_TEST_ACCESS_KEY_SECRET} --access-key-id ${OSS_TEST_ACCESS_KEY_ID} --endpoint http://cn-hangzhou.alipay.aliyun-inc.com  cp -f /coverage.xml oss://cmps-model/ACI_SGLang/${PIPELINE_ID}/sglang_UT/coverage.xml'
+    - './ossutil64 --access-key-secret ${OSS_TEST_ACCESS_KEY_SECRET} --access-key-id ${OSS_TEST_ACCESS_KEY_ID} --endpoint http://cn-hangzhou.alipay.aliyun-inc.com  cp -f /result-report.xml oss://cmps-model/ACI_SGLang/${PIPELINE_ID}/sglang_UT/result-report.xml'
+
+# 3、执行case 类型（默认为IT、 可选cases_type: ut）
+# 3.1 执行ut case (需pytest或unittest 编写的case)
+cases_type: ut
+# 3.1.1 存放case的绝对路径的目录
+# 提交PythonJobBuilder pod的根路径/workspace/bin/
+cases_parent_path: /root/SGLang
+# 3.1.2 cases相对cases_parent_path的相对路径
+cases_sub_path:
+  - sgl-kernel/tests
+
+# 3.1.3 pytest原生命令行参数
+pytest_args:
+  - -sv
+  - --continue-on-collection-errors
+  - --junit-xml=/result-report.xml
+  - --cov-report=xml:/coverage.xml
+  - --cov=/opt/conda/lib/python3.10/site-packages/sgl_kernel
+  - --cov-report=term-missing
+  - --cov-append
+  - --alluredir=/allure-results
+  - --timeout=300
