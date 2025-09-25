@@ -193,7 +193,6 @@ class ModelConfig:
             and is_multimodal_chunked_prefill_supported(self.hf_config.architectures)
         )
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
-        self.is_post_loading_model = is_post_loading_model(self.hf_config.architectures)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
         # Derive context length
@@ -316,6 +315,10 @@ class ModelConfig:
 
         # Verify quantization
         self._verify_quantization()
+
+        # Check if model supports post loading
+        # must be called after _verify_quantization()
+        self.is_post_loading_model = self._is_post_loading_model()
 
         # Verify dual-chunk attention config
         self._verify_dual_chunk_attention_config()
@@ -475,6 +478,26 @@ class ModelConfig:
                     quant_cfg = modelopt_quant_config
         return quant_cfg
 
+    def _is_post_loading_model(self):
+        """Check if model supports post loading."""
+        supported = [
+            "DeepseekV2ForCausalLM",
+            "DeepseekV3ForCausalLM",
+            "Qwen3ForCausalLM",
+            "Qwen3MoeForCausalLM",
+        ]
+        if any(arch in supported for arch in self.hf_config.architectures):
+            if self.quantization is None:
+                return True
+            elif (
+                self.quantization == "fp8"
+                and self.quant_cfg is not None
+                and "weight_block_size" in self.quant_cfg
+            ):
+                return True
+
+        return False
+
     # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
@@ -519,6 +542,7 @@ class ModelConfig:
 
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self._parse_quant_hf_config()
+        self.quant_cfg = quant_cfg
 
         if quant_cfg is not None:
             quant_method = quant_cfg.get(
@@ -799,20 +823,6 @@ def is_multimodal_chunked_prefill_supported(model_architectures: List[str]):
         return False
     else:
         return True
-
-
-def is_post_loading_model(model_architectures: List[str]):
-    """Check if model supports post loading."""
-    supported = [
-        "DeepseekV2ForCausalLM",
-        "DeepseekV3ForCausalLM",
-        "Qwen3ForCausalLM",
-        "Qwen3MoeForCausalLM",
-    ]
-    if any(arch in supported for arch in model_architectures):
-        return True
-    else:
-        return False
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
