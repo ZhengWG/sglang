@@ -92,6 +92,9 @@ COPY ./docker/ant/expert_workload.json /root/expert_workload.json
 ENV NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /root/
 
+# TMP FIX for chat-template for qwen-vl3-thinking
+COPY ./docker/ant/template_qwen3_vl_thinking.jinja /root/template_qwen3_vl_thinking.jinja
+
 # 安装x-runtime
 ARG RUNTIME_VERSION
 ARG RUNTIME_LLM_VERSION
@@ -106,4 +109,3 @@ RUN yum install -y gdb && \
     pip install pystack-debugger py-spy
 
 ENV ENGINE_TYPE sglang
-
