@@ -1114,6 +1114,13 @@ class MRotaryEmbedding(RotaryEmbedding):
                 dtype=input_ids.dtype,
                 device=input_ids.device,
             )
+            if video_grid_thw is not None and model_type in ("qwen3_vl", "qwen3_vl_moe"):
+                # https://github.com/huggingface/transformers/commit/c0dbe095b0fdceff933dbca7978ed76716d97fb2#diff-c8210143a2bd3371705d5aa2b506ed2e928129dd1cbcb7a899fee445d0c3e659R1069-R1072
+                # Since we use timestamps to seperate videos,
+                # like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>,
+                # the video_grid_thw should also be split
+                video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+                video_grid_thw[:, 0] = 1
             image_index, video_index = 0, 0
             for i, input_ids in enumerate(total_input_ids):
                 image_nums, video_nums = 0, 0
