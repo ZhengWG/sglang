@@ -29,10 +29,10 @@ class OpenAIServingBase(ABC):
         self.tokenizer_manager = tokenizer_manager
         self.allowed_custom_labels = (
             set(
-                self.tokenizer_manager.server_args.tokenizer_metrics_allowed_customer_labels
+                self.tokenizer_manager.server_args.tokenizer_metrics_allowed_custom_labels
             )
             if isinstance(self.tokenizer_manager.server_args, ServerArgs)
-            and self.tokenizer_manager.server_args.tokenizer_metrics_allowed_customer_labels
+            and self.tokenizer_manager.server_args.tokenizer_metrics_allowed_custom_labels
             else None
         )
 
@@ -183,14 +183,14 @@ class OpenAIServingBase(ABC):
         )
         return json.dumps({"error": error.model_dump()})
 
-    def extract_customer_labels(self, raw_request):
+    def extract_custom_labels(self, raw_request):
         if (
             not self.allowed_custom_labels
             or not self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels_header
         ):
             return None
 
-        customer_labels = None
+        custom_labels = None
         header = (
             self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels_header
         )
@@ -205,12 +205,12 @@ class OpenAIServingBase(ABC):
             raw_labels = None
 
         if isinstance(raw_labels, dict):
-            customer_labels = {
+            custom_labels = {
                 label: value
                 for label, value in raw_labels.items()
                 if label in self.allowed_custom_labels
             }
-        return customer_labels
+        return custom_labels
 
     def set_trace_id(self, request: OpenAIServingRequest, raw_request: Request):
         # 0. 判断是否包含rid属性
