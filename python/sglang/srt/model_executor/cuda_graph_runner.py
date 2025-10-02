@@ -55,6 +55,7 @@ from sglang.srt.utils import (
     get_available_gpu_memory,
     get_bool_env_var,
     get_device_memory_capacity,
+    is_hip,
     log_info_on_rank0,
     require_attn_tp_gather,
     require_gathered_buffer,
@@ -62,12 +63,15 @@ from sglang.srt.utils import (
     require_mlp_tp_gather,
 )
 
+_is_hip = is_hip()
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
-ENABLE_DYNAMIC_TORCH_COMPILE = get_bool_env_var("SGLANG_ENABLE_DYNAMIC_TORCH_COMPILE", "true")
+ENABLE_DYNAMIC_TORCH_COMPILE = ((not _is_hip and get_bool_env_var("SGLANG_ENABLE_DYNAMIC_TORCH_COMPILE", "true"))
+                                or (_is_hip and get_bool_env_var("SGLANG_TORCH_DYNAMIC_SHAPE")))
 
 # Detect whether the current forward pass is in capture mode
 is_capture_mode = False
