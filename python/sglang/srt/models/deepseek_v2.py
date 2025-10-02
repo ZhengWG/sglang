@@ -896,6 +896,7 @@ class DeepseekV2MoE(nn.Module):
         if self.ep_size > 1:
             self.experts.deepep_dispatcher.dispatch_a(
                 hidden_states=state.hidden_states_mlp_input,
+                input_global_scale=None,
                 topk_idx=state.pop("topk_idx_local"),
                 topk_weights=state.pop("topk_weights_local"),
                 forward_batch=state.forward_batch,
@@ -1399,7 +1400,10 @@ class DeepseekV2AttentionMLA(nn.Module):
         """
         return (
             self.current_attention_backend == "trtllm_mla"
-            and forward_batch.forward_mode.is_decode_or_idle()
+            and (
+                forward_batch.forward_mode.is_decode_or_idle()
+                or forward_batch.forward_mode.is_target_verify()
+            )
             and forward_batch.attn_backend.data_type == torch.float8_e4m3fn
         )
 
