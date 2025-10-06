@@ -67,7 +67,7 @@ from sglang.srt.models.bailing_moe import BailingMoEMLP, BailingMoESparseMoeBloc
 from sglang.srt.models.deepseek_v2 import (
     FORWARD_ABSORB_CORE_ATTENTION_BACKENDS,
     AttnForwardMethod,
-    BackendRegistry,
+    AttentionBackendRegistry,
     _device_sm,
     _is_fp8_fnuz,
     _use_aiter_gfx95,
@@ -345,7 +345,7 @@ class BailingMoEV3AttentionMLA(nn.Module):
             attention_backend = global_server_args_dict["prefill_attention_backend"]
         self.current_attention_backend = attention_backend
 
-        handler = BackendRegistry.get_handler(attention_backend)
+        handler = AttentionBackendRegistry.get_handler(attention_backend)
         return handler(self, forward_batch)
 
     def op_prepare(self, state):
