@@ -10,6 +10,7 @@ from sglang.srt.entrypoints.openai.protocol import (
     ErrorResponse,
     TokenizeRequest,
     TokenizeResponse,
+    TokenizeChatRequest,
 )
 from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
 
@@ -35,28 +36,61 @@ class OpenAIServingTokenize(OpenAIServingBase):
     ) -> Union[TokenizeResponse, ErrorResponse]:
         try:
             tokenizer = self.tokenizer_manager.tokenizer
-            max_model_len = getattr(tokenizer, "model_max_length", -1)
+            max_model_len = self.tokenizer_manager.context_len
 
-            if isinstance(request.prompt, str):
-                token_ids = tokenizer.encode(
-                    request.prompt,
-                    add_special_tokens=request.add_special_tokens,
+            if isinstance(request, TokenizeChatRequest):
+                # process messages
+                openai_compatible_messages = []
+                for message in request.messages:
+                    if message.content is None:
+                        message.content = ""
+                    msg_dict = message.dict()
+                    if isinstance(msg_dict.get("content"), list):
+                        for chunk in msg_dict["content"]:
+                            if isinstance(chunk, dict) and chunk.get("type") == "text":
+                                new_msg = msg_dict.copy()
+                                new_msg["content"] = chunk["text"]
+                                new_msg = {
+                                    k: v for k, v in new_msg.items() if v is not None
+                                }
+                                openai_compatible_messages.append(new_msg)
+                    else:
+                        msg_dict = {k: v for k, v in msg_dict.items() if v is not None}
+                        openai_compatible_messages.append(msg_dict)
+                token_ids = tokenizer.apply_chat_template(
+                    openai_compatible_messages,
+                    tokenize=True,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
+                    **(
+                        request.chat_template_kwargs
+                        if request.chat_template_kwargs
+                        else {}
+                    ),
                 )
                 tokens = token_ids
                 count = len(token_ids)
-            elif isinstance(request.prompt, list):
-                token_ids_list = [
-                    tokenizer.encode(
-                        text, add_special_tokens=request.add_special_tokens
-                    )
-                    for text in request.prompt
-                ]
-                tokens = token_ids_list
-                count = [len(ids) for ids in token_ids_list]
             else:
-                return self.create_error_response(
-                    f"Invalid prompt type: {type(request.prompt)}. Expected str or List[str]."
-                )
+                if isinstance(request.prompt, str):
+                    token_ids = tokenizer.encode(
+                        request.prompt,
+                        add_special_tokens=request.add_special_tokens,
+                    )
+                    tokens = token_ids
+                    count = len(token_ids)
+                elif isinstance(request.prompt, list):
+                    token_ids_list = [
+                        tokenizer.encode(
+                            text, add_special_tokens=request.add_special_tokens
+                        )
+                        for text in request.prompt
+                    ]
+                    tokens = token_ids_list
+                    count = [len(ids) for ids in token_ids_list]
+                else:
+                    return self.create_error_response(
+                        f"Invalid prompt type: {type(request.prompt)}. Expected str or List[str]."
+                    )
 
             return TokenizeResponse(
                 tokens=tokens, count=count, max_model_len=max_model_len

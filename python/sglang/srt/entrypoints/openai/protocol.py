@@ -804,16 +804,17 @@ class RerankResponse(BaseModel):
     index: int
     meta_info: Optional[dict] = None
 
-class TokenizeCompletionRequest(BaseModel):
-    model: Optional[str] = None
-    prompt: str
 
+class TokenizeCompletionRequest(BaseModel):
+    """Request schema for the /tokenize endpoint."""
+
+    model: str = DEFAULT_MODEL_NAME
+    prompt: Union[str, List[str]]
     add_special_tokens: bool = Field(
         default=True,
-        description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
+        description="whether to add model-specific special tokens (e.g. BOS/EOS) during encoding.",
     )
+
 
 class TokenizeChatRequest(BaseModel):
     model: Optional[str] = None
@@ -859,22 +860,8 @@ class TokenizeChatRequest(BaseModel):
                              "`add_generation_prompt` to True.")
         return data
 
-class TokenizeResponse(BaseModel):
-    count: int
-    max_model_len: int
-    tokens: list[int]
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
-
-class TokenizeRequest(BaseModel):
-    """Request schema for the /tokenize endpoint."""
-
-    model: str = DEFAULT_MODEL_NAME
-    prompt: Union[str, List[str]]
-    add_special_tokens: bool = Field(
-        default=True,
-        description="whether to add model-specific special tokens (e.g. BOS/EOS) during encoding.",
-    )
 
 
 class TokenizeResponse(BaseModel):
