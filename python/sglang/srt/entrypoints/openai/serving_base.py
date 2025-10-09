@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 SOFA_TRACE_IN_HEADER = "sofa-traceid"
 SOFA_TRACE_IN_BODY = "trace_id"
 
+
 # Base class for specific endpoint handlers
 class OpenAIServingBase(ABC):
     """Abstract base class for OpenAI endpoint handlers"""
@@ -67,12 +68,19 @@ class OpenAIServingBase(ABC):
             return self.create_error_response(
                 message=e.detail, err_type=str(e.status_code), status_code=e.status_code
             )
+        except ValueError as e:
+            logger.exception(f"ValueError in request: {e}")
+            return self.create_error_response(
+                message=str(e),
+                err_type="BadRequest",
+                status_code=400,
+            )
         except Exception as e:
             logger.exception(f"Error in request: {e}")
             return self.create_error_response(
                 message=f"Internal server error: {str(e)}",
                 err_type="InternalServerError",
-                status_code=500,
+                status_code=getattr(e, "error_code", 500),
             )
 
     @abstractmethod
@@ -201,7 +209,7 @@ class OpenAIServingBase(ABC):
 
     def set_trace_id(self, request: OpenAIServingRequest, raw_request: Request):
         # 0. 判断是否包含rid属性
-        if not hasattr(request, 'rid'):
+        if not hasattr(request, "rid"):
             return
 
         trace_id = None
@@ -211,5 +219,5 @@ class OpenAIServingBase(ABC):
 
         # 2. 合法则写入请求
         if trace_id:
-            rid = trace_id + '_' + str(uuid.uuid4().hex)[:8]
-            setattr(request, 'rid', rid)
+            rid = trace_id + "_" + str(uuid.uuid4().hex)[:8]
+            setattr(request, "rid", rid)

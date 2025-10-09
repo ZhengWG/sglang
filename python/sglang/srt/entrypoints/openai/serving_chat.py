@@ -110,14 +110,17 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
         # Process messages and apply chat template
-        processed_messages = self._process_messages(request, is_multimodal)
+        try:
+            processed_messages = self._process_messages(request, is_multimodal)
 
-        # Build sampling parameters
-        sampling_params = self._build_sampling_params(
-            request,
-            processed_messages.stop,
-            processed_messages.tool_call_constraint,
-        )
+            # Build sampling parameters
+            sampling_params = self._build_sampling_params(
+                request,
+                processed_messages.stop,
+                processed_messages.tool_call_constraint,
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to process messages: {str(e)}")
 
         # Handle single vs multiple requests
         if is_multimodal:
@@ -508,16 +511,27 @@ class OpenAIServingChat(OpenAIServingBase):
                 # First chunk with role
                 if is_firsts.get(index, True):
 
-                    first_chunk_padding = self.tokenizer_manager.server_args.reasoning_padding
+                    first_chunk_padding = (
+                        self.tokenizer_manager.server_args.reasoning_padding
+                    )
 
-                    thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
-                    if (thinking_trigger and
-                        not self._get_enable_thinking_from_request(request, thinking_trigger)):
+                    thinking_trigger = (
+                        self.tokenizer_manager.server_args.thinking_trigger
+                    )
+                    if thinking_trigger and not self._get_enable_thinking_from_request(
+                        request, thinking_trigger
+                    ):
                         first_chunk_padding = ""
-                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
+                    first_chunk_content = (
+                        f"{first_chunk_padding}\n" if first_chunk_padding else ""
+                    )
 
                     is_firsts[index] = False
-                    delta = DeltaMessage(role="assistant", content=first_chunk_content, reasoning_content="")
+                    delta = DeltaMessage(
+                        role="assistant",
+                        content=first_chunk_content,
+                        reasoning_content="",
+                    )
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=delta,
@@ -533,7 +547,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 stream_buffer = stream_buffers.get(index, "")
-                delta = content["text"][len(stream_buffer):]
+                delta = content["text"][len(stream_buffer) :]
                 stream_buffers[index] = stream_buffer + delta
 
                 # Handle reasoning content
@@ -547,7 +561,11 @@ class OpenAIServingChat(OpenAIServingBase):
                     if reasoning_text:
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
-                            delta=DeltaMessage(role="assistant", content="", reasoning_content=reasoning_text),
+                            delta=DeltaMessage(
+                                role="assistant",
+                                content="",
+                                reasoning_content=reasoning_text,
+                            ),
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
@@ -676,8 +694,10 @@ class OpenAIServingChat(OpenAIServingBase):
                     metadata={
                         "weight_version": content["meta_info"]["weight_version"],
                         "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
-                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
-                        "queue_latency": content["meta_info"].get("queue_latency", 0.0) * 1000,
+                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0)
+                        * 1000,
+                        "queue_latency": content["meta_info"].get("queue_latency", 0.0)
+                        * 1000,
                     },
                 )
                 yield f"data: {usage_chunk.model_dump_json()}\n\n"
@@ -685,6 +705,16 @@ class OpenAIServingChat(OpenAIServingBase):
         except ValueError as e:
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        except Exception as e:
+            logger.exception(f"Exception in request: {e}")
+            if hasattr(e, "error_code"):
+                error = self.create_streaming_error_response(
+                    str(e),
+                    status_code=e.error_code,
+                )
+                yield f"data: {error}\n\n"
+            else:
+                raise e
 
         yield "data: [DONE]\n\n"
 
@@ -737,8 +767,9 @@ class OpenAIServingChat(OpenAIServingBase):
             reasoning_padding = self.tokenizer_manager.server_args.reasoning_padding
 
             thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
-            if (thinking_trigger and
-                not self._get_enable_thinking_from_request(request, thinking_trigger)):
+            if thinking_trigger and not self._get_enable_thinking_from_request(
+                request, thinking_trigger
+            ):
                 reasoning_padding = ""
 
             if reasoning_padding and text is not None:
@@ -951,9 +982,7 @@ class OpenAIServingChat(OpenAIServingBase):
         return reasoning_parser.parse_stream_chunk(delta)
 
     def _get_enable_thinking_from_request(
-        self,
-        request: ChatCompletionRequest,
-        thinking_trigger: str = "enable_thinking"
+        self, request: ChatCompletionRequest, thinking_trigger: str = "enable_thinking"
     ) -> bool:
         """Extracts the 'enable_thinking' flag from request chat_template_kwargs.
 

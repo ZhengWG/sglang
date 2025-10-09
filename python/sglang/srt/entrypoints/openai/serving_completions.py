@@ -70,17 +70,20 @@ class OpenAIServingCompletion(OpenAIServingBase):
             )
         # Process prompt
         prompt = request.prompt
-        if self.template_manager.completion_template_name is not None:
-            prompt = generate_completion_prompt_from_request(request)
+        try:
+            if self.template_manager.completion_template_name is not None:
+                prompt = generate_completion_prompt_from_request(request)
 
-        # Set logprob start length based on echo and logprobs
-        if request.echo and request.logprobs:
-            logprob_start_len = 0
-        else:
-            logprob_start_len = -1
+            # Set logprob start length based on echo and logprobs
+            if request.echo and request.logprobs:
+                logprob_start_len = 0
+            else:
+                logprob_start_len = -1
 
-        # Build sampling parameters
-        sampling_params = self._build_sampling_params(request)
+            # Build sampling parameters
+            sampling_params = self._build_sampling_params(request)
+        except Exception as e:
+            raise ValueError(f"Failed to build request: {str(e)}")
 
         # Determine prompt format
         if isinstance(prompt, str) or (
@@ -301,15 +304,21 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     metadata={
                         "weight_version": content["meta_info"]["weight_version"],
                         "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
-                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
-                        "queue_latency": content["meta_info"].get("queue_latency", 0.0) * 1000,
+                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0)
+                        * 1000,
+                        "queue_latency": content["meta_info"].get("queue_latency", 0.0)
+                        * 1000,
                     },
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
 
         except Exception as e:
-            error = self.create_streaming_error_response(str(e))
+            error_code = getattr(e, "error_code", 400)
+            error = self.create_streaming_error_response(
+                str(e),
+                status_code=error_code,
+            )
             yield f"data: {error}\n\n"
 
         yield "data: [DONE]\n\n"

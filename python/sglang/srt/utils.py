@@ -739,8 +739,11 @@ def load_audio(
     elif audio_file.startswith("http://") or audio_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
         response = requests.get(audio_file, stream=True, timeout=timeout)
-        audio_file = BytesIO(response.content)
-        response.close()
+        try:
+            response.raise_for_status()
+            audio_file = BytesIO(response.content)
+        finally:
+            response.close()
         audio, original_sr = sf.read(audio_file)
     elif isinstance(audio_file, str):
         audio, original_sr = sf.read(audio_file)
@@ -1077,6 +1080,7 @@ def prepare_model_and_tokenizer(model_path: str, tokenizer_path: str):
 
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
+
     def __init__(self, fmt, datefmt=None, style="%"):
         logging.Formatter.__init__(self, fmt, datefmt, style)
 
@@ -1100,6 +1104,7 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     import concurrent_log_handler  # noqa: F401
+
     _FORMAT = f"%(asctime)s %(levelname)s %(process)d [{prefix} %(filename)s:%(lineno)d] %(message)s"
     _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
     DEFAULT_LOGGING_CONFIG = {
@@ -1128,7 +1133,7 @@ def configure_logger(server_args, prefix: str = ""):
             },
         },
         "version": 1,
-        "disable_existing_loggers": False
+        "disable_existing_loggers": False,
     }
     logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
 
@@ -3406,22 +3411,23 @@ def cached_triton_kernel(key_fn=None):
 
 
 def extract_numa_id(device_id):
-    return device_id.split(':')[0]
+    return device_id.split(":")[0]
+
 
 def check_device_cross_numa_node(visible_device_idx=None) -> bool:
     """Check if the GPU devices are on different NUMA nodes.
-       Assuming the device id format is like 00000001:8A:00.0
-       For example, for "00000001:8A:00.0", the NUMA node ID might be "01".
+    Assuming the device id format is like 00000001:8A:00.0
+    For example, for "00000001:8A:00.0", the NUMA node ID might be "01".
     """
     try:
         result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=pci.bus_id', '--format=csv,noheader'],
+            ["nvidia-smi", "--query-gpu=pci.bus_id", "--format=csv,noheader"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
-            text=True
+            text=True,
         )
-        device_ids = result.stdout.strip().split('\n')
+        device_ids = result.stdout.strip().split("\n")
         if visible_device_idx is not None:
             valid_indices = [i for i in visible_device_idx if 0 <= i < len(device_ids)]
             device_ids = [device_ids[i] for i in valid_indices]
