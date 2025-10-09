@@ -1000,11 +1000,13 @@ class MRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
         mrope_section: Optional[List[int]] = None,
+        mrope_interleaved: Optional[bool] = False,
     ) -> None:
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
 
+        self.mrope_interleaved = mrope_interleaved
         self.mrope_section = mrope_section
         if self.mrope_section:
             expected_sum = rotary_dim // 2
@@ -1063,14 +1065,31 @@ class MRotaryEmbedding(RotaryEmbedding):
         if positions.ndim == 2:
             assert self.mrope_section
 
-            cos = torch.cat(
-                [m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
-                dim=-1,
-            )
-            sin = torch.cat(
-                [m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
-                dim=-1,
-            )
+            if self.mrope_interleaved:
+
+                def apply_interleaved_rope(
+                    x: torch.Tensor, mrope_section: list[int]
+                ) -> torch.Tensor:
+                    x_t = x[0].clone()
+                    x_t[..., 1 : mrope_section[1] * 3 : 3] = x[
+                        1, ..., 1 : mrope_section[1] * 3 : 3
+                    ]
+                    x_t[..., 2 : mrope_section[2] * 3 : 3] = x[
+                        2, ..., 2 : mrope_section[2] * 3 : 3
+                    ]
+                    return x_t
+
+                cos = apply_interleaved_rope(cos, self.mrope_section)
+                sin = apply_interleaved_rope(sin, self.mrope_section)
+            else:
+                cos = torch.cat(
+                    [m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
+                    dim=-1,
+                )
+                sin = torch.cat(
+                    [m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
+                    dim=-1,
+                )
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
@@ -1114,12 +1133,17 @@ class MRotaryEmbedding(RotaryEmbedding):
                 dtype=input_ids.dtype,
                 device=input_ids.device,
             )
-            if video_grid_thw is not None and model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            if video_grid_thw is not None and model_type in (
+                "qwen3_vl",
+                "qwen3_vl_moe",
+            ):
                 # https://github.com/huggingface/transformers/commit/c0dbe095b0fdceff933dbca7978ed76716d97fb2#diff-c8210143a2bd3371705d5aa2b506ed2e928129dd1cbcb7a899fee445d0c3e659R1069-R1072
                 # Since we use timestamps to seperate videos,
                 # like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>,
                 # the video_grid_thw should also be split
-                video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+                video_grid_thw = torch.repeat_interleave(
+                    video_grid_thw, video_grid_thw[:, 0], dim=0
+                )
                 video_grid_thw[:, 0] = 1
             image_index, video_index = 0, 0
             for i, input_ids in enumerate(total_input_ids):
@@ -1751,6 +1775,7 @@ def get_rope(
                     is_neox_style,
                     dtype,
                     mrope_section=rope_scaling["mrope_section"],
+                    mrope_interleaved=rope_scaling.get("mrope_interleaved", False),
                 )
             else:
                 rotary_emb = RotaryEmbedding(
