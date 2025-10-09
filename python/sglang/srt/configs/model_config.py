@@ -248,6 +248,7 @@ class ModelConfig:
         if is_draft_model and self.hf_config.architectures[0] in [
             "BailingMoeForCausalLM",
             "BailingMoeV2ForCausalLM",
+            "BailingMoeV3ForCausalLM",
         ]:
             self.hf_config.architectures[0] = "BailingMoeForCausalLMNextN"
         if (
