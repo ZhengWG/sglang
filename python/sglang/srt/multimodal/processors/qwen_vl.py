@@ -140,9 +140,12 @@ def smart_nframes(
         nframes = round_by_factor(ele["nframes"], FRAME_FACTOR)
     else:
         fps = ele.get("fps", default_fps)
-        min_frames = ceil_by_factor(ele.get("min_frames", default_fps_min_frames), FRAME_FACTOR)
+        min_frames = ceil_by_factor(
+            ele.get("min_frames", default_fps_min_frames), FRAME_FACTOR
+        )
         max_frames = floor_by_factor(
-            ele.get("max_frames", min(default_fps_max_frames, total_frames)), FRAME_FACTOR
+            ele.get("max_frames", min(default_fps_max_frames, total_frames)),
+            FRAME_FACTOR,
         )
         nframes = total_frames / video_fps * fps
         if nframes > total_frames:
@@ -171,6 +174,7 @@ async def preprocess_video(
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     ele = {}
+    videometa = {}
     if mm_sampling_kwargs:
         ele.update(mm_sampling_kwargs)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
@@ -182,10 +186,16 @@ async def preprocess_video(
         default_fps_min_frames=default_fps_min_frames,
         default_fps_max_frames=default_fps_max_frames,
     )
-    idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+    idx = torch.linspace(0, total_frames - 1, nframes).round().long()
+    videometa["frames_indices"] = idx.numpy()
+    idx = idx.tolist()
     video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
+    videometa["total_num_frames"] = total_frames
+    videometa["height"] = height
+    videometa["width"] = width
+    videometa["fps"] = video_fps
     min_pixels = ele.get("min_pixels", video_min_pixels)
     total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
     max_pixels = max(
@@ -220,7 +230,7 @@ async def preprocess_video(
         interpolation=InterpolationMode.BICUBIC,
         antialias=True,
     ).float()
-    return video
+    return video, videometa
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
@@ -296,31 +306,42 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if base_output.images and isinstance(base_output.images[0], Image.Image):
             resize_tasks = [
                 resize_image_async(
-                    image,
-                    self.MIN_PIXELS,
-                    self.MAX_PIXELS,
-                    self.IMAGE_FACTOR
-                ) for image in base_output.images
+                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR
+                )
+                for image in base_output.images
             ]
             base_output.images = await asyncio.gather(*resize_tasks)
 
         if base_output.videos:
-            base_output.videos = [
-                await preprocess_video(
-                    video,
-                    image_factor=self.IMAGE_FACTOR,
-                    video_min_pixels=self.VIDEO_MIN_PIXELS,
-                    video_max_pixels=self.VIDEO_MAX_PIXELS,
-                    default_fps=self.FPS,
-                    default_fps_min_frames=self.FPS_MIN_FRAMES,
-                    default_fps_max_frames=self.FPS_MAX_FRAMES,
-                    mm_sampling_kwargs=mm_sampling_kwargs,
-                ) for video in base_output.videos
-            ]
+            video_results = await asyncio.gather(
+                *[
+                    preprocess_video(
+                        video,
+                        image_factor=self.IMAGE_FACTOR,
+                        video_min_pixels=self.VIDEO_MIN_PIXELS,
+                        video_max_pixels=self.VIDEO_MAX_PIXELS,
+                        default_fps=self.FPS,
+                        default_fps_min_frames=self.FPS_MIN_FRAMES,
+                        default_fps_max_frames=self.FPS_MAX_FRAMES,
+                        mm_sampling_kwargs=mm_sampling_kwargs,
+                    )
+                    for video in base_output.videos
+                ]
+            )
+            base_output.videos, video_metadata = map(list, zip(*video_results))
 
-        mm_items, input_ids, ret = self.process_and_combine_mm_data(
-            base_output, self.mm_tokens
-        )
+        # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
+        if self.hf_config.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            mm_items, input_ids, ret = self.process_and_combine_mm_data(
+                base_output,
+                self.mm_tokens,
+                video_metadata=video_metadata if base_output.videos else None,
+                do_sample_frames=False,
+            )
+        else:
+            mm_items, input_ids, ret = self.process_and_combine_mm_data(
+                base_output, self.mm_tokens
+            )
 
         input_ids = input_ids.flatten()
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
