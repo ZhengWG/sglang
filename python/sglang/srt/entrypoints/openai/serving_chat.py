@@ -142,14 +142,17 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
         # Process messages and apply chat template
-        processed_messages = self._process_messages(request, is_multimodal)
+        try:
+            processed_messages = self._process_messages(request, is_multimodal)
 
-        # Build sampling parameters
-        sampling_params = request.to_sampling_params(
-            stop=processed_messages.stop,
-            model_generation_config=self.default_sampling_params,
-            tool_call_constraint=processed_messages.tool_call_constraint,
-        )
+            # Build sampling parameters
+            sampling_params = request.to_sampling_params(
+                stop=processed_messages.stop,
+                model_generation_config=self.default_sampling_params,
+                tool_call_constraint=processed_messages.tool_call_constraint,
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to process messages: {str(e)}")
 
         # Handle single vs multiple requests
         if is_multimodal:
@@ -661,6 +664,15 @@ class OpenAIServingChat(OpenAIServingBase):
         except ValueError as e:
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        except Exception as e:
+            logger.exception(f"Exception in request: {e}")
+            if hasattr(e, "error_code"):
+                error = self.create_streaming_error_response(
+                    str(e), status_code=e.error_code,
+                )
+                yield f"data: {error}\n\n"
+            else:
+                raise e
 
         yield "data: [DONE]\n\n"
 

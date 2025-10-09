@@ -757,8 +757,11 @@ def load_audio(
     elif audio_file.startswith("http://") or audio_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
         response = requests.get(audio_file, stream=True, timeout=timeout)
-        audio_file = BytesIO(response.content)
-        response.close()
+        try:
+            response.raise_for_status()
+            audio_file = BytesIO(response.content)
+        finally:
+            response.close()
         audio, original_sr = sf.read(audio_file)
     elif isinstance(audio_file, str):
         audio, original_sr = sf.read(audio_file)

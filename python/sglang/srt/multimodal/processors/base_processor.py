@@ -319,7 +319,12 @@ class BaseMultimodalProcessor(ABC):
                 return load_audio(data, audio_sample_rate)
 
         except Exception as e:
-            raise RuntimeError(f"Error while loading data {data}: {e}")
+            rte = RuntimeError(f"Error while loading data {data}: {e}")
+            if hasattr(e, "response") and e.response.status_code:
+                rte.error_code = e.response.status_code
+            else:
+                rte.error_code = 400
+            raise rte
 
     def submit_data_loading_tasks(
         self,
@@ -494,9 +499,11 @@ class BaseMultimodalProcessor(ABC):
                     new_text_parts += [text_part]
 
             except Exception as e:
-                raise RuntimeError(
+                rte = RuntimeError(
                     f"An exception occurred while loading multimodal data: {e}"
                 )
+                rte.error_code = getattr(e, "error_code", 400)
+                raise rte
         return BaseMultiModalProcessorOutput(
             images=images,
             audios=audios,
