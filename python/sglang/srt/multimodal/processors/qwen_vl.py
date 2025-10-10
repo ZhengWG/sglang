@@ -174,7 +174,6 @@ async def preprocess_video(
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     ele = {}
-    videometa = {}
     if mm_sampling_kwargs:
         ele.update(mm_sampling_kwargs)
     total_frames, video_fps = len(vr), vr.get_avg_fps()
@@ -186,16 +185,10 @@ async def preprocess_video(
         default_fps_min_frames=default_fps_min_frames,
         default_fps_max_frames=default_fps_max_frames,
     )
-    idx = torch.linspace(0, total_frames - 1, nframes).round().long()
-    videometa["frames_indices"] = idx.numpy()
-    idx = idx.tolist()
+    idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
     video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
-    videometa["total_num_frames"] = total_frames
-    videometa["height"] = height
-    videometa["width"] = width
-    videometa["fps"] = video_fps
     min_pixels = ele.get("min_pixels", video_min_pixels)
     total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
     max_pixels = max(
@@ -230,7 +223,14 @@ async def preprocess_video(
         interpolation=InterpolationMode.BICUBIC,
         antialias=True,
     ).float()
-    return video, videometa
+    video_metadata = {
+        "total_num_frames": total_frames,
+        "fps": video_fps,
+        "duration": total_frames / video_fps,
+        "video_backend": "torchvision",
+        "frames_indices": idx,
+    }
+    return video, video_metadata
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
