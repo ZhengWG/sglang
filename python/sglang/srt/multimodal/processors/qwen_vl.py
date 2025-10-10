@@ -3,6 +3,7 @@ import math
 import os
 import re
 from typing import List, Union
+import numpy as np
 
 import torch
 import torchvision
@@ -171,10 +172,13 @@ async def preprocess_video(
     ele = {}
     if mm_sampling_kwargs:
         ele.update(mm_sampling_kwargs)
-    total_frames, video_fps = len(vr), vr.get_avg_fps()
-    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
-    idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-    video = vr.get_batch(idx).asnumpy()
+
+    video = vr
+    if not isinstance(vr, np.ndarray):
+        total_frames, video_fps = len(vr), vr.get_avg_fps()
+        nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+        video = vr.get_batch(idx).asnumpy()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
     min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)

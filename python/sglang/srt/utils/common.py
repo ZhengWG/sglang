@@ -870,7 +870,17 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
-                _, encoded = video_file.split(",", 1)
+                media_type, encoded = video_file.split(",", 1)
+                if media_type.startswith("data:video/jpeg;"):
+                    def load_video_frame(frame_data):
+                        image_frame = pybase64.b64decode(frame_data, validate=True)
+                        image = Image.open(BytesIO(image_frame))
+                        image.load()
+                        return image.convert("RGB")
+
+                    return np.stack(
+                        [np.asarray(load_video_frame(frame_data)) for frame_data in encoded.split(",")]
+                    )
                 video_bytes = pybase64.b64decode(encoded)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
