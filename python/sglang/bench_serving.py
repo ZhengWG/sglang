@@ -76,6 +76,9 @@ class RequestFuncInput:
     image_data: Optional[List[str]]
     extra_request_body: Dict[str, Any]
     timestamp: Optional[float] = None
+    # The following fields are used for client-side tracing
+    request_id: Optional[int] = None
+    t_yield: Optional[float] = None
 
 
 @dataclass
@@ -88,6 +91,9 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     output_len: int = 0
+    # The following fields are used for client-side tracing
+    request_id: Optional[int] = None
+    trace_timestamps: Dict[str, float] = field(default_factory=dict)
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -341,6 +347,11 @@ async def async_request_openai_chat_completions(
         headers = get_auth_headers()
 
         output = RequestFuncOutput.init_new(request_func_input)
+        # Attach request id and carry over yield timestamp for tracing
+        if getattr(args, "enable_trace", False):
+            output.request_id = request_func_input.request_id
+            if request_func_input.t_yield is not None:
+                output.trace_timestamps["t_yield"] = request_func_input.t_yield
 
         generated_text = ""
         output_len = request_func_input.output_len
@@ -348,6 +359,9 @@ async def async_request_openai_chat_completions(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
+            # Record the moment we send the HTTP request
+            if getattr(args, "enable_trace", False):
+                output.trace_timestamps["t_post"] = time.perf_counter()
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
@@ -359,10 +373,14 @@ async def async_request_openai_chat_completions(
                             "content"
                         ]
                         output.success = True
-                        output.latency = time.perf_counter() - st
-                        output.ttft = (
-                            output.latency
-                        )  # For non-streaming, TTFT = total latency
+                        _now_done = time.perf_counter()
+                        output.latency = _now_done - st
+                        # For non-streaming, TTFT = total latency
+                        output.ttft = output.latency
+                        # Trace timestamps
+                        if getattr(args, "enable_trace", False):
+                            output.trace_timestamps.setdefault("t_ttft", _now_done)
+                            output.trace_timestamps["t_done"] = _now_done
                         output.output_len = response_json.get("usage", {}).get(
                             "completion_tokens", output_len
                         )
@@ -390,6 +408,11 @@ async def async_request_openai_chat_completions(
                                     if ttft == 0.0:
                                         ttft = timestamp - st
                                         output.ttft = ttft
+                                        # Trace first token timestamp
+                                        if getattr(args, "enable_trace", False):
+                                            output.trace_timestamps.setdefault(
+                                                "t_ttft", timestamp
+                                            )
 
                                     # Decoding phase
                                     else:
@@ -404,9 +427,13 @@ async def async_request_openai_chat_completions(
                                 output_len = (data.get("usage") or {}).get(
                                     "completion_tokens", output_len
                                 )
-
                         output.generated_text = generated_text
                         output.success = True
+                        # Mark completion time and set final latency
+                        _now_done_stream = time.perf_counter()
+                        if getattr(args, "enable_trace", False):
+                            output.trace_timestamps["t_done"] = _now_done_stream
+                        # Keep existing behavior for latency calculation
                         output.latency = latency
                         output.output_len = output_len
                 else:
@@ -1792,12 +1819,16 @@ async def benchmark(
         request_generator = get_request(input_requests, request_rate)
 
     pbar = None if disable_tqdm else tqdm(total=pbar_total)
+    request_counter = 0
     async for request in request_generator:
         if lora_names is not None and len(lora_names) != 0:
             idx = random.randint(0, len(lora_names) - 1)
             lora_name = lora_names[idx]
         else:
             lora_name = None
+
+        # Record generator yield time for tracing (guarded by flag)
+        _t_yield = time.perf_counter() if getattr(args, "enable_trace", False) else None
 
         request_func_input = RequestFuncInput(
             model=model_id,
@@ -1809,6 +1840,8 @@ async def benchmark(
             image_data=request.image_data,
             extra_request_body=extra_request_body,
             timestamp=request.timestamp,
+            request_id=(request_counter if getattr(args, "enable_trace", False) else None),
+            t_yield=_t_yield,
         )
 
         tasks.append(
@@ -1816,6 +1849,7 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
+        request_counter += 1
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Stop profiler
@@ -2015,6 +2049,125 @@ async def benchmark(
             result_for_dump = result
         file.write(json.dumps(result_for_dump) + "\n")
 
+    # Build simple trace.json from per-request timestamps (only when enabled)
+    try:
+        if not getattr(args, "enable_trace", False):
+            return result | result_details
+        trace_events = []
+        for out in outputs:
+            # Only include outputs with tracing info
+            if not getattr(out, "trace_timestamps", None):
+                continue
+            rid = getattr(out, "request_id", None)
+            ts_map = out.trace_timestamps
+
+            def to_ms(key: str) -> Optional[float]:
+                if key in ts_map:
+                    return (ts_map[key] - benchmark_start_time) * 1000.0
+                return None
+
+            trace_events.append(
+                {
+                    "request_id": rid,
+                    "t_yield_ms": to_ms("t_yield"),
+                    "t_post_ms": to_ms("t_post"),
+                    "t_ttft_ms": to_ms("t_ttft"),
+                    "t_done_ms": to_ms("t_done"),
+                    "success": out.success,
+                    "error": out.error,
+                }
+            )
+
+        # Sort by yield time for readability
+        trace_events.sort(
+            key=lambda e: float("inf") if e["t_yield_ms"] is None else e["t_yield_ms"]
+        )
+
+        trace_obj = {
+            "benchmark_start_perf_counter": benchmark_start_time,
+            "unit": "ms",
+            "events": trace_events,
+        }
+        # Derive trace filename from output_file_name (e.g., foo.jsonl -> foo.trace.json)
+        base_name, _ext = os.path.splitext(output_file_name)
+        trace_file_name = f"{base_name}.trace.json"
+        with open(trace_file_name, "w") as f:
+            json.dump(trace_obj, f)
+
+        # Additionally, write an HTML timeline visualization next to the results
+        timeline_file_name = f"{base_name}.timeline.html"
+        try:
+            # Keep only necessary fields for the client
+            safe_events = [
+                {
+                    "request_id": e.get("request_id"),
+                    "t_yield_ms": e.get("t_yield_ms"),
+                    "t_post_ms": e.get("t_post_ms"),
+                    "t_ttft_ms": e.get("t_ttft_ms"),
+                    "t_done_ms": e.get("t_done_ms"),
+                    "success": e.get("success", False),
+                }
+                for e in trace_events
+            ]
+
+            html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <title>Request Timeline</title>
+  <script src=\"https://cdn.plot.ly/plotly-2.32.0.min.js\"></script>
+  <style>
+    body {{ font-family: Arial, sans-serif; }}
+    #timeline {{ width: 100%; height: 80vh; }}
+  </style>
+</head>
+<body>
+  <h3>Request Timeline</h3>
+  <div id=\"timeline\"></div>
+  <script>
+    const events = {json.dumps(safe_events)};
+
+    const labels = events.map(e => `req ${e.request_id}`);
+    const s1 = events.map(e => Math.max(0, (e.t_post_ms ?? e.t_yield_ms ?? 0) - (e.t_yield_ms ?? 0)));
+    const s2 = events.map(e => Math.max(0, (e.t_ttft_ms ?? e.t_post_ms ?? 0) - (e.t_post_ms ?? 0)));
+    const s3 = events.map(e => Math.max(0, (e.t_done_ms ?? e.t_ttft_ms ?? 0) - (e.t_ttft_ms ?? 0)));
+    const ok = events.map(e => e.success ? 'success' : 'fail');
+
+    const data = [
+      { name: 'yield→post', type: 'bar', orientation: 'h', x: s1, y: labels,
+        marker: {color: '#A0AEC0'}, hovertemplate: 'yield→post: %{x:.2f} ms<extra></extra>' },
+      { name: 'post→TTFT', type: 'bar', orientation: 'h', x: s2, y: labels,
+        marker: {color: '#63B3ED'}, hovertemplate: 'post→TTFT: %{x:.2f} ms<extra></extra>' },
+      { name: 'TTFT→done', type: 'bar', orientation: 'h', x: s3, y: labels,
+        marker: {color: '#68D391'}, hovertemplate: 'TTFT→done: %{x:.2f} ms<extra></extra>' },
+    ];
+
+    const layout = {
+      barmode: 'stack',
+      title: 'Per-request Timeline (ms)',
+      xaxis: {title: 'Time (ms) since benchmark start'},
+      yaxis: {title: 'Request ID', automargin: true},
+      height: Math.min(1200, 30 * labels.length + 140),
+      legend: {orientation: 'h'}
+    };
+
+    Plotly.newPlot('timeline', data, layout, {displaylogo: false, responsive: true});
+  </script>
+  <p style=\"color:#666\">Blue = network/scheduling to first token; Green = generation; Gray = scheduler yield→post.</p>
+  <p style=\"color:#666\">Source: {os.path.basename(trace_file_name)}</p>
+</body>
+</html>
+"""
+
+            with open(timeline_file_name, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as _html_exc:
+            print(f"Failed to write timeline HTML: {_html_exc}")
+    except Exception as _trace_exc:
+        # Do not fail the benchmark if trace export fails
+        print(f"Failed to write trace.json: {_trace_exc}")
+
     return result | result_details
 
 
@@ -2050,6 +2203,10 @@ def run_benchmark(args_: argparse.Namespace):
 
     if not hasattr(args, "tokenize_prompt"):
         args.tokenize_prompt = False
+
+    # Default for client-side tracing
+    if not hasattr(args, "enable_trace"):
+        args.enable_trace = False
 
     if not hasattr(args, "use_trace_timestamps"):
         args.use_trace_timestamps = False
@@ -2375,6 +2532,13 @@ if __name__ == "__main__":
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
+    )
+    parser.add_argument(
+        "--enable-trace",
+        action="store_true",
+        help=(
+            "Enable client-side request tracing: record per-request timestamps and write a trace JSON alongside results."
+        ),
     )
     parser.add_argument(
         "--disable-stream",
