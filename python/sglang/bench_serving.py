@@ -348,9 +348,10 @@ async def async_request_openai_chat_completions(
 
         output = RequestFuncOutput.init_new(request_func_input)
         # Attach request id and carry over yield timestamp for tracing
-        output.request_id = request_func_input.request_id
-        if request_func_input.t_yield is not None:
-            output.trace_timestamps["t_yield"] = request_func_input.t_yield
+        if getattr(args, "enable_trace", False):
+            output.request_id = request_func_input.request_id
+            if request_func_input.t_yield is not None:
+                output.trace_timestamps["t_yield"] = request_func_input.t_yield
 
         generated_text = ""
         output_len = request_func_input.output_len
@@ -359,7 +360,8 @@ async def async_request_openai_chat_completions(
         most_recent_timestamp = st
         try:
             # Record the moment we send the HTTP request
-            output.trace_timestamps["t_post"] = time.perf_counter()
+            if getattr(args, "enable_trace", False):
+                output.trace_timestamps["t_post"] = time.perf_counter()
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
@@ -376,8 +378,9 @@ async def async_request_openai_chat_completions(
                         # For non-streaming, TTFT = total latency
                         output.ttft = output.latency
                         # Trace timestamps
-                        output.trace_timestamps.setdefault("t_ttft", _now_done)
-                        output.trace_timestamps["t_done"] = _now_done
+                        if getattr(args, "enable_trace", False):
+                            output.trace_timestamps.setdefault("t_ttft", _now_done)
+                            output.trace_timestamps["t_done"] = _now_done
                         output.output_len = response_json.get("usage", {}).get(
                             "completion_tokens", output_len
                         )
@@ -406,9 +409,10 @@ async def async_request_openai_chat_completions(
                                         ttft = timestamp - st
                                         output.ttft = ttft
                                         # Trace first token timestamp
-                                        output.trace_timestamps.setdefault(
-                                            "t_ttft", timestamp
-                                        )
+                                        if getattr(args, "enable_trace", False):
+                                            output.trace_timestamps.setdefault(
+                                                "t_ttft", timestamp
+                                            )
 
                                     # Decoding phase
                                     else:
@@ -427,7 +431,8 @@ async def async_request_openai_chat_completions(
                         output.success = True
                         # Mark completion time and set final latency
                         _now_done_stream = time.perf_counter()
-                        output.trace_timestamps["t_done"] = _now_done_stream
+                        if getattr(args, "enable_trace", False):
+                            output.trace_timestamps["t_done"] = _now_done_stream
                         # Keep existing behavior for latency calculation
                         output.latency = latency
                         output.output_len = output_len
@@ -1822,8 +1827,8 @@ async def benchmark(
         else:
             lora_name = None
 
-        # Record generator yield time for tracing
-        _t_yield = time.perf_counter()
+        # Record generator yield time for tracing (guarded by flag)
+        _t_yield = time.perf_counter() if getattr(args, "enable_trace", False) else None
 
         request_func_input = RequestFuncInput(
             model=model_id,
@@ -1835,7 +1840,7 @@ async def benchmark(
             image_data=request.image_data,
             extra_request_body=extra_request_body,
             timestamp=request.timestamp,
-            request_id=request_counter,
+            request_id=(request_counter if getattr(args, "enable_trace", False) else None),
             t_yield=_t_yield,
         )
 
@@ -2044,8 +2049,10 @@ async def benchmark(
             result_for_dump = result
         file.write(json.dumps(result_for_dump) + "\n")
 
-    # Build simple trace.json from per-request timestamps (only available for chat completions)
+    # Build simple trace.json from per-request timestamps (only when enabled)
     try:
+        if not getattr(args, "enable_trace", False):
+            return result | result_details
         trace_events = []
         for out in outputs:
             # Only include outputs with tracing info
@@ -2125,6 +2132,10 @@ def run_benchmark(args_: argparse.Namespace):
 
     if not hasattr(args, "tokenize_prompt"):
         args.tokenize_prompt = False
+
+    # Default for client-side tracing
+    if not hasattr(args, "enable_trace"):
+        args.enable_trace = False
 
     if not hasattr(args, "use_trace_timestamps"):
         args.use_trace_timestamps = False
@@ -2450,6 +2461,13 @@ if __name__ == "__main__":
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
+    )
+    parser.add_argument(
+        "--enable-trace",
+        action="store_true",
+        help=(
+            "Enable client-side request tracing: record per-request timestamps and write a trace JSON alongside results."
+        ),
     )
     parser.add_argument(
         "--disable-stream",
