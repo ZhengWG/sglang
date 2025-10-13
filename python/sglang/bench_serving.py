@@ -2093,6 +2093,77 @@ async def benchmark(
         trace_file_name = f"{base_name}.trace.json"
         with open(trace_file_name, "w") as f:
             json.dump(trace_obj, f)
+
+        # Additionally, write an HTML timeline visualization next to the results
+        timeline_file_name = f"{base_name}.timeline.html"
+        try:
+            # Keep only necessary fields for the client
+            safe_events = [
+                {
+                    "request_id": e.get("request_id"),
+                    "t_yield_ms": e.get("t_yield_ms"),
+                    "t_post_ms": e.get("t_post_ms"),
+                    "t_ttft_ms": e.get("t_ttft_ms"),
+                    "t_done_ms": e.get("t_done_ms"),
+                    "success": e.get("success", False),
+                }
+                for e in trace_events
+            ]
+
+            html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <title>Request Timeline</title>
+  <script src=\"https://cdn.plot.ly/plotly-2.32.0.min.js\"></script>
+  <style>
+    body {{ font-family: Arial, sans-serif; }}
+    #timeline {{ width: 100%; height: 80vh; }}
+  </style>
+</head>
+<body>
+  <h3>Request Timeline</h3>
+  <div id=\"timeline\"></div>
+  <script>
+    const events = {json.dumps(safe_events)};
+
+    const labels = events.map(e => `req ${e.request_id}`);
+    const s1 = events.map(e => Math.max(0, (e.t_post_ms ?? e.t_yield_ms ?? 0) - (e.t_yield_ms ?? 0)));
+    const s2 = events.map(e => Math.max(0, (e.t_ttft_ms ?? e.t_post_ms ?? 0) - (e.t_post_ms ?? 0)));
+    const s3 = events.map(e => Math.max(0, (e.t_done_ms ?? e.t_ttft_ms ?? 0) - (e.t_ttft_ms ?? 0)));
+    const ok = events.map(e => e.success ? 'success' : 'fail');
+
+    const data = [
+      { name: 'yield→post', type: 'bar', orientation: 'h', x: s1, y: labels,
+        marker: {color: '#A0AEC0'}, hovertemplate: 'yield→post: %{x:.2f} ms<extra></extra>' },
+      { name: 'post→TTFT', type: 'bar', orientation: 'h', x: s2, y: labels,
+        marker: {color: '#63B3ED'}, hovertemplate: 'post→TTFT: %{x:.2f} ms<extra></extra>' },
+      { name: 'TTFT→done', type: 'bar', orientation: 'h', x: s3, y: labels,
+        marker: {color: '#68D391'}, hovertemplate: 'TTFT→done: %{x:.2f} ms<extra></extra>' },
+    ];
+
+    const layout = {
+      barmode: 'stack',
+      title: 'Per-request Timeline (ms)',
+      xaxis: {title: 'Time (ms) since benchmark start'},
+      yaxis: {title: 'Request ID', automargin: true},
+      height: Math.min(1200, 30 * labels.length + 140),
+      legend: {orientation: 'h'}
+    };
+
+    Plotly.newPlot('timeline', data, layout, {displaylogo: false, responsive: true});
+  </script>
+  <p style=\"color:#666\">Blue = network/scheduling to first token; Green = generation; Gray = scheduler yield→post.</p>
+  <p style=\"color:#666\">Source: {os.path.basename(trace_file_name)}</p>
+</body>
+</html>
+"""
+
+            with open(timeline_file_name, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as _html_exc:
+            print(f"Failed to write timeline HTML: {_html_exc}")
     except Exception as _trace_exc:
         # Do not fail the benchmark if trace export fails
         print(f"Failed to write trace.json: {_trace_exc}")
