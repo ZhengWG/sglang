@@ -1498,6 +1498,7 @@ class Scheduler(
                 else:
                     if value is INVALID_GRAMMAR_OBJ:  # We hit a cached invalid grammar.
                         error_msg = f"Invalid grammar request with cache hit: {key=}"
+                        # TODO(yudian.zy): 这里是否要直接return？
                         req.set_finish_with_abort(error_msg)
 
         if add_to_grammar_queue:
