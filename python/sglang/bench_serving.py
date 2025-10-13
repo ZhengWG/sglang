@@ -76,6 +76,9 @@ class RequestFuncInput:
     image_data: Optional[List[str]]
     extra_request_body: Dict[str, Any]
     timestamp: Optional[float] = None
+    # The following fields are used for client-side tracing
+    request_id: Optional[int] = None
+    t_yield: Optional[float] = None
 
 
 @dataclass
@@ -88,6 +91,9 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     output_len: int = 0
+    # The following fields are used for client-side tracing
+    request_id: Optional[int] = None
+    trace_timestamps: Dict[str, float] = field(default_factory=dict)
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -341,6 +347,10 @@ async def async_request_openai_chat_completions(
         headers = get_auth_headers()
 
         output = RequestFuncOutput.init_new(request_func_input)
+        # Attach request id and carry over yield timestamp for tracing
+        output.request_id = request_func_input.request_id
+        if request_func_input.t_yield is not None:
+            output.trace_timestamps["t_yield"] = request_func_input.t_yield
 
         generated_text = ""
         output_len = request_func_input.output_len
@@ -348,6 +358,8 @@ async def async_request_openai_chat_completions(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
+            # Record the moment we send the HTTP request
+            output.trace_timestamps["t_post"] = time.perf_counter()
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
@@ -359,10 +371,13 @@ async def async_request_openai_chat_completions(
                             "content"
                         ]
                         output.success = True
-                        output.latency = time.perf_counter() - st
-                        output.ttft = (
-                            output.latency
-                        )  # For non-streaming, TTFT = total latency
+                        _now_done = time.perf_counter()
+                        output.latency = _now_done - st
+                        # For non-streaming, TTFT = total latency
+                        output.ttft = output.latency
+                        # Trace timestamps
+                        output.trace_timestamps.setdefault("t_ttft", _now_done)
+                        output.trace_timestamps["t_done"] = _now_done
                         output.output_len = response_json.get("usage", {}).get(
                             "completion_tokens", output_len
                         )
@@ -390,6 +405,10 @@ async def async_request_openai_chat_completions(
                                     if ttft == 0.0:
                                         ttft = timestamp - st
                                         output.ttft = ttft
+                                        # Trace first token timestamp
+                                        output.trace_timestamps.setdefault(
+                                            "t_ttft", timestamp
+                                        )
 
                                     # Decoding phase
                                     else:
@@ -404,9 +423,12 @@ async def async_request_openai_chat_completions(
                                 output_len = (data.get("usage") or {}).get(
                                     "completion_tokens", output_len
                                 )
-
                         output.generated_text = generated_text
                         output.success = True
+                        # Mark completion time and set final latency
+                        _now_done_stream = time.perf_counter()
+                        output.trace_timestamps["t_done"] = _now_done_stream
+                        # Keep existing behavior for latency calculation
                         output.latency = latency
                         output.output_len = output_len
                 else:
@@ -1792,12 +1814,16 @@ async def benchmark(
         request_generator = get_request(input_requests, request_rate)
 
     pbar = None if disable_tqdm else tqdm(total=pbar_total)
+    request_counter = 0
     async for request in request_generator:
         if lora_names is not None and len(lora_names) != 0:
             idx = random.randint(0, len(lora_names) - 1)
             lora_name = lora_names[idx]
         else:
             lora_name = None
+
+        # Record generator yield time for tracing
+        _t_yield = time.perf_counter()
 
         request_func_input = RequestFuncInput(
             model=model_id,
@@ -1809,6 +1835,8 @@ async def benchmark(
             image_data=request.image_data,
             extra_request_body=extra_request_body,
             timestamp=request.timestamp,
+            request_id=request_counter,
+            t_yield=_t_yield,
         )
 
         tasks.append(
@@ -1816,6 +1844,7 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
+        request_counter += 1
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Stop profiler
@@ -2014,6 +2043,49 @@ async def benchmark(
         else:
             result_for_dump = result
         file.write(json.dumps(result_for_dump) + "\n")
+
+    # Build simple trace.json from per-request timestamps (only available for chat completions)
+    try:
+        trace_events = []
+        for out in outputs:
+            # Only include outputs with tracing info
+            if not getattr(out, "trace_timestamps", None):
+                continue
+            rid = getattr(out, "request_id", None)
+            ts_map = out.trace_timestamps
+
+            def to_ms(key: str) -> Optional[float]:
+                if key in ts_map:
+                    return (ts_map[key] - benchmark_start_time) * 1000.0
+                return None
+
+            trace_events.append(
+                {
+                    "request_id": rid,
+                    "t_yield_ms": to_ms("t_yield"),
+                    "t_post_ms": to_ms("t_post"),
+                    "t_ttft_ms": to_ms("t_ttft"),
+                    "t_done_ms": to_ms("t_done"),
+                    "success": out.success,
+                    "error": out.error,
+                }
+            )
+
+        # Sort by yield time for readability
+        trace_events.sort(
+            key=lambda e: float("inf") if e["t_yield_ms"] is None else e["t_yield_ms"]
+        )
+
+        trace_obj = {
+            "benchmark_start_perf_counter": benchmark_start_time,
+            "unit": "ms",
+            "events": trace_events,
+        }
+        with open("trace.json", "w") as f:
+            json.dump(trace_obj, f)
+    except Exception as _trace_exc:
+        # Do not fail the benchmark if trace export fails
+        print(f"Failed to write trace.json: {_trace_exc}")
 
     return result | result_details
 
