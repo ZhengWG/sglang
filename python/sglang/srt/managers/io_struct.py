@@ -170,6 +170,9 @@ class GenerateReqInput(BaseReq):
     # (Internal) Whether to return bytes for image generation
     return_bytes: bool = False
 
+    # Whether to return entropy
+    return_entropy: bool = False
+
     # Multimodal sampling kwargs
     mm_sampling_kwargs: Optional[Dict] = None
 
@@ -571,6 +574,8 @@ class GenerateReqInput(BaseReq):
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
             return_bytes=self.return_bytes,
+            return_entropy=self.return_entropy,
+            mm_sampling_kwargs=self.mm_sampling_kwargs,
         )
 
 
@@ -635,6 +640,9 @@ class TokenizedGenerateReqInput(BaseReq):
 
     # (Internal) Whether to return bytes for image generation
     return_bytes: bool = False
+
+    # Whether to return entropy
+    return_entropy: bool = False
 
 
 @dataclass
@@ -833,6 +841,7 @@ class BatchTokenIDOutput(BaseBatchReq):
     input_token_ids_logprobs_idx: List[List]
     output_token_ids_logprobs_val: List[List]
     output_token_ids_logprobs_idx: List[List]
+    output_token_entropy_val: List[float]
 
     # Hidden states
     output_hidden_states: List[List[float]]
@@ -842,6 +851,9 @@ class BatchTokenIDOutput(BaseBatchReq):
     # val is the length of padded tokens after expansion.
     placeholder_tokens_idx: List[Optional[List[int]]]
     placeholder_tokens_val: List[Optional[List[int]]]
+
+    # The trainer step id. Used to know which step's weights are used for sampling.
+    token_steps: List[List[int]] = None
 
     # perf stats
     first_scheduled_times: List[float]
@@ -867,11 +879,14 @@ class BatchMultimodalDecodeReq(BaseBatchReq):
     completion_tokens: List[int]
     cached_tokens: List[int]
 
-    # Placeholder token info
+    # The information of placeholder tokens (e.g., image token)
+    # idx is the index of the token in the prompt after expansion.
+    # val is the length of padded tokens after expansion.
     placeholder_tokens_idx: List[Optional[List[int]]]
     placeholder_tokens_val: List[Optional[List[int]]]
 
-    return_bytes: bool = False
+    # The trainer step id. Used to know which step's weights are used for sampling.
+    token_steps: List[List[int]] = None
 
 
 @dataclass
@@ -902,12 +917,19 @@ class BatchStrOutput(BaseBatchReq):
     input_token_ids_logprobs_idx: List[List]
     output_token_ids_logprobs_val: List[List]
     output_token_ids_logprobs_idx: List[List]
+    output_token_entropy_val: List[float]
 
     # Hidden states
     output_hidden_states: List[List[float]]
 
+    # The information of placeholder tokens (e.g., image token)
+    # idx is the index of the token in the prompt after expansion.
+    # val is the length of padded tokens after expansion.
     placeholder_tokens_idx: List[Optional[List[int]]]
     placeholder_tokens_val: List[Optional[List[int]]]
+
+    # The trainer step id. Used to know which step's weights are used for sampling.
+    token_steps: List[List[int]] = None
 
     # perf stats
     first_scheduled_times: List[float]
@@ -988,6 +1010,8 @@ class UpdateWeightFromDiskReqInput(BaseReq):
     torch_empty_cache: bool = False
     # Whether to keep the scheduler paused after weight update
     keep_pause: bool = False
+    # The trainer step id. Used to know which step's weights are used for sampling.
+    token_step: int = 0
 
 
 @dataclass
@@ -1423,6 +1447,16 @@ class GetLoadReqOutput(BaseReq):
 @dataclass
 class WatchLoadUpdateReq(BaseReq):
     loads: List[GetLoadReqOutput]
+
+
+@dataclass
+class LazyDumpTensorsReqInput(BaseReq):
+    pass
+
+
+@dataclass
+class LazyDumpTensorsReqOutput(BaseReq):
+    success: bool
 
 
 def _check_all_req_types():
