@@ -856,7 +856,7 @@ class BatchTokenIDOutput(BaseBatchReq):
     token_steps: List[List[int]] = None
 
     # perf stats
-    first_scheduled_times: List[float]
+    first_scheduled_times: List[float] = None
 
 
 @dataclass
@@ -932,7 +932,7 @@ class BatchStrOutput(BaseBatchReq):
     token_steps: List[List[int]] = None
 
     # perf stats
-    first_scheduled_times: List[float]
+    first_scheduled_times: List[float] = None
 
 
 @dataclass
