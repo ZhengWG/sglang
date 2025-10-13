@@ -722,73 +722,47 @@ async def benchmark(
         "median_e2e_latency_ms": metrics.median_e2e_latency_ms,
     }
 
-    # Collect per-request traces and plot a timeline
+    # Collect per-request traces and save a JSON profile
     try:
         traces = [o.trace for o in outputs if getattr(o, "trace", None)]
         if traces:
-            def _plot_request_traces(traces_list: List[Dict[str, float]], output_path: str) -> None:
-                try:
-                    import matplotlib.pyplot as plt
-                except Exception as e:
-                    print(f"matplotlib is not available, skip plotting trace. err={e}")
-                    return
-
-                # Normalize time to the first yield
-                valid_yields = [t.get("yield", 0.0) for t in traces_list if t.get("yield", 0.0) > 0.0]
-                if not valid_yields:
-                    print("No valid yield timestamps; skip plotting trace.")
-                    return
+            # Normalize to first yield and include both absolute and relative timestamps
+            valid_yields = [t.get("yield", 0.0) for t in traces if t.get("yield", 0.0) > 0.0]
+            if valid_yields:
                 t0 = min(valid_yields)
+            else:
+                t0 = 0.0
 
-                # Sort by request id then by yield time
-                traces_sorted = sorted(traces_list, key=lambda t: (t.get("request_id", -1), t.get("yield", 0.0)))
+            # Keep the original order of completion
+            traces_sorted = sorted(traces, key=lambda t: (t.get("request_id", -1), t.get("yield", 0.0)))
 
-                fig, ax = plt.subplots(figsize=(12, max(4, len(traces_sorted) * 0.12)))
-                y_ticks = []
-                y_labels = []
-                for idx, t in enumerate(traces_sorted):
-                    rid = int(t.get("request_id", -1))
-                    y = idx
-                    y_ticks.append(y)
-                    y_labels.append(str(rid))
-
-                    yld = t.get("yield", 0.0)
-                    pst = t.get("post", 0.0)
-                    ftt = t.get("ttft", 0.0)
-                    end = t.get("end", 0.0)
-
-                    # Convert to relative times
-                    yld_r = yld - t0 if yld > 0 else None
-                    pst_r = pst - t0 if pst > 0 else None
-                    ftt_r = ftt - t0 if ftt > 0 else None
-                    end_r = end - t0 if end > 0 else None
-
-                    # Segments: yield->post, post->ttft, ttft->end
-                    if yld_r is not None and pst_r is not None and pst_r >= yld_r:
-                        ax.barh(y, pst_r - yld_r, left=yld_r, height=0.6, color="#b0b0b0", label="yield→post" if idx == 0 else None)
-                    if pst_r is not None and ftt_r is not None and ftt_r >= pst_r:
-                        ax.barh(y, ftt_r - pst_r, left=pst_r, height=0.6, color="#4ea5d9", label="post→ttft" if idx == 0 else None)
-                    if ftt_r is not None and end_r is not None and end_r >= ftt_r:
-                        ax.barh(y, end_r - ftt_r, left=ftt_r, height=0.6, color="#66bb6a", label="ttft→end" if idx == 0 else None)
-
-                ax.set_xlabel("Time since first yield (s)")
-                ax.set_ylabel("Request ID")
-                ax.set_yticks(y_ticks)
-                ax.set_yticklabels(y_labels)
-                ax.legend(loc="upper right")
-                ax.set_title("Request timeline trace")
-                fig.tight_layout()
-                plt.savefig(output_path, dpi=150)
-                plt.close(fig)
+            profile_entries: List[Dict[str, float]] = []
+            for t in traces_sorted:
+                yld = float(t.get("yield", 0.0) or 0.0)
+                pst = float(t.get("post", 0.0) or 0.0)
+                ftt = float(t.get("ttft", 0.0) or 0.0)
+                end = float(t.get("end", 0.0) or 0.0)
+                entry: Dict[str, float] = {
+                    "request_id": float(t.get("request_id", -1.0) or -1.0),
+                    "yield": yld,
+                    "post": pst,
+                    "ttft": ftt,
+                    "end": end,
+                    "yield_rel": (yld - t0) if (yld > 0.0 and t0 > 0.0) else 0.0,
+                    "post_rel": (pst - t0) if (pst > 0.0 and t0 > 0.0) else 0.0,
+                    "ttft_rel": (ftt - t0) if (ftt > 0.0 and t0 > 0.0) else 0.0,
+                    "end_rel": (end - t0) if (end > 0.0 and t0 > 0.0) else 0.0,
+                }
+                profile_entries.append(entry)
 
             base_name, _ = os.path.splitext(output_file_name)
-            trace_png = f"{base_name}.trace.png"
-            _plot_request_traces(traces, trace_png)
-            result["trace_file"] = trace_png
-            result["traces"] = traces
-            print(f"Saved request trace chart to {trace_png}")
+            trace_json = f"{base_name}.trace.json"
+            with open(trace_json, "w") as f:
+                json.dump({"t0": t0, "traces": profile_entries}, f)
+            result["trace_file"] = trace_json
+            print(f"Saved request trace profile to {trace_json}")
     except Exception as e:
-        print(f"Failed to generate request trace plot: {e}")
+        print(f"Failed to generate request trace profile: {e}")
     return result
 
 
