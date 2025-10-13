@@ -17,8 +17,6 @@ from sglang.srt.configs.step3_vl import (
     Step3VLConfig,
 )
 
-from sglang.srt.configs.glm import GLMConfig
-
 __all__ = [
     "ExaoneConfig",
     "ChatGLMConfig",
@@ -36,5 +34,4 @@ __all__ = [
     "DotsOCRConfig",
     "FalconH1Config",
     "NemotronHConfig",
-    "GLMConfig",
 ]

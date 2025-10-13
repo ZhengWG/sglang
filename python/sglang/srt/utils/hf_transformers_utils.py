@@ -49,7 +49,6 @@ from sglang.srt.configs import (
     NemotronHConfig,
     Qwen3NextConfig,
     Step3VLConfig,
-    GLMConfig,
 )
 from sglang.srt.configs.internvl import InternVLChatConfig
 from sglang.srt.connector import create_remote_connector
@@ -70,7 +69,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     DotsVLMConfig.model_type: DotsVLMConfig,
     DotsOCRConfig.model_type: DotsOCRConfig,
     NemotronHConfig.model_type: NemotronHConfig,
-    GLMConfig.model_type: GLMConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
