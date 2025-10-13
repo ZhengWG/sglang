@@ -2081,7 +2081,10 @@ async def benchmark(
             "unit": "ms",
             "events": trace_events,
         }
-        with open("trace.json", "w") as f:
+        # Derive trace filename from output_file_name (e.g., foo.jsonl -> foo.trace.json)
+        base_name, _ext = os.path.splitext(output_file_name)
+        trace_file_name = f"{base_name}.trace.json"
+        with open(trace_file_name, "w") as f:
             json.dump(trace_obj, f)
     except Exception as _trace_exc:
         # Do not fail the benchmark if trace export fails
