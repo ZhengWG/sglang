@@ -38,6 +38,16 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20 * 60 * 60)
 
 global args
 
+# Global request id counter for tracing
+_REQUEST_ID_COUNTER = 0
+
+
+def next_request_id() -> int:
+    """Generate a monotonically increasing request id for trace labeling."""
+    global _REQUEST_ID_COUNTER
+    _REQUEST_ID_COUNTER += 1
+    return _REQUEST_ID_COUNTER
+
 
 @dataclass
 class RequestFuncInput:
@@ -50,6 +60,9 @@ class RequestFuncInput:
     # For multiturn chat, store the context
     prev_messages: List = field(default_factory=list)
     finished_prompts: int = 0
+    # Trace metadata, assigned when queued and yielded
+    request_id: int = -1
+    yield_ts: float = 0.0
 
 
 @dataclass
@@ -63,6 +76,8 @@ class RequestFuncOutput:
 
     success: bool = False
     error: str = ""
+    # Per-request stage timestamps: {"request_id", "yield", "post", "ttft", "end"}
+    trace: Dict[str, float] = field(default_factory=dict)
 
 
 # set ignore_eos True by default
@@ -120,7 +135,14 @@ async def async_request_openai_completions(
         ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
+        # Trace timestamps for this request
+        rid = request_func_input.request_id
+        yield_ts = getattr(request_func_input, "yield_ts", 0.0)
+        post_ts: Optional[float] = None
+        ttft_ts: Optional[float] = None
+        end_ts: Optional[float] = None
         try:
+            post_ts = time.perf_counter()
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
@@ -152,6 +174,7 @@ async def async_request_openai_completions(
                                 # First token
                                 if ttft == 0.0:
                                     ttft = time.perf_counter() - st
+                                    ttft_ts = timestamp
                                     output.ttft.append(ttft)
 
                                 # Decoding phase
@@ -166,6 +189,7 @@ async def async_request_openai_completions(
                     output.generated_text.append(generated_text)
                     output.success = True
                     output.latency.append(latency)
+                    end_ts = st + latency
 
                     # Prepare for the new request
                     request_func_input.prompts[prompt_idx] = (
@@ -185,14 +209,28 @@ async def async_request_openai_completions(
                     if prompt_idx < len(request_func_input.prompts):
                         request_func_input.finished_prompts = prompt_idx
                         request_func_input.prev_messages = messages
+                        # Assign a new request id for the next prompt in this conversation
+                        request_func_input.request_id = next_request_id()
+                        request_func_input.yield_ts = 0.0
                         await queue.put(request_func_input)
                 else:
                     output.error = response.reason or ""
                     output.success = False
+                    end_ts = time.perf_counter()
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
+            end_ts = time.perf_counter()
+
+        # Record trace timestamps for this request
+        output.trace = {
+            "request_id": float(rid) if rid is not None else -1.0,
+            "yield": float(yield_ts) if yield_ts else 0.0,
+            "post": float(post_ts) if post_ts else 0.0,
+            "ttft": float(ttft_ts) if ttft_ts else 0.0,
+            "end": float(end_ts) if end_ts else 0.0,
+        }
 
     if pbar:
         pbar.update(1)
@@ -272,6 +310,8 @@ async def get_requests(
             print(f"exception: {e}")
             break
 
+        # Mark the time when this request is yielded to the worker
+        request.yield_ts = time.perf_counter()
         yield request
 
         if request_rate == float("inf"):
@@ -463,6 +503,8 @@ async def benchmark(
             lora_name=lora_name,
             extra_request_body=extra_request_body,
         )
+        # Assign initial id for this request (per prompt)
+        request_func_input.request_id = next_request_id()
         inputs_requests_queue.put_nowait(request_func_input)
     if (
         not args.enable_multiturn
@@ -679,6 +721,48 @@ async def benchmark(
         "mean_e2e_latency_ms": metrics.mean_e2e_latency_ms,
         "median_e2e_latency_ms": metrics.median_e2e_latency_ms,
     }
+
+    # Collect per-request traces and save a JSON profile
+    try:
+        traces = [o.trace for o in outputs if getattr(o, "trace", None)]
+        if traces:
+            # Normalize to first yield and include both absolute and relative timestamps
+            valid_yields = [t.get("yield", 0.0) for t in traces if t.get("yield", 0.0) > 0.0]
+            if valid_yields:
+                t0 = min(valid_yields)
+            else:
+                t0 = 0.0
+
+            # Keep the original order of completion
+            traces_sorted = sorted(traces, key=lambda t: (t.get("request_id", -1), t.get("yield", 0.0)))
+
+            profile_entries: List[Dict[str, float]] = []
+            for t in traces_sorted:
+                yld = float(t.get("yield", 0.0) or 0.0)
+                pst = float(t.get("post", 0.0) or 0.0)
+                ftt = float(t.get("ttft", 0.0) or 0.0)
+                end = float(t.get("end", 0.0) or 0.0)
+                entry: Dict[str, float] = {
+                    "request_id": float(t.get("request_id", -1.0) or -1.0),
+                    "yield": yld,
+                    "post": pst,
+                    "ttft": ftt,
+                    "end": end,
+                    "yield_rel": (yld - t0) if (yld > 0.0 and t0 > 0.0) else 0.0,
+                    "post_rel": (pst - t0) if (pst > 0.0 and t0 > 0.0) else 0.0,
+                    "ttft_rel": (ftt - t0) if (ftt > 0.0 and t0 > 0.0) else 0.0,
+                    "end_rel": (end - t0) if (end > 0.0 and t0 > 0.0) else 0.0,
+                }
+                profile_entries.append(entry)
+
+            base_name, _ = os.path.splitext(output_file_name)
+            trace_json = f"{base_name}.trace.json"
+            with open(trace_json, "w") as f:
+                json.dump({"t0": t0, "traces": profile_entries}, f)
+            result["trace_file"] = trace_json
+            print(f"Saved request trace profile to {trace_json}")
+    except Exception as e:
+        print(f"Failed to generate request trace profile: {e}")
     return result
 
 

@@ -59,6 +59,9 @@ class RequestFuncInput:
     model: str
     lora_name: str
     extra_request_body: Dict[str, Any]
+    # Trace metadata
+    request_id: int = -1
+    yield_ts: float = 0.0
 
 
 @dataclass
@@ -71,6 +74,8 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     output_len: int = 0
+    # Per-request stage timestamps: {"request_id", "yield", "post", "ttft", "end"}
+    trace: Dict[str, float] = field(default_factory=dict)
 
 
 def remove_prefix(text: str, prefix: str) -> str:
@@ -87,6 +92,17 @@ def get_auth_headers() -> Dict[str, str]:
         return {"Authorization": f"Bearer {api_key}"}
     else:
         return {}
+
+
+# Global request id counter for tracing
+_REQUEST_ID_COUNTER = 0
+
+
+def next_request_id() -> int:
+    """Generate a monotonically increasing request id for trace labeling."""
+    global _REQUEST_ID_COUNTER
+    _REQUEST_ID_COUNTER += 1
+    return _REQUEST_ID_COUNTER
 
 
 # trt llm does not support ignore_eos
@@ -193,7 +209,14 @@ async def async_request_openai_completions(
         ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
+        # Trace timestamps for this request
+        rid = request_func_input.request_id
+        yield_ts = getattr(request_func_input, "yield_ts", 0.0)
+        post_ts: Optional[float] = None
+        ttft_ts: Optional[float] = None
+        end_ts: Optional[float] = None
         try:
+            post_ts = time.perf_counter()
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
@@ -219,6 +242,7 @@ async def async_request_openai_completions(
                                 if ttft == 0.0:
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
+                                    ttft_ts = timestamp
 
                                 # Decoding phase
                                 else:
@@ -234,13 +258,25 @@ async def async_request_openai_completions(
                     output.success = True
                     output.latency = latency
                     output.output_len = output_len
+                    end_ts = st + latency
                 else:
                     output.error = response.reason or ""
                     output.success = False
+                    end_ts = time.perf_counter()
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
+            end_ts = time.perf_counter()
+
+        # Record trace timestamps for this request
+        output.trace = {
+            "request_id": float(rid) if rid is not None else -1.0,
+            "yield": float(yield_ts) if yield_ts else 0.0,
+            "post": float(post_ts) if post_ts else 0.0,
+            "ttft": float(ttft_ts) if ttft_ts else 0.0,
+            "end": float(end_ts) if end_ts else 0.0,
+        }
 
     if pbar:
         pbar.update(1)
@@ -1057,6 +1093,8 @@ async def benchmark(
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
+        # Capture yield timestamp as soon as the request is yielded
+        yield_ts = time.perf_counter()
         if lora_names is not None and len(lora_names) != 0:
             idx = random.randint(0, len(lora_names) - 1)
             lora_name = lora_names[idx]
@@ -1072,6 +1110,9 @@ async def benchmark(
             lora_name=lora_name,
             extra_request_body=extra_request_body,
         )
+        # Assign trace fields
+        request_func_input.request_id = next_request_id()
+        request_func_input.yield_ts = yield_ts
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
@@ -1244,6 +1285,41 @@ async def benchmark(
             "errors": [output.error for output in outputs],
         }
     )
+    # Collect per-request traces and save a JSON profile alongside the JSONL
+    try:
+        traces = [o.trace for o in outputs if getattr(o, "trace", None)]
+        if traces:
+            valid_yields = [t.get("yield", 0.0) for t in traces if t.get("yield", 0.0) > 0.0]
+            t0 = min(valid_yields) if valid_yields else 0.0
+
+            traces_sorted = sorted(traces, key=lambda t: (t.get("request_id", -1), t.get("yield", 0.0)))
+            profile_entries: List[Dict[str, float]] = []
+            for t in traces_sorted:
+                yld = float(t.get("yield", 0.0) or 0.0)
+                pst = float(t.get("post", 0.0) or 0.0)
+                ftt = float(t.get("ttft", 0.0) or 0.0)
+                end = float(t.get("end", 0.0) or 0.0)
+                entry: Dict[str, float] = {
+                    "request_id": float(t.get("request_id", -1.0) or -1.0),
+                    "yield": yld,
+                    "post": pst,
+                    "ttft": ftt,
+                    "end": end,
+                    "yield_rel": (yld - t0) if (yld > 0.0 and t0 > 0.0) else 0.0,
+                    "post_rel": (pst - t0) if (pst > 0.0 and t0 > 0.0) else 0.0,
+                    "ttft_rel": (ftt - t0) if (ftt > 0.0 and t0 > 0.0) else 0.0,
+                    "end_rel": (end - t0) if (end > 0.0 and t0 > 0.0) else 0.0,
+                }
+                profile_entries.append(entry)
+
+            base_name, _ = os.path.splitext(output_file_name)
+            trace_json = f"{base_name}.trace.json"
+            with open(trace_json, "w") as f:
+                json.dump({"t0": t0, "traces": profile_entries}, f)
+            result["trace_file"] = trace_json
+            print(f"Saved request trace profile to {trace_json}")
+    except Exception as e:
+        print(f"Failed to generate request trace profile: {e}")
     return result
 
 
