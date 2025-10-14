@@ -4,6 +4,7 @@ import dataclasses
 import multiprocessing as mp
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -309,6 +310,7 @@ class BaseMultimodalProcessor(ABC):
         Static method that can be pickled for multiprocessing"""
         if isinstance(data, dict):
             return data
+        start_time = time.perf_counter()
         try:
             if modality == Modality.IMAGE:
                 img, _ = load_image(data)
@@ -325,6 +327,10 @@ class BaseMultimodalProcessor(ABC):
             else:
                 rte.error_code = 400
             raise rte
+        finally:
+            cost_time = (time.perf_counter() - start_time) * 1000
+            logger.info(f"load single mm item cost {cost_time:.2f} ms")
+
 
     def submit_data_loading_tasks(
         self,
