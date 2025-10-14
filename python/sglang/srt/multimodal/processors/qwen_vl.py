@@ -266,6 +266,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
     models = [
         Qwen2VLForConditionalGeneration,
         Qwen2_5_VLForConditionalGeneration,
+        Qwen3VLForConditionalGeneration,
+        Qwen3VLMoeForConditionalGeneration,
     ]
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
@@ -288,11 +290,19 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         # Keep a generous cap by default; may be overridden if needed
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
-        # Video-related defaults (Qwen2/Qwen2.5)
+        # Video-related defaults. Keep minimal changes by selecting
+        # per-version defaults within this single processor.
         self.FRAME_FACTOR = 2
-        self.FPS = 2.0
-        self.FPS_MIN_FRAMES = 4
-        self.FPS_MAX_FRAMES = 768
+        if str(getattr(hf_config, "model_type", "")).startswith("qwen3"):
+            # Qwen3 defaults (adjust here if future divergence is needed)
+            self.FPS = 2.0
+            self.FPS_MIN_FRAMES = 4
+            self.FPS_MAX_FRAMES = 768
+        else:
+            # Qwen2/Qwen2.5 defaults
+            self.FPS = 2.0
+            self.FPS_MIN_FRAMES = 4
+            self.FPS_MAX_FRAMES = 768
         self.VIDEO_MIN_PIXELS = 128 * 28 * 28
         self.VIDEO_MAX_PIXELS = 768 * 28 * 28
         self.VIDEO_TOTAL_PIXELS = int(
@@ -374,18 +384,29 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         }
 
     async def preprocess_video(self, vr) -> torch.Tensor:
-        """Qwen2.5-style preprocessing with per-class defaults."""
+        """Preprocess video, selecting smart_nframes logic by version."""
         ele: dict = {}
         total_frames, video_fps = len(vr), vr.get_avg_fps()
-        nframes = smart_nframes_qwen25(
-            ele,
-            total_frames=total_frames,
-            video_fps=video_fps,
-            frame_factor=self.FRAME_FACTOR,
-            default_fps=self.FPS,
-            min_frames_default=self.FPS_MIN_FRAMES,
-            max_frames_default=self.FPS_MAX_FRAMES,
-        )
+        if str(getattr(self.hf_config, "model_type", "")).startswith("qwen3"):
+            nframes = smart_nframes_qwen3(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                default_fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
+        else:
+            nframes = smart_nframes_qwen25(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                default_fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
         idx = (
             torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
             if nframes > 0
@@ -429,173 +450,4 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         return video
 
 
-class Qwen3VLImageProcessor(SGLangBaseProcessor):
-    models = [
-        Qwen3VLForConditionalGeneration,
-        Qwen3VLMoeForConditionalGeneration,
-    ]
 
-    def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
-        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
-        # The regex that matches expanded image tokens.
-        self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
-        self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
-        self.vision_start_token_id = hf_config.vision_start_token_id
-        self.vision_end_token_id = hf_config.vision_end_token_id
-        self.NUM_TOKEN_PER_FRAME = 770
-
-        # Derive image factor from vision config when possible
-        vision_cfg = getattr(hf_config, "vision_config", object())
-        patch_size = getattr(vision_cfg, "patch_size", None)
-        spatial_merge = getattr(vision_cfg, "spatial_merge_size", None)
-        self.IMAGE_FACTOR = (
-            int(patch_size) * int(spatial_merge)
-            if isinstance(patch_size, int) and isinstance(spatial_merge, int)
-            else 28
-        )
-        self.MIN_PIXELS = 4 * self.IMAGE_FACTOR * self.IMAGE_FACTOR
-        self.MAX_PIXELS = 16384 * 28 * 28
-        self.MAX_RATIO = 200
-
-        # Qwen3-specific video defaults. Keep values configurable and
-        # separate from Qwen2.5 so they can diverge safely.
-        self.FRAME_FACTOR = 2
-        # Prefer defaults from config if available
-        self.FPS = float(getattr(vision_cfg, "default_video_fps", 2.0))
-        self.FPS_MIN_FRAMES = int(getattr(vision_cfg, "min_video_frames", 4))
-        self.FPS_MAX_FRAMES = int(getattr(vision_cfg, "max_video_frames", 768))
-        self.VIDEO_MIN_PIXELS = 128 * 28 * 28
-        self.VIDEO_MAX_PIXELS = 768 * 28 * 28
-        self.VIDEO_TOTAL_PIXELS = int(
-            float(os.environ.get("VIDEO_MAX_PIXELS", 128000 * 28 * 28 * 0.9))
-        )
-
-        self.mm_tokens = MultimodalSpecialTokens(
-            image_token="<|vision_start|><|image_pad|><|vision_end|>",
-            image_token_id=hf_config.image_token_id,
-            image_token_regex=re.compile(
-                r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>"
-            ),
-            video_token_id=hf_config.video_token_id,
-        ).build(_processor)
-
-    async def process_mm_data_async(
-        self,
-        image_data: List[Union[str, bytes]],
-        input_text,
-        request_obj,
-        *args,
-        **kwargs,
-    ):
-
-        base_output = self.load_mm_data(
-            prompt=input_text,
-            image_data=image_data,
-            video_data=request_obj.video_data,
-            multimodal_tokens=self.mm_tokens,
-        )
-
-        # Resize images using Qwen3 defaults
-        if base_output.images and isinstance(base_output.images[0], Image.Image):
-            resize_tasks = [
-                resize_image_async(
-                    image,
-                    min_pixels=self.MIN_PIXELS,
-                    max_pixels=self.MAX_PIXELS,
-                    size_factor=self.IMAGE_FACTOR,
-                )
-                for image in base_output.images
-            ]
-            base_output.images = await asyncio.gather(*resize_tasks)
-
-        if base_output.videos:
-            base_output.videos = [
-                await self.preprocess_video(video) for video in base_output.videos
-            ]
-
-        mm_items, input_ids, ret = self.process_and_combine_mm_data(
-            base_output, self.mm_tokens
-        )
-
-        input_ids = input_ids.flatten()
-        mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
-            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-            image_token_id=self.mm_tokens.image_token_id,
-            video_token_id=self.mm_tokens.video_token_id,
-            vision_start_token_id=self.vision_start_token_id,
-            model_type=self.hf_config.model_type,
-            tokens_per_second=getattr(
-                self.hf_config.vision_config, "tokens_per_second", None
-            ),
-            input_ids=input_ids.unsqueeze(0),
-            image_grid_thw=getattr(ret, "image_grid_thw", None),
-            video_grid_thw=getattr(ret, "video_grid_thw", None),
-            second_per_grid_ts=getattr(ret, "second_per_grid_ts", None),
-        )
-        mrope_positions = mrope_positions.squeeze(1)
-
-        return {
-            "input_ids": input_ids.tolist(),
-            "mm_items": mm_items,
-            "im_start_id": self.IM_START_TOKEN_ID,
-            "im_end_id": self.IM_END_TOKEN_ID,
-            "im_token_id": self.mm_tokens.image_token_id,
-            "video_token_id": self.mm_tokens.video_token_id,
-            "mrope_positions": mrope_positions,
-            "mrope_position_delta": mrope_position_delta,
-        }
-
-    async def preprocess_video(self, vr) -> torch.Tensor:
-        """Qwen3-style preprocessing using version-specific defaults."""
-        ele: dict = {}
-        total_frames, video_fps = len(vr), vr.get_avg_fps()
-        nframes = smart_nframes_qwen3(
-            ele,
-            total_frames=total_frames,
-            video_fps=video_fps,
-            frame_factor=self.FRAME_FACTOR,
-            default_fps=self.FPS,
-            min_frames_default=self.FPS_MIN_FRAMES,
-            max_frames_default=self.FPS_MAX_FRAMES,
-        )
-        idx = (
-            torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-            if nframes > 0
-            else []
-        )
-        video = vr.get_batch(idx).asnumpy()
-        video = torch.tensor(video).permute(0, 3, 1, 2)
-        nframes, _, height, width = video.shape
-        min_pixels = ele.get("min_pixels", self.VIDEO_MIN_PIXELS)
-        total_pixels = ele.get("total_pixels", self.VIDEO_TOTAL_PIXELS)
-        max_pixels = max(
-            min(self.VIDEO_MAX_PIXELS, total_pixels / max(nframes, 1) * self.FRAME_FACTOR),
-            int(min_pixels * 1.05),
-        )
-        max_pixels_supposed = ele.get("max_pixels", max_pixels)
-        if max_pixels_supposed > max_pixels:
-            logger.warning(
-                f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}]."
-            )
-        max_pixels = min(max_pixels_supposed, max_pixels)
-        if "resized_height" in ele and "resized_width" in ele:
-            resized_height, resized_width = smart_resize(
-                ele["resized_height"],
-                ele["resized_width"],
-                factor=self.IMAGE_FACTOR,
-            )
-        else:
-            resized_height, resized_width = smart_resize(
-                height,
-                width,
-                factor=self.IMAGE_FACTOR,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-            )
-        video = torchvision.transforms.functional.resize(
-            video,
-            [resized_height, resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
-        return video
