@@ -255,9 +255,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         self.FRAME_FACTOR = 2
         if str(getattr(hf_config, "model_type", "")).startswith("qwen3"):
             # Qwen3 defaults (adjust here if future divergence is needed)
-            self.FPS = 2.0
-            self.FPS_MIN_FRAMES = 4
-            self.FPS_MAX_FRAMES = 768
+            self.FPS = float(
+                getattr(getattr(hf_config, "vision_config", object()), "default_video_fps", 2.0)
+            )
+            self.FPS_MIN_FRAMES = int(
+                getattr(getattr(hf_config, "vision_config", object()), "min_video_frames", 4)
+            )
+            # Qwen3 uses a lower default cap by design
+            self.FPS_MAX_FRAMES = int(
+                getattr(getattr(hf_config, "vision_config", object()), "max_video_frames", 512)
+            )
         else:
             # Qwen2/Qwen2.5 defaults
             self.FPS = 2.0
