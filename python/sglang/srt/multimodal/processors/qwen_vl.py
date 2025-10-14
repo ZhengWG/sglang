@@ -151,6 +151,79 @@ def sample_frames(
     return int(nframes)
 
 
+def sample_frames_qwen25(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+    *,
+    frame_factor: int,
+    fps: float,
+    min_frames_default: int,
+    max_frames_default: int,
+) -> int:
+    """Qwen2/Qwen2.5 frame sampling.
+
+    Uses floor_by_factor at the final step and emits a warning if the
+    computed frames exceed the original total.
+    """
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    if "nframes" in ele:
+        nframes = round_by_factor(ele["nframes"], frame_factor)
+    else:
+        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
+        max_frames = floor_by_factor(
+            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
+        )
+        n_est = total_frames / max(video_fps, 1e-6) * fps
+        if n_est > total_frames:
+            logger.warning(
+                f"smart_nframes: nframes[{n_est}] > total_frames[{total_frames}]"
+            )
+        nframes = min(min(max(n_est, min_frames), max_frames), total_frames)
+        nframes = floor_by_factor(nframes, frame_factor)
+    if not (frame_factor <= nframes <= total_frames):
+        raise ValueError(
+            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
+        )
+    return int(nframes)
+
+
+def sample_frames_qwen3(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+    *,
+    frame_factor: int,
+    fps: float,
+    min_frames_default: int,
+    max_frames_default: int,
+) -> int:
+    """Qwen3 frame sampling.
+
+    Differs by using round_by_factor at the final step (rather than floor)
+    and typically a lower default max_frames (often 512).
+    """
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    if "nframes" in ele:
+        nframes = round_by_factor(ele["nframes"], frame_factor)
+    else:
+        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
+        max_frames = floor_by_factor(
+            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
+        )
+        n_est = total_frames / max(video_fps, 1e-6) * fps
+        nframes = min(min(max(n_est, min_frames), max_frames), total_frames)
+        # Round to nearest multiple for qwen3
+        nframes = round_by_factor(nframes, frame_factor)
+        # Clamp again after rounding
+        nframes = min(max(nframes, min_frames), min(max_frames, total_frames))
+    if not (frame_factor <= nframes <= total_frames):
+        raise ValueError(
+            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
+        )
+    return int(nframes)
+
+
 def smart_nframes(
     ele: dict,
     total_frames: int,
@@ -354,15 +427,26 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         """Preprocess video using unified frame sampling with class defaults."""
         ele: dict = {}
         total_frames, video_fps = len(vr), vr.get_avg_fps()
-        nframes = sample_frames(
-            ele,
-            total_frames=total_frames,
-            video_fps=video_fps,
-            frame_factor=self.FRAME_FACTOR,
-            fps=self.FPS,
-            min_frames_default=self.FPS_MIN_FRAMES,
-            max_frames_default=self.FPS_MAX_FRAMES,
-        )
+        if str(getattr(self.hf_config, "model_type", "")).startswith("qwen3"):
+            nframes = sample_frames_qwen3(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
+        else:
+            nframes = sample_frames_qwen25(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
         idx = (
             torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
             if nframes > 0
