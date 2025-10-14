@@ -25,6 +25,7 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.parser.code_completion_parser import (
     generate_completion_prompt_from_request,
 )
+from sglang.srt.utils import ImageData
 from sglang.utils import convert_json_schema_to_str
 
 if TYPE_CHECKING:
@@ -55,6 +56,30 @@ class OpenAIServingCompletion(OpenAIServingBase):
             return "Prompt cannot be empty"
 
         return None
+
+    def _extract_multi_modal_data(self, request: CompletionRequest) -> tuple:
+        image_data = []
+        video_data = []
+        audio_data = []
+        modalities = []
+        for data in request.multi_modal_data:
+            data_type = data.type
+            if data_type.startswith("image"):
+                image_data.append(
+                    ImageData(
+                        url=data.image_url.url,
+                        detail=getattr(data.image_url, "detail", "auto"),
+                    )
+                )
+                if data.modalities:
+                    modalities.append(data.modalities)
+            elif data_type.startswith("video"):
+                video_data.append(data.video_url.url)
+            elif data_type.startswith("audio"):
+                audio_data.append(data.audio_url.url)
+            else:
+                raise ValueError(f"Unknown modality type: {data_type}")
+        return (image_data, video_data, audio_data, modalities)
 
     def _convert_to_internal_request(
         self,
@@ -96,6 +121,12 @@ class OpenAIServingCompletion(OpenAIServingBase):
         # Extract custom labels from raw request headers
         custom_labels = self.extract_custom_labels(raw_request)
 
+        # extract multi-modal data
+        is_multimodal = self.tokenizer_manager.model_config.is_multimodal
+        image_data = video_data = audio_data = modalities = None
+        if is_multimodal and request.multi_modal_data:
+            image_data, video_data, audio_data, modalities = self._extract_multi_modal_data(request)
+
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
             sampling_params=sampling_params,
@@ -113,6 +144,11 @@ class OpenAIServingCompletion(OpenAIServingBase):
             extra_key=self._compute_extra_key(request),
             priority=request.priority,
             custom_labels=custom_labels,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            modalities=modalities,
+            mm_sampling_kwargs=(request.mm_sampling_kwargs if is_multimodal else None),
         )
 
         return adapted_request, request

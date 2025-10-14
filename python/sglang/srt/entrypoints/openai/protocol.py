@@ -189,6 +189,42 @@ class BatchResponse(BaseModel):
     metadata: Optional[dict] = None
 
 
+class CompletionMessageContentImageURL(BaseModel):
+    url: str
+    detail: Optional[Literal["auto", "low", "high"]] = "auto"
+
+
+class CompletionMessageContentVideoURL(BaseModel):
+    url: str
+
+
+class CompletionMessageContentAudioURL(BaseModel):
+    url: str
+
+
+class CompletionMessageContentImagePart(BaseModel):
+    type: Literal["image_url", "image"]
+    image_url: CompletionMessageContentImageURL
+    modalities: Optional[Literal["image", "multi-images", "video"]] = "image"
+
+
+class CompletionMessageContentVideoPart(BaseModel):
+    type: Literal["video_url", "video"]
+    video_url: CompletionMessageContentVideoURL
+
+
+class CompletionMessageContentAudioPart(BaseModel):
+    type: Literal["audio_url", "audio"]
+    audio_url: CompletionMessageContentAudioURL
+
+
+MMCompletionMessageContentPart = Union[
+    CompletionMessageContentImagePart,
+    CompletionMessageContentVideoPart,
+    CompletionMessageContentAudioPart,
+]
+
+
 class CompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
@@ -245,6 +281,10 @@ class CompletionRequest(BaseModel):
 
     # For custom metric labels
     custom_labels: Optional[Dict[str, str]] = None
+
+    # multi-modal data for compeletion request
+    multi_modal_data: Optional[List[MMCompletionMessageContentPart]] = None
+    mm_sampling_kwargs: Optional[Dict] = None
 
     @field_validator("max_tokens")
     @classmethod
