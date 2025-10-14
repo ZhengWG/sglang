@@ -20,6 +20,11 @@ from sglang.srt.multimodal.processors.base_processor import (
 from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 from sglang.utils import logger
 
+# NOTE: The following globals serve as legacy fallbacks. Do NOT hardcode
+# version-specific logic to these values. Each processor class now defines
+# its own defaults based on model version/config. These remain for backward
+# compatibility for any external imports calling the helper functions
+# without passing explicit parameters.
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
 MAX_PIXELS = 16384 * 28 * 28
@@ -113,52 +118,127 @@ async def resize_image_async(
     return resize_image(image, min_pixels, max_pixels, size_factor)
 
 
+def sample_frames(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+    *,
+    frame_factor: int,
+    fps: float,
+    min_frames_default: int,
+    max_frames_default: int,
+) -> int:
+    """Unified frame sampling logic (smart_nframes / sample_frames).
+
+    - If `ele` provides `nframes`, round it to a multiple of `frame_factor`.
+    - Otherwise, compute from `fps` and clamp to [min_frames, max_frames, total_frames].
+    """
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    if "nframes" in ele:
+        nframes = round_by_factor(ele["nframes"], frame_factor)
+    else:
+        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
+        max_frames = floor_by_factor(
+            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
+        )
+        nframes = total_frames / max(video_fps, 1e-6) * fps
+        nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
+        nframes = floor_by_factor(nframes, frame_factor)
+    if not (frame_factor <= nframes <= total_frames):
+        raise ValueError(
+            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
+        )
+    return int(nframes)
+
+
+def sample_frames_qwen25(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+    *,
+    frame_factor: int,
+    fps: float,
+    min_frames_default: int,
+    max_frames_default: int,
+) -> int:
+    """Qwen2/Qwen2.5 frame sampling.
+
+    Uses floor_by_factor at the final step and emits a warning if the
+    computed frames exceed the original total.
+    """
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    if "nframes" in ele:
+        nframes = round_by_factor(ele["nframes"], frame_factor)
+    else:
+        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
+        max_frames = floor_by_factor(
+            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
+        )
+        n_est = total_frames / max(video_fps, 1e-6) * fps
+        if n_est > total_frames:
+            logger.warning(
+                f"smart_nframes: nframes[{n_est}] > total_frames[{total_frames}]"
+            )
+        nframes = min(min(max(n_est, min_frames), max_frames), total_frames)
+        nframes = floor_by_factor(nframes, frame_factor)
+    if not (frame_factor <= nframes <= total_frames):
+        raise ValueError(
+            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
+        )
+    return int(nframes)
+
+
+def sample_frames_qwen3(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+    *,
+    frame_factor: int,
+    fps: float,
+    min_frames_default: int,
+    max_frames_default: int,
+) -> int:
+    """Qwen3 frame sampling.
+
+    Differs by using round_by_factor at the final step (rather than floor)
+    and typically a lower default max_frames (often 512).
+    """
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    if "nframes" in ele:
+        nframes = round_by_factor(ele["nframes"], frame_factor)
+    else:
+        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
+        max_frames = floor_by_factor(
+            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
+        )
+        n_est = total_frames / max(video_fps, 1e-6) * fps
+        nframes = min(min(max(n_est, min_frames), max_frames), total_frames)
+        # Round to nearest multiple for qwen3
+        nframes = round_by_factor(nframes, frame_factor)
+        # Clamp again after rounding
+        nframes = min(max(nframes, min_frames), min(max_frames, total_frames))
+    if not (frame_factor <= nframes <= total_frames):
+        raise ValueError(
+            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
+        )
+    return int(nframes)
+
+
 def smart_nframes(
     ele: dict,
     total_frames: int,
     video_fps: int | float,
 ) -> int:
-    """calculate the number of frames for video used for model inputs.
-
-    Args:
-        ele (dict): a dict contains the configuration of video.
-            support either `fps` or `nframes`:
-                - nframes: the number of frames to extract for model inputs.
-                - fps: the fps to extract frames for model inputs.
-                    - min_frames: the minimum number of frames of the video, only used when fps is provided.
-                    - max_frames: the maximum number of frames of the video, only used when fps is provided.
-        total_frames (int): the original total number of frames of the video.
-        video_fps (int | float): the original fps of the video.
-
-    Raises:
-        ValueError: nframes should in interval [FRAME_FACTOR, total_frames].
-
-    Returns:
-        int: the number of frames for video used for model inputs.
-    """
-    assert not (
-        "fps" in ele and "nframes" in ele
-    ), "Only accept either `fps` or `nframes`"
-    if "nframes" in ele:
-        nframes = round_by_factor(ele["nframes"], FRAME_FACTOR)
-    else:
-        fps = ele.get("fps", FPS)
-        min_frames = ceil_by_factor(ele.get("min_frames", FPS_MIN_FRAMES), FRAME_FACTOR)
-        max_frames = floor_by_factor(
-            ele.get("max_frames", min(FPS_MAX_FRAMES, total_frames)), FRAME_FACTOR
-        )
-        nframes = total_frames / video_fps * fps
-        if nframes > total_frames:
-            logger.warning(
-                f"smart_nframes: nframes[{nframes}] > total_frames[{total_frames}]"
-            )
-        nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
-        nframes = floor_by_factor(nframes, FRAME_FACTOR)
-    if not (FRAME_FACTOR <= nframes and nframes <= total_frames):
-        raise ValueError(
-            f"nframes should in interval [{FRAME_FACTOR}, {total_frames}], but got {nframes}."
-        )
-    return nframes
+    """Legacy entry: use module-level defaults for backward compatibility."""
+    return sample_frames(
+        ele,
+        total_frames,
+        video_fps,
+        frame_factor=FRAME_FACTOR,
+        fps=FPS,
+        min_frames_default=FPS_MIN_FRAMES,
+        max_frames_default=FPS_MAX_FRAMES,
+    )
 
 
 # process video, qwen-specific
@@ -167,6 +247,11 @@ async def preprocess_video(
     image_factor: int = IMAGE_FACTOR,
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
+    """Legacy top-level preprocessing (kept for external callers).
+
+    Internally, processor classes define their own `preprocess_video` methods
+    that use version-specific defaults.
+    """
     ele = {}
     total_frames, video_fps = len(vr), vr.get_avg_fps()
     nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
@@ -226,10 +311,43 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         self.vision_start_token_id = hf_config.vision_start_token_id
         self.vision_end_token_id = hf_config.vision_end_token_id
         self.NUM_TOKEN_PER_FRAME = 770
-        self.IMAGE_FACTOR = 28
-        self.MIN_PIXELS = 4 * 28 * 28
+        # Derive image factor from vision config when possible (patch_size * spatial_merge_size)
+        patch_size = getattr(getattr(hf_config, "vision_config", object()), "patch_size", None)
+        spatial_merge = getattr(getattr(hf_config, "vision_config", object()), "spatial_merge_size", None)
+        self.IMAGE_FACTOR = (
+            int(patch_size) * int(spatial_merge)
+            if isinstance(patch_size, int) and isinstance(spatial_merge, int)
+            else 28
+        )
+        self.MIN_PIXELS = 4 * self.IMAGE_FACTOR * self.IMAGE_FACTOR
+        # Keep a generous cap by default; may be overridden if needed
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
+        # Video-related defaults. Keep minimal changes by selecting
+        # per-version defaults within this single processor.
+        self.FRAME_FACTOR = 2
+        if str(getattr(hf_config, "model_type", "")).startswith("qwen3"):
+            # Qwen3 defaults (adjust here if future divergence is needed)
+            self.FPS = float(
+                getattr(getattr(hf_config, "vision_config", object()), "default_video_fps", 2.0)
+            )
+            self.FPS_MIN_FRAMES = int(
+                getattr(getattr(hf_config, "vision_config", object()), "min_video_frames", 4)
+            )
+            # Qwen3 uses a lower default cap by design
+            self.FPS_MAX_FRAMES = int(
+                getattr(getattr(hf_config, "vision_config", object()), "max_video_frames", 512)
+            )
+        else:
+            # Qwen2/Qwen2.5 defaults
+            self.FPS = 2.0
+            self.FPS_MIN_FRAMES = 4
+            self.FPS_MAX_FRAMES = 768
+        self.VIDEO_MIN_PIXELS = 128 * 28 * 28
+        self.VIDEO_MAX_PIXELS = 768 * 28 * 28
+        self.VIDEO_TOTAL_PIXELS = int(
+            float(os.environ.get("VIDEO_MAX_PIXELS", 128000 * 28 * 28 * 0.9))
+        )
         self.mm_tokens = MultimodalSpecialTokens(
             image_token="<|vision_start|><|image_pad|><|vision_end|>",
             image_token_id=hf_config.image_token_id,
@@ -257,12 +375,20 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         # Qwen-specific: resize images if they are raw Image objects
         if base_output.images and isinstance(base_output.images[0], Image.Image):
-            resize_tasks = [resize_image_async(image) for image in base_output.images]
+            resize_tasks = [
+                resize_image_async(
+                    image,
+                    min_pixels=self.MIN_PIXELS,
+                    max_pixels=self.MAX_PIXELS,
+                    size_factor=self.IMAGE_FACTOR,
+                )
+                for image in base_output.images
+            ]
             base_output.images = await asyncio.gather(*resize_tasks)
 
         if base_output.videos:
             base_output.videos = [
-                await preprocess_video(video) for video in base_output.videos
+                await self.preprocess_video(video) for video in base_output.videos
             ]
 
         mm_items, input_ids, ret = self.process_and_combine_mm_data(
@@ -296,3 +422,72 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             "mrope_positions": mrope_positions,
             "mrope_position_delta": mrope_position_delta,
         }
+
+    async def preprocess_video(self, vr) -> torch.Tensor:
+        """Preprocess video using unified frame sampling with class defaults."""
+        ele: dict = {}
+        total_frames, video_fps = len(vr), vr.get_avg_fps()
+        if str(getattr(self.hf_config, "model_type", "")).startswith("qwen3"):
+            nframes = sample_frames_qwen3(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
+        else:
+            nframes = sample_frames_qwen25(
+                ele,
+                total_frames=total_frames,
+                video_fps=video_fps,
+                frame_factor=self.FRAME_FACTOR,
+                fps=self.FPS,
+                min_frames_default=self.FPS_MIN_FRAMES,
+                max_frames_default=self.FPS_MAX_FRAMES,
+            )
+        idx = (
+            torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+            if nframes > 0
+            else []
+        )
+        video = vr.get_batch(idx).asnumpy()
+        video = torch.tensor(video).permute(0, 3, 1, 2)
+        nframes, _, height, width = video.shape
+        min_pixels = ele.get("min_pixels", self.VIDEO_MIN_PIXELS)
+        total_pixels = ele.get("total_pixels", self.VIDEO_TOTAL_PIXELS)
+        max_pixels = max(
+            min(self.VIDEO_MAX_PIXELS, total_pixels / max(nframes, 1) * self.FRAME_FACTOR),
+            int(min_pixels * 1.05),
+        )
+        max_pixels_supposed = ele.get("max_pixels", max_pixels)
+        if max_pixels_supposed > max_pixels:
+            logger.warning(
+                f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}]."
+            )
+        max_pixels = min(max_pixels_supposed, max_pixels)
+        if "resized_height" in ele and "resized_width" in ele:
+            resized_height, resized_width = smart_resize(
+                ele["resized_height"],
+                ele["resized_width"],
+                factor=self.IMAGE_FACTOR,
+            )
+        else:
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=self.IMAGE_FACTOR,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+        video = torchvision.transforms.functional.resize(
+            video,
+            [resized_height, resized_width],
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=True,
+        ).float()
+        return video
+
+
+
