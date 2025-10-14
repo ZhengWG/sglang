@@ -118,82 +118,25 @@ async def resize_image_async(
     return resize_image(image, min_pixels, max_pixels, size_factor)
 
 
-def smart_nframes(
-    ele: dict,
-    total_frames: int,
-    video_fps: int | float,
-) -> int:
-    """Legacy Qwen2.5-style frame sampler.
-
-    Kept for backward compatibility for external callers. Internally, the
-    Qwen2.5 processor overrides and uses its own per-class defaults.
-    """
-    return smart_nframes_qwen25(ele, total_frames, video_fps)
-
-
-def smart_nframes_qwen25(
-    ele: dict,
-    total_frames: int,
-    video_fps: int | float,
-    *,
-    frame_factor: int = FRAME_FACTOR,
-    default_fps: float = FPS,
-    min_frames_default: int = FPS_MIN_FRAMES,
-    max_frames_default: int = FPS_MAX_FRAMES,
-) -> int:
-    """Qwen2.5/Qwen2-style frame sampling (a.k.a. sample_frames in HF).
-
-    Supports either a target frame count via `nframes` or an FPS-based policy
-    with min/max frame caps. The final number of frames is rounded down to be
-    divisible by `frame_factor`.
-    """
-    assert not (
-        "fps" in ele and "nframes" in ele
-    ), "Only accept either `fps` or `nframes`"
-    if "nframes" in ele:
-        nframes = round_by_factor(ele["nframes"], frame_factor)
-    else:
-        fps = ele.get("fps", default_fps)
-        min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
-        max_frames = floor_by_factor(
-            ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
-        )
-        nframes = total_frames / max(video_fps, 1e-6) * fps
-        if nframes > total_frames:
-            logger.warning(
-                f"smart_nframes: nframes[{nframes}] > total_frames[{total_frames}]"
-            )
-        nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
-        nframes = floor_by_factor(nframes, frame_factor)
-    if not (frame_factor <= nframes and nframes <= total_frames):
-        raise ValueError(
-            f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
-        )
-    return int(nframes)
-
-
-def smart_nframes_qwen3(
+def sample_frames(
     ele: dict,
     total_frames: int,
     video_fps: int | float,
     *,
     frame_factor: int,
-    default_fps: float,
+    fps: float,
     min_frames_default: int,
     max_frames_default: int,
 ) -> int:
-    """Qwen3-style frame sampling (aligns with HF's sample_frames).
+    """Unified frame sampling logic (smart_nframes / sample_frames).
 
-    Semantics mirror the Qwen2.5 logic but with version-specific defaults.
-    This hook allows future divergence without touching shared logic.
+    - If `ele` provides `nframes`, round it to a multiple of `frame_factor`.
+    - Otherwise, compute from `fps` and clamp to [min_frames, max_frames, total_frames].
     """
-    assert not (
-        "fps" in ele and "nframes" in ele
-    ), "Only accept either `fps` or `nframes`"
+    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
     if "nframes" in ele:
         nframes = round_by_factor(ele["nframes"], frame_factor)
     else:
-        fps = ele.get("fps", default_fps)
         min_frames = ceil_by_factor(ele.get("min_frames", min_frames_default), frame_factor)
         max_frames = floor_by_factor(
             ele.get("max_frames", min(max_frames_default, total_frames)), frame_factor
@@ -201,11 +144,28 @@ def smart_nframes_qwen3(
         nframes = total_frames / max(video_fps, 1e-6) * fps
         nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
         nframes = floor_by_factor(nframes, frame_factor)
-    if not (frame_factor <= nframes and nframes <= total_frames):
+    if not (frame_factor <= nframes <= total_frames):
         raise ValueError(
             f"nframes should in interval [{frame_factor}, {total_frames}], but got {nframes}."
         )
     return int(nframes)
+
+
+def smart_nframes(
+    ele: dict,
+    total_frames: int,
+    video_fps: int | float,
+) -> int:
+    """Legacy entry: use module-level defaults for backward compatibility."""
+    return sample_frames(
+        ele,
+        total_frames,
+        video_fps,
+        frame_factor=FRAME_FACTOR,
+        fps=FPS,
+        min_frames_default=FPS_MIN_FRAMES,
+        max_frames_default=FPS_MAX_FRAMES,
+    )
 
 
 # process video, qwen-specific
@@ -384,29 +344,18 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         }
 
     async def preprocess_video(self, vr) -> torch.Tensor:
-        """Preprocess video, selecting smart_nframes logic by version."""
+        """Preprocess video using unified frame sampling with class defaults."""
         ele: dict = {}
         total_frames, video_fps = len(vr), vr.get_avg_fps()
-        if str(getattr(self.hf_config, "model_type", "")).startswith("qwen3"):
-            nframes = smart_nframes_qwen3(
-                ele,
-                total_frames=total_frames,
-                video_fps=video_fps,
-                frame_factor=self.FRAME_FACTOR,
-                default_fps=self.FPS,
-                min_frames_default=self.FPS_MIN_FRAMES,
-                max_frames_default=self.FPS_MAX_FRAMES,
-            )
-        else:
-            nframes = smart_nframes_qwen25(
-                ele,
-                total_frames=total_frames,
-                video_fps=video_fps,
-                frame_factor=self.FRAME_FACTOR,
-                default_fps=self.FPS,
-                min_frames_default=self.FPS_MIN_FRAMES,
-                max_frames_default=self.FPS_MAX_FRAMES,
-            )
+        nframes = sample_frames(
+            ele,
+            total_frames=total_frames,
+            video_fps=video_fps,
+            frame_factor=self.FRAME_FACTOR,
+            fps=self.FPS,
+            min_frames_default=self.FPS_MIN_FRAMES,
+            max_frames_default=self.FPS_MAX_FRAMES,
+        )
         idx = (
             torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
             if nframes > 0
