@@ -713,6 +713,7 @@ class SchedulerOutputProcessorMixin:
         completion_tokens = []
         cached_tokens = []
         spec_verify_ct = []
+        spec_accepted_tokens = []
         output_hidden_states = None
 
         if return_logprob:
@@ -811,6 +812,7 @@ class SchedulerOutputProcessorMixin:
 
                 if not self.spec_algorithm.is_none():
                     spec_verify_ct.append(req.spec_verify_ct)
+                    spec_accepted_tokens.append(req.spec_accepted_tokens)
 
                 if return_logprob:
                     if (
@@ -914,6 +916,7 @@ class SchedulerOutputProcessorMixin:
                     completion_tokens,
                     cached_tokens,
                     spec_verify_ct,
+                    spec_accepted_tokens,
                     input_token_logprobs_val,
                     input_token_logprobs_idx,
                     output_token_logprobs_val,
