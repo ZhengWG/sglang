@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import re
+import time
 from typing import List, Union
 import numpy as np
 
@@ -306,13 +307,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         **kwargs,
     ):
 
+        entry_time = time.perf_counter()
         base_output = self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
             video_data=request_obj.video_data,
             multimodal_tokens=self.mm_tokens,
         )
+        load_time = time.perf_counter()
 
+        rid = getattr(request_obj, "rid", "anonymous_rid")
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
         # Qwen-specific: resize images if they are raw Image objects
@@ -343,6 +347,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             )
             base_output.videos, video_metadata = map(list, zip(*video_results))
 
+        preprocess_time = time.perf_counter()
+
         # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
         if self.hf_config.model_type in ("qwen3_vl", "qwen3_vl_moe"):
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
@@ -355,6 +361,15 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output, self.mm_tokens
             )
+
+        process_time = time.perf_counter()
+        logger.info(
+            f"[QwenVLProcessor Perf] {rid=}"
+            f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
+            f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
+            f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
+            f"total_time: {(process_time - entry_time) * 1000:.2f} ms"
+        )
 
         input_ids = input_ids.flatten()
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
