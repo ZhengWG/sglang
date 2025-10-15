@@ -364,7 +364,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         process_time = time.perf_counter()
         logger.info(
-            f"[QwenVLProcessor Perf] {rid=}"
+            f"[QwenVLProcessor Perf] {rid=}, "
             f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
             f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
             f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
