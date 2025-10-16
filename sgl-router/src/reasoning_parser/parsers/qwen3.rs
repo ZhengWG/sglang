@@ -55,10 +55,6 @@ impl ReasoningParser for Qwen3Parser {
     fn model_type(&self) -> &str {
         self.base.model_type()
     }
-
-    fn is_in_reasoning(&self) -> bool {
-        self.base.is_in_reasoning()
-    }
 }
 
 /// QwenThinking parser - variant that assumes reasoning from start.
@@ -109,10 +105,6 @@ impl ReasoningParser for QwenThinkingParser {
 
     fn model_type(&self) -> &str {
         self.base.model_type()
-    }
-
-    fn is_in_reasoning(&self) -> bool {
-        self.base.is_in_reasoning()
     }
 }
 

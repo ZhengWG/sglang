@@ -59,16 +59,15 @@ Select with `--dataset-name`:
 - `sharegpt` (default): loads ShareGPT-style pairs; optionally restrict with `--sharegpt-context-len` and override outputs with `--sharegpt-output-len`
 - `random`: random text lengths; sampled from ShareGPT token space
 - `random-ids`: random token ids (can lead to gibberish)
-- `image`: generates images and wraps them in chat messages; supports custom resolutions, multiple formats, and different content types
+- `random-image`: generates random images and wraps them in chat messages; supports custom resolutions via 'heightxwidth' format
 - `generated-shared-prefix`: synthetic dataset with shared long system prompts and short questions
 - `mmmu`: samples from MMMU (Math split) and includes images
 
 Common dataset flags:
 
 - `--num-prompts N`: number of requests
-- `--random-input-len`, `--random-output-len`, `--random-range-ratio`: for random/random-ids/image
-- `--image-count`: Number of images per request (for `image` dataset).
-
+- `--random-input-len`, `--random-output-len`, `--random-range-ratio`: for random/random-ids/random-image
+- `--random-image-num-images`, `--random-image-resolution`: for random-image dataset (supports presets 1080p/720p/360p or custom 'heightxwidth' format)
 - `--apply-chat-template`: apply tokenizer chat template when constructing prompts
 - `--dataset-path PATH`: file path for ShareGPT json; if blank and missing, it will be downloaded and cached
 
@@ -80,16 +79,14 @@ Generated Shared Prefix flags (for `generated-shared-prefix`):
 - `--gsp-question-len`
 - `--gsp-output-len`
 
-Image dataset flags (for `image`):
+Random Image dataset flags (for `random-image`):
 
-- `--image-count`: Number of images per request
-- `--image-resolution`: Image resolution; supports presets (4k, 1080p, 720p, 360p) or custom 'heightxwidth' format (e.g., 1080x1920, 512x768)
-- `--image-format`: Image format (jpeg or png)
-- `--image-content`: Image content type (random or blank)
+- `--random-image-num-images`: Number of images per request
+- `--random-image-resolution`: Image resolution; supports presets (1080p, 720p, 360p) or custom 'heightxwidth' format (e.g., 1080x1920, 512x768)
 
 ### Examples
 
-1. To benchmark image dataset with 3 images per request, 500 prompts, 512 input length, and 512 output length, you can run:
+1. To benchmark random-image dataset with 3 images per request, 500 prompts, 512 input length, and 512 output length, you can run:
 
 ```bash
 python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-3B-Instruct --disable-radix-cache
@@ -98,10 +95,10 @@ python -m sglang.launch_server --model-path Qwen/Qwen2.5-VL-3B-Instruct --disabl
 ```bash
 python -m sglang.bench_serving \
     --backend sglang-oai-chat \
-    --dataset-name image \
+    --dataset-name random-image \
     --num-prompts 500 \
-    --image-count 3 \
-    --image-resolution 720p \
+    --random-image-num-images 3 \
+    --random-image-resolution 720p \
     --random-input-len 512 \
     --random-output-len 512
 ```
@@ -162,10 +159,9 @@ The script will add `Authorization: Bearer $OPENAI_API_KEY` automatically for Op
 Printed after each run:
 
 - Request throughput (req/s)
-- Input token throughput (tok/s) - includes both text and vision tokens
+- Input token throughput (tok/s)
 - Output token throughput (tok/s)
-- Total token throughput (tok/s) - includes both text and vision tokens
-- Total input text tokens and Total input vision tokens - per-modality breakdown
+- Total token throughput (tok/s)
 - Concurrency: aggregate time of all requests divided by wall time
 - End-to-End Latency (ms): mean/median/std/p99 per-request total latency
 - Time to First Token (TTFT, ms): mean/median/std/p99 for streaming mode
@@ -231,48 +227,31 @@ python3 -m sglang.bench_serving \
   --apply-chat-template
 ```
 
-4) Images (VLM) with chat template:
+4) Random images (VLM) with chat template:
 
 ```bash
 python3 -m sglang.bench_serving \
   --backend sglang \
   --host 127.0.0.1 --port 30000 \
   --model your-vlm-model \
-  --dataset-name image \
-  --image-count 2 \
-  --image-resolution 720p \
+  --dataset-name random-image \
+  --random-image-num-images 2 \
+  --random-image-resolution 720p \
   --random-input-len 128 --random-output-len 256 \
   --num-prompts 200 \
   --apply-chat-template
 ```
 
-4a) Images with custom resolution:
+4a) Random images with custom resolution:
 
 ```bash
 python3 -m sglang.bench_serving \
   --backend sglang \
   --host 127.0.0.1 --port 30000 \
   --model your-vlm-model \
-  --dataset-name image \
-  --image-count 1 \
-  --image-resolution 512x768 \
-  --random-input-len 64 --random-output-len 128 \
-  --num-prompts 100 \
-  --apply-chat-template
-```
-
-4b) 1080p images with PNG format and blank content:
-
-```bash
-python3 -m sglang.bench_serving \
-  --backend sglang \
-  --host 127.0.0.1 --port 30000 \
-  --model your-vlm-model \
-  --dataset-name image \
-  --image-count 1 \
-  --image-resolution 1080p \
-  --image-format png \
-  --image-content blank \
+  --dataset-name random-image \
+  --random-image-num-images 1 \
+  --random-image-resolution 512x768 \
   --random-input-len 64 --random-output-len 128 \
   --num-prompts 100 \
   --apply-chat-template
@@ -346,7 +325,7 @@ python3 -m sglang.bench_serving \
 - All requests failed: verify `--backend`, server URL/port, `--model`, and authentication. Check warmup errors printed by the script.
 - Throughput seems too low: adjust `--request-rate` and `--max-concurrency`; verify server batch size/scheduling; ensure streaming is enabled if appropriate.
 - Token counts look odd: prefer chat/instruct models with proper chat templates; otherwise tokenization of gibberish may be inconsistent.
-- Image/MMMU datasets: ensure you installed extra deps (`pillow`, `datasets`, `pybase64`).
+- Random-image/MMMU datasets: ensure you installed extra deps (`pillow`, `datasets`, `pybase64`).
 - Authentication errors (401/403): set `OPENAI_API_KEY` or disable auth on your server.
 
 ### Notes

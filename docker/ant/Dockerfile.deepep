@@ -29,7 +29,7 @@ RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistu
 RUN python3 -m pip install --upgrade pip --no-cache-dir && pip install -U setuptools
 
 # 安装运行sglang依赖的包
-RUN pip3 install --no-cache-dir torch==2.8.0 torchao==0.9.0 torchaudio==2.8.0 torchvision==0.23.0 vllm==0.11.0
+RUN pip3 install --no-cache-dir torch==2.7.1 torchao==0.9.0 torchaudio==2.7.1 torchvision==0.22.1
 
 # for torch compile remote cache: https://yuque.antfin.com/deepxpu/uiwv6l/rtifd09662zz2u5k
 RUN pip3 install --no-cache-dir redis
@@ -87,11 +87,6 @@ RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-c
 
 # For EPLB initialization
 COPY ./docker/ant/expert_workload.json /root/expert_workload.json
-
-# 安装deepgemm编译缓存
-RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_gemm_cache.tar" && \
-    tar -xPf deep_gemm_cache.tar && \
-    rm -rf deep_gemm_cache.tar
 
 # 配置环境变量，在gpu机器上启动容器时，无需在命令行中添加
 ENV NVIDIA_VISIBLE_DEVICES=all

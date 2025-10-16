@@ -54,10 +54,6 @@ impl ReasoningParser for KimiParser {
     fn model_type(&self) -> &str {
         self.base.model_type()
     }
-
-    fn is_in_reasoning(&self) -> bool {
-        self.base.is_in_reasoning()
-    }
 }
 
 #[cfg(test)]
@@ -92,6 +88,7 @@ mod tests {
     fn test_kimi_partial_unicode() {
         let mut parser = KimiParser::new();
 
+        // Test partial Unicode token buffering
         let result1 = parser
             .parse_reasoning_streaming_incremental("◁thi")
             .unwrap();

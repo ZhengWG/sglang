@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import random
@@ -22,10 +23,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
-
-if TYPE_CHECKING:
-    from sglang.srt.managers.scheduler import Req
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 opentelemetry_imported = False
@@ -409,11 +407,9 @@ def trace_slice_start(
     ts: Optional[int] = None,
     anonymous: bool = False,
 ):
-    if not tracing_enabled:
-        return
 
     rid = str(rid)
-    if rid not in reqs_context:
+    if not tracing_enabled or rid not in reqs_context:
         return
 
     pid = threading.get_native_id()
@@ -462,11 +458,8 @@ def trace_slice_end(
     auto_next_anon: bool = False,
     thread_finish_flag: bool = False,
 ):
-    if not tracing_enabled:
-        return
-
     rid = str(rid)
-    if rid not in reqs_context:
+    if not tracing_enabled or rid not in reqs_context:
         return
 
     pid = threading.get_native_id()
@@ -519,13 +512,10 @@ trace_slice = trace_slice_end
 
 # Add event to the current slice on the same thread with the same rid.
 def trace_event(name: str, rid: str, ts: Optional[int] = None):
-    if not tracing_enabled:
+    if not tracing_enabled or rid not in reqs_context:
         return
 
     rid = str(rid)
-    if rid not in reqs_context:
-        return
-
     pid = threading.get_native_id()
     if pid not in reqs_context[rid].threads_context:
         return
@@ -544,13 +534,10 @@ def trace_event(name: str, rid: str, ts: Optional[int] = None):
 
 # Add attrs to the current slice on the same thread with the same rid.
 def trace_slice_add_attr(rid: str, attrs: Dict[str, Any]):
-    if not tracing_enabled:
+    if not tracing_enabled or rid not in reqs_context:
         return
 
     rid = str(rid)
-    if rid not in reqs_context:
-        return
-
     pid = threading.get_native_id()
     if pid not in reqs_context[rid].threads_context:
         return
@@ -563,16 +550,3 @@ def trace_slice_add_attr(rid: str, attrs: Dict[str, Any]):
 
     slice_info = thread_context.cur_slice_stack[-1]
     slice_info.span.set_attributes(attrs)
-
-
-def trace_slice_batch(
-    name: str,
-    reqs: List[Req],
-):
-    for req in reqs:
-        trace_slice(
-            name,
-            req.rid,
-            auto_next_anon=not req.finished(),
-            thread_finish_flag=req.finished(),
-        )

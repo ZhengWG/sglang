@@ -16,9 +16,6 @@ pub struct Sequence {
 
     /// Current position in the sequence
     read_offset: usize,
-
-    /// Whether to skip special tokens when decoding
-    skip_special_tokens: bool,
 }
 
 impl std::fmt::Debug for Sequence {
@@ -48,38 +45,22 @@ impl std::fmt::Debug for Sequence {
 impl Sequence {
     /// Create a new empty sequence
     pub fn new(tokenizer: Arc<dyn TokenizerTrait>) -> Self {
-        Self::new_with_options(tokenizer, false)
-    }
-
-    /// Create a new empty sequence with skip_special_tokens option
-    pub fn new_with_options(tokenizer: Arc<dyn TokenizerTrait>, skip_special_tokens: bool) -> Self {
         Self {
             tokenizer,
             token_ids: Vec::new(),
             prefix_offset: 0,
             read_offset: 0,
-            skip_special_tokens,
         }
     }
 
     /// Create a sequence with initial tokens
     pub fn with_tokens(tokenizer: Arc<dyn TokenizerTrait>, token_ids: Vec<TokenIdType>) -> Self {
-        Self::with_tokens_and_options(tokenizer, token_ids, false)
-    }
-
-    /// Create a sequence with initial tokens and skip_special_tokens option
-    pub fn with_tokens_and_options(
-        tokenizer: Arc<dyn TokenizerTrait>,
-        token_ids: Vec<TokenIdType>,
-        skip_special_tokens: bool,
-    ) -> Self {
         let len = token_ids.len();
         Self {
             tokenizer,
             token_ids,
             prefix_offset: 0,
             read_offset: len,
-            skip_special_tokens,
         }
     }
 
@@ -118,9 +99,7 @@ impl Sequence {
 
         // If this is the first token or we're at the beginning, decode everything
         if self.prefix_offset == 0 && old_read_offset == 0 {
-            let text = self
-                .tokenizer
-                .decode(&self.token_ids, self.skip_special_tokens)?;
+            let text = self.tokenizer.decode(&self.token_ids, false)?;
             if text.ends_with("�") {
                 // Incomplete UTF-8 sequence, wait for more tokens
                 return Ok(String::new());
@@ -130,16 +109,14 @@ impl Sequence {
         }
 
         // Decode the text up to the previous position
-        let prefix_text = self.tokenizer.decode(
-            &self.token_ids[self.prefix_offset..old_read_offset],
-            self.skip_special_tokens,
-        )?;
+        let prefix_text = self
+            .tokenizer
+            .decode(&self.token_ids[self.prefix_offset..old_read_offset], false)?;
 
         // Decode the text including the new token
-        let new_text = self.tokenizer.decode(
-            &self.token_ids[self.prefix_offset..],
-            self.skip_special_tokens,
-        )?;
+        let new_text = self
+            .tokenizer
+            .decode(&self.token_ids[self.prefix_offset..], false)?;
 
         // Handle multi-byte character boundaries
         let mut prefix_text_len = prefix_text.len();
@@ -174,8 +151,7 @@ impl Sequence {
 
     /// Decode the entire sequence to text
     pub fn text(&self) -> Result<String> {
-        self.tokenizer
-            .decode(&self.token_ids, self.skip_special_tokens)
+        self.tokenizer.decode(&self.token_ids, false)
     }
 
     /// Get the prefix offset
@@ -186,11 +162,6 @@ impl Sequence {
     /// Get the read offset
     pub fn read_offset(&self) -> usize {
         self.read_offset
-    }
-
-    /// Get whether special tokens are skipped during decoding
-    pub fn skip_special_tokens(&self) -> bool {
-        self.skip_special_tokens
     }
 }
 
@@ -235,6 +206,7 @@ mod tests {
         // The incremental text should be " world" (with the space that the mock tokenizer adds)
         assert_eq!(text2, " world");
 
+        // Verify the full text
         assert_eq!(seq.text().unwrap(), "Hello world");
     }
 

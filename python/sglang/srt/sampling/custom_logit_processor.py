@@ -4,7 +4,6 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import dill
-import orjson
 import torch
 
 
@@ -13,7 +12,7 @@ def _cache_from_str(json_str: str):
     """Deserialize a json string to a Callable object.
     This function is cached to avoid redundant deserialization.
     """
-    data = orjson.loads(json_str)
+    data = json.loads(json_str)
     return dill.loads(bytes.fromhex(data["callable"]))
 
 

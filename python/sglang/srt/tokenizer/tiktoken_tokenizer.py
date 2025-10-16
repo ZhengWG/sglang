@@ -133,9 +133,9 @@ class TiktokenTokenizer:
         )
         return self.encode(ret) if tokenize else ret
 
-    def __call__(self, text: List[str], **kwargs):
+    def __call__(self, text, **kwargs):
         return {
-            "input_ids": [self.encode(x) for x in text],
+            "input_ids": self.encode(text),
         }
 
     def init_xgrammar(self):

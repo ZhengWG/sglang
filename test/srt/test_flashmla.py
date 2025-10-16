@@ -103,11 +103,11 @@ class TestFlashMLAMTP(CustomTestCase):
                     "--speculative-draft-model-path",
                     "lmsys/sglang-ci-dsv3-test-NextN",
                     "--speculative-num-steps",
-                    "2",
+                    "1",
                     "--speculative-eagle-topk",
                     "1",
                     "--speculative-num-draft-tokens",
-                    "3",
+                    "2",
                     "--attention-backend",
                     "flashmla",
                 ]
@@ -146,7 +146,7 @@ class TestFlashMLAMTP(CustomTestCase):
             "avg_spec_accept_length"
         ]
         print(f"{avg_spec_accept_length=}")
-        self.assertGreater(avg_spec_accept_length, 2.4)
+        self.assertGreater(avg_spec_accept_length, 1.8)
 
 
 if __name__ == "__main__":

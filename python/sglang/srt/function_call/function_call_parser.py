@@ -20,7 +20,6 @@ from sglang.srt.function_call.pythonic_detector import PythonicDetector
 from sglang.srt.function_call.qwen3_coder_detector import Qwen3CoderDetector
 from sglang.srt.function_call.qwen25_detector import Qwen25Detector
 from sglang.srt.function_call.step3_detector import Step3Detector
-from sglang.srt.function_call.utils import get_json_schema_constraint
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +34,17 @@ class FunctionCallParser:
     """
 
     ToolCallParserEnum: Dict[str, Type[BaseFormatDetector]] = {
+        "llama3": Llama32Detector,
+        "qwen25": Qwen25Detector,
+        "mistral": MistralDetector,
         "deepseekv3": DeepSeekV3Detector,
         "deepseekv31": DeepSeekV31Detector,
-        "glm": Glm4MoeDetector,
-        "glm45": Glm4MoeDetector,
-        "gpt-oss": GptOssDetector,
-        "kimi_k2": KimiK2Detector,
-        "llama3": Llama32Detector,
-        "mistral": MistralDetector,
         "pythonic": PythonicDetector,
-        "qwen": Qwen25Detector,
-        "qwen25": Qwen25Detector,
+        "kimi_k2": KimiK2Detector,
         "qwen3_coder": Qwen3CoderDetector,
+        "glm45": Glm4MoeDetector,
         "step3": Step3Detector,
+        "gpt-oss": GptOssDetector,
     }
 
     def __init__(self, tools: List[Tool], tool_call_parser: str):
@@ -181,8 +178,8 @@ class FunctionCallParser:
             strict_tag = self.get_structure_tag()
             return ("structural_tag", strict_tag)
         elif tool_choice == "required" or isinstance(tool_choice, ToolChoice):
-            json_schema = get_json_schema_constraint(self.tools, tool_choice)
-            return ("json_schema", json_schema)
+            ebnf = self.get_ebnf(tool_choice)
+            return ("ebnf", ebnf) if ebnf is not None else None
 
     def get_ebnf(
         self, tool_choice: Union[ToolChoice, Literal["required"]]

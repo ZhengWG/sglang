@@ -1,14 +1,12 @@
 //! DeepSeek V3 Parser Integration Tests
 
-use sglang_router_rs::tool_parser::{DeepSeekParser, ToolParser};
-
-mod common;
-use common::create_test_tools;
+use sglang_router_rs::tool_parser::{DeepSeekParser, ParseState, StreamResult, ToolParser};
 
 #[tokio::test]
 async fn test_deepseek_complete_parsing() {
     let parser = DeepSeekParser::new();
 
+    // Test single tool call
     let input = r#"Let me help you with that.
 <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
 ```json
@@ -16,12 +14,12 @@ async fn test_deepseek_complete_parsing() {
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
 The weather in Tokyo is..."#;
 
-    let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(normal_text, "Let me help you with that.\n");
-    assert_eq!(tools[0].function.name, "get_weather");
+    let result = parser.parse_complete(input).await.unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].function.name, "get_weather");
 
-    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    // Verify arguments
+    let args: serde_json::Value = serde_json::from_str(&result[0].function.arguments).unwrap();
     assert_eq!(args["location"], "Tokyo");
     assert_eq!(args["units"], "celsius");
 }
@@ -41,17 +39,16 @@ async fn test_deepseek_multiple_tools() {
 ```<｜tool▁call▁end｜>
 <｜tool▁calls▁end｜>"#;
 
-    let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0].function.name, "search");
-    assert_eq!(tools[1].function.name, "translate");
+    let result = parser.parse_complete(input).await.unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].function.name, "search");
+    assert_eq!(result[1].function.name, "translate");
 }
 
 #[tokio::test]
 async fn test_deepseek_streaming() {
-    let tools = create_test_tools();
-
-    let mut parser = DeepSeekParser::new();
+    let parser = DeepSeekParser::new();
+    let mut state = ParseState::new();
 
     // Simulate streaming chunks
     let chunks = vec![
@@ -65,19 +62,25 @@ async fn test_deepseek_streaming() {
     ];
 
     let mut found_name = false;
+    let mut found_complete = false;
 
     for chunk in chunks {
-        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        let result = parser.parse_incremental(chunk, &mut state).await.unwrap();
 
-        for call in result.calls {
-            if let Some(name) = call.name {
+        match result {
+            StreamResult::ToolName { name, .. } => {
                 assert_eq!(name, "get_weather");
                 found_name = true;
             }
+            StreamResult::ToolComplete(tool) => {
+                assert_eq!(tool.function.name, "get_weather");
+                found_complete = true;
+            }
+            _ => {}
         }
     }
 
-    assert!(found_name, "Should have found tool name during streaming");
+    assert!(found_name || found_complete);
 }
 
 #[tokio::test]
@@ -95,11 +98,11 @@ async fn test_deepseek_nested_json() {
 }
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
 
-    let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].function.name, "process");
+    let result = parser.parse_complete(input).await.unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].function.name, "process");
 
-    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    let args: serde_json::Value = serde_json::from_str(&result[0].function.arguments).unwrap();
     assert!(args["data"]["nested"]["deep"].is_array());
 }
 
@@ -108,13 +111,13 @@ fn test_deepseek_format_detection() {
     let parser = DeepSeekParser::new();
 
     // Should detect DeepSeek format
-    assert!(parser.has_tool_markers("<｜tool▁calls▁begin｜>"));
-    assert!(parser.has_tool_markers("text with <｜tool▁calls▁begin｜> marker"));
+    assert!(parser.detect_format("<｜tool▁calls▁begin｜>"));
+    assert!(parser.detect_format("text with <｜tool▁calls▁begin｜> marker"));
 
     // Should not detect other formats
-    assert!(!parser.has_tool_markers("[TOOL_CALLS]"));
-    assert!(!parser.has_tool_markers("<tool_call>"));
-    assert!(!parser.has_tool_markers("plain text"));
+    assert!(!parser.detect_format("[TOOL_CALLS]"));
+    assert!(!parser.detect_format("<tool_call>"));
+    assert!(!parser.detect_format("plain text"));
 }
 
 #[tokio::test]
@@ -133,10 +136,29 @@ async fn test_deepseek_malformed_json_handling() {
 ```<｜tool▁call▁end｜>
 <｜tool▁calls▁end｜>"#;
 
-    let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    let result = parser.parse_complete(input).await.unwrap();
     // Only the valid tool call should be parsed
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].function.name, "valid");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].function.name, "valid");
+}
+
+#[tokio::test]
+async fn test_normal_text_extraction() {
+    let parser = DeepSeekParser::new();
+
+    // Python extracts text before tool calls as normal_text
+    let input = r#"Let me help you with that.
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+```json
+{"location": "Tokyo"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+
+    let result = parser.parse_complete(input).await.unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].function.name, "get_weather");
+
+    // TODO: Verify normal text extraction when parser returns it
+    // In Python: normal_text = "Let me help you with that."
 }
 
 #[tokio::test]
@@ -154,8 +176,8 @@ async fn test_multiple_tool_calls() {
 ```<｜tool▁call▁end｜>
 <｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
 
-    let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0].function.name, "get_weather");
-    assert_eq!(tools[1].function.name, "get_weather");
+    let result = parser.parse_complete(input).await.unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].function.name, "get_weather");
+    assert_eq!(result[1].function.name, "get_weather");
 }

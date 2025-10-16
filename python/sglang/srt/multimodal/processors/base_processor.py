@@ -4,7 +4,6 @@ import dataclasses
 import multiprocessing as mp
 import os
 import re
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -235,27 +234,19 @@ class BaseMultimodalProcessor(ABC):
             and isinstance(processor.image_processor, BaseImageProcessorFast)
             and not self.server_args.disable_fast_image_processor
         ):
-            if not _is_npu:
-                kwargs["device"] = "cuda"
-            elif processor.__class__.__name__ not in {
-                "Qwen2_5_VLProcessor",
-                "Qwen3VLProcessor",
-            }:
-                # Note: for qwen-vl, processor has some reshape issue because of dims restriction on Ascend.
-                kwargs["device"] = "npu"
+            kwargs["device"] = "cuda" if not _is_npu else "npu"
         result = processor.__call__(
             text=[input_text],
             padding=True,
             return_tensors="pt",
             **kwargs,
         )
-        if not self.server_args.keep_mm_feature_on_device:
-            # move feature tensors to cpu
-            for feature_name in self.FEATURE_NAMES:
-                if feature_name in result and isinstance(
-                    result[feature_name], torch.Tensor
-                ):
-                    result[feature_name] = result[feature_name].to("cpu")
+        # move feature tensors to cpu
+        for feature_name in self.FEATURE_NAMES:
+            if feature_name in result and isinstance(
+                result[feature_name], torch.Tensor
+            ):
+                result[feature_name] = result[feature_name].to("cpu")
 
         return result
 
@@ -310,7 +301,6 @@ class BaseMultimodalProcessor(ABC):
         Static method that can be pickled for multiprocessing"""
         if isinstance(data, dict):
             return data
-        start_time = time.perf_counter()
         try:
             if modality == Modality.IMAGE:
                 img, _ = load_image(data)
@@ -321,16 +311,7 @@ class BaseMultimodalProcessor(ABC):
                 return load_audio(data, audio_sample_rate)
 
         except Exception as e:
-            rte = RuntimeError(f"Error while loading data {data}: {e}")
-            if hasattr(e, "response") and e.response.status_code:
-                rte.error_code = e.response.status_code
-            else:
-                rte.error_code = 400
-            raise rte
-        finally:
-            cost_time = (time.perf_counter() - start_time) * 1000
-            logger.info(f"load single mm item cost {cost_time:.2f} ms")
-
+            raise RuntimeError(f"Error while loading data {data}: {e}")
 
     def submit_data_loading_tasks(
         self,
@@ -505,11 +486,9 @@ class BaseMultimodalProcessor(ABC):
                     new_text_parts += [text_part]
 
             except Exception as e:
-                rte = RuntimeError(
+                raise RuntimeError(
                     f"An exception occurred while loading multimodal data: {e}"
                 )
-                rte.error_code = getattr(e, "error_code", 400)
-                raise rte
         return BaseMultiModalProcessorOutput(
             images=images,
             audios=audios,

@@ -1,5 +1,5 @@
 use crate::tool_parser::{
-    errors::{ParserError, ParserResult},
+    errors::{ToolParserError, ToolParserResult},
     traits::PartialJsonParser,
 };
 use serde_json::{Map, Value};
@@ -22,22 +22,8 @@ impl PartialJson {
     }
 
     /// Parse potentially incomplete JSON, returning parsed value and consumed bytes
-    ///
-    /// # Arguments
-    /// * `input` - The JSON string to parse
-    /// * `allow_partial_strings` - When false, incomplete strings cause parsing to stop
-    ///   (matches Python's Allow.ALL & ~Allow.STR behavior)
-    pub fn parse_value(
-        &self,
-        input: &str,
-        allow_partial_strings: bool,
-    ) -> ParserResult<(Value, usize)> {
-        let mut parser = Parser::new(
-            input,
-            self.max_depth,
-            self.allow_incomplete,
-            allow_partial_strings,
-        );
+    pub fn parse_value(&self, input: &str) -> ToolParserResult<(Value, usize)> {
+        let mut parser = Parser::new(input, self.max_depth, self.allow_incomplete);
         let value = parser.parse_value(0)?;
         Ok((value, parser.position))
     }
@@ -50,9 +36,8 @@ impl Default for PartialJson {
 }
 
 impl PartialJsonParser for PartialJson {
-    fn parse(&self, input: &str) -> ParserResult<(Value, usize)> {
-        // Default to allowing partial strings
-        self.parse_value(input, true)
+    fn parse(&self, input: &str) -> ToolParserResult<(Value, usize)> {
+        self.parse_value(input)
     }
 
     fn is_complete(&self, input: &str) -> bool {
@@ -71,22 +56,15 @@ struct Parser<'a> {
     position: usize,
     max_depth: usize,
     allow_incomplete: bool,
-    allow_partial_strings: bool,
 }
 
 impl<'a> Parser<'a> {
-    fn new(
-        input: &'a str,
-        max_depth: usize,
-        allow_incomplete: bool,
-        allow_partial_strings: bool,
-    ) -> Self {
+    fn new(input: &'a str, max_depth: usize, allow_incomplete: bool) -> Self {
         Self {
             chars: input.chars().peekable(),
             position: 0,
             max_depth,
             allow_incomplete,
-            allow_partial_strings,
         }
     }
 
@@ -110,9 +88,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_value(&mut self, depth: usize) -> ParserResult<Value> {
+    fn parse_value(&mut self, depth: usize) -> ToolParserResult<Value> {
         if depth > self.max_depth {
-            return Err(ParserError::DepthExceeded(self.max_depth));
+            return Err(ToolParserError::DepthExceeded(self.max_depth));
         }
 
         self.skip_whitespace();
@@ -128,15 +106,17 @@ impl<'a> Parser<'a> {
                 if self.allow_incomplete {
                     Ok(Value::Null)
                 } else {
-                    Err(ParserError::ParsingFailed("Unexpected character".into()))
+                    Err(ToolParserError::ParsingFailed(
+                        "Unexpected character".into(),
+                    ))
                 }
             }
         }
     }
 
-    fn parse_object(&mut self, depth: usize) -> ParserResult<Value> {
+    fn parse_object(&mut self, depth: usize) -> ToolParserResult<Value> {
         if depth > self.max_depth {
-            return Err(ParserError::DepthExceeded(self.max_depth));
+            return Err(ToolParserError::DepthExceeded(self.max_depth));
         }
 
         let mut object = Map::new();
@@ -160,7 +140,7 @@ impl<'a> Parser<'a> {
                     return Ok(Value::Object(object));
                 }
                 Err(e) => return Err(e),
-                _ => return Err(ParserError::ParsingFailed("Expected string key".into())),
+                _ => return Err(ToolParserError::ParsingFailed("Expected string key".into())),
             };
 
             self.skip_whitespace();
@@ -172,7 +152,7 @@ impl<'a> Parser<'a> {
                     object.insert(key, Value::Null);
                     return Ok(Value::Object(object));
                 }
-                return Err(ParserError::ParsingFailed("Expected ':'".into()));
+                return Err(ToolParserError::ParsingFailed("Expected ':'".into()));
             }
             self.advance();
             self.skip_whitespace();
@@ -181,13 +161,8 @@ impl<'a> Parser<'a> {
             let value = match self.parse_value(depth) {
                 Ok(v) => v,
                 Err(_) if self.allow_incomplete => {
-                    // When allow_partial_strings is false, don't add the key with Null
-                    // Just return the object without this incomplete key-value pair
-                    // This matches Python's behavior: Allow.ALL & ~Allow.STR
-                    if self.allow_partial_strings {
-                        // Add null for incomplete value
-                        object.insert(key, Value::Null);
-                    }
+                    // Add null for incomplete value
+                    object.insert(key, Value::Null);
                     return Ok(Value::Object(object));
                 }
                 Err(e) => return Err(e),
@@ -217,15 +192,15 @@ impl<'a> Parser<'a> {
                     if self.allow_incomplete {
                         return Ok(Value::Object(object));
                     }
-                    return Err(ParserError::ParsingFailed("Expected ',' or '}'".into()));
+                    return Err(ToolParserError::ParsingFailed("Expected ',' or '}'".into()));
                 }
             }
         }
     }
 
-    fn parse_array(&mut self, depth: usize) -> ParserResult<Value> {
+    fn parse_array(&mut self, depth: usize) -> ToolParserResult<Value> {
         if depth > self.max_depth {
-            return Err(ParserError::DepthExceeded(self.max_depth));
+            return Err(ToolParserError::DepthExceeded(self.max_depth));
         }
 
         let mut array = Vec::new();
@@ -274,15 +249,15 @@ impl<'a> Parser<'a> {
                     if self.allow_incomplete {
                         return Ok(Value::Array(array));
                     }
-                    return Err(ParserError::ParsingFailed("Expected ',' or ']'".into()));
+                    return Err(ToolParserError::ParsingFailed("Expected ',' or ']'".into()));
                 }
             }
         }
     }
 
-    fn parse_string(&mut self) -> ParserResult<Value> {
+    fn parse_string(&mut self) -> ToolParserResult<Value> {
         if self.peek() != Some('"') {
-            return Err(ParserError::ParsingFailed("Expected '\"'".into()));
+            return Err(ToolParserError::ParsingFailed("Expected '\"'".into()));
         }
 
         // Consume opening quote
@@ -326,14 +301,14 @@ impl<'a> Parser<'a> {
         }
 
         // Incomplete string
-        if self.allow_incomplete && self.allow_partial_strings {
+        if self.allow_incomplete {
             Ok(Value::String(string))
         } else {
-            Err(ParserError::ParsingFailed("Unterminated string".into()))
+            Err(ToolParserError::ParsingFailed("Unterminated string".into()))
         }
     }
 
-    fn parse_unicode_escape(&mut self) -> ParserResult<char> {
+    fn parse_unicode_escape(&mut self) -> ToolParserResult<char> {
         let mut hex = String::new();
         for _ in 0..4 {
             if let Some(ch) = self.peek() {
@@ -352,17 +327,17 @@ impl<'a> Parser<'a> {
             u32::from_str_radix(&hex, 16)
                 .ok()
                 .and_then(char::from_u32)
-                .ok_or_else(|| ParserError::ParsingFailed("Invalid unicode escape".into()))
+                .ok_or_else(|| ToolParserError::ParsingFailed("Invalid unicode escape".into()))
         } else if self.allow_incomplete {
             Ok('\u{FFFD}') // Replacement character
         } else {
-            Err(ParserError::ParsingFailed(
+            Err(ToolParserError::ParsingFailed(
                 "Incomplete unicode escape".into(),
             ))
         }
     }
 
-    fn parse_number(&mut self) -> ParserResult<Value> {
+    fn parse_number(&mut self) -> ToolParserResult<Value> {
         let mut number = String::new();
 
         // Handle negative sign
@@ -435,11 +410,11 @@ impl<'a> Parser<'a> {
         } else if self.allow_incomplete {
             Ok(Value::Number(serde_json::Number::from(0)))
         } else {
-            Err(ParserError::ParsingFailed("Invalid number".into()))
+            Err(ToolParserError::ParsingFailed("Invalid number".into()))
         }
     }
 
-    fn parse_bool(&mut self) -> ParserResult<Value> {
+    fn parse_bool(&mut self) -> ToolParserResult<Value> {
         let mut word = String::new();
 
         // Peek at upcoming characters to validate it looks like a boolean
@@ -460,7 +435,7 @@ impl<'a> Parser<'a> {
             || (self.allow_incomplete && ("true".starts_with(&word) || "false".starts_with(&word)));
 
         if !is_valid {
-            return Err(ParserError::ParsingFailed("Invalid boolean".into()));
+            return Err(ToolParserError::ParsingFailed("Invalid boolean".into()));
         }
 
         // Now actually consume the characters
@@ -483,14 +458,14 @@ impl<'a> Parser<'a> {
                 } else if "false".starts_with(partial) {
                     Ok(Value::Bool(false))
                 } else {
-                    Err(ParserError::ParsingFailed("Invalid boolean".into()))
+                    Err(ToolParserError::ParsingFailed("Invalid boolean".into()))
                 }
             }
-            _ => Err(ParserError::ParsingFailed("Invalid boolean".into())),
+            _ => Err(ToolParserError::ParsingFailed("Invalid boolean".into())),
         }
     }
 
-    fn parse_null(&mut self) -> ParserResult<Value> {
+    fn parse_null(&mut self) -> ToolParserResult<Value> {
         let mut word = String::new();
 
         // Peek at upcoming characters to validate it looks like "null"
@@ -509,7 +484,7 @@ impl<'a> Parser<'a> {
         let is_valid = word == "null" || (self.allow_incomplete && "null".starts_with(&word));
 
         if !is_valid {
-            return Err(ParserError::ParsingFailed("Invalid null".into()));
+            return Err(ToolParserError::ParsingFailed("Invalid null".into()));
         }
 
         // Now actually consume the characters
@@ -526,7 +501,7 @@ impl<'a> Parser<'a> {
         if word == "null" || (self.allow_incomplete && "null".starts_with(&word)) {
             Ok(Value::Null)
         } else {
-            Err(ParserError::ParsingFailed("Invalid null".into()))
+            Err(ToolParserError::ParsingFailed("Invalid null".into()))
         }
     }
 }

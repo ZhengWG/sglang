@@ -9,7 +9,6 @@ import unittest
 
 import requests
 
-from sglang.srt.environ import envs
 from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
     DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
@@ -26,7 +25,6 @@ class TestStartProfile(CustomTestCase):
 
     @classmethod
     def setUpClass(cls):
-        envs.SGLANG_TORCH_PROFILER_DIR.set(OUTPUT_DIR)
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
@@ -113,4 +111,5 @@ class TestStartProfile(CustomTestCase):
 
 
 if __name__ == "__main__":
+    os.environ["SGLANG_TORCH_PROFILER_DIR"] = OUTPUT_DIR
     unittest.main()

@@ -44,7 +44,7 @@ graph TB
     end
 
     subgraph Factory Layer
-        MID --> PF[ReasoningParserFactory]
+        MID --> PF[ParserFactory]
         PF --> REG[ParserRegistry]
         REG --> PM[Pattern Matching]
         PM --> PP[Parser Pool]
@@ -93,7 +93,7 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant F as ReasoningParserFactory
+    participant F as ParserFactory
     participant R as Registry
     participant P as Parser Pool
     participant BP as BaseParser
@@ -206,7 +206,7 @@ classDiagram
         +new() Self
     }
 
-    class ReasoningParserFactory {
+    class ParserFactory {
         -registry: ParserRegistry
         +new() Self
         +get_pooled(model_id: &str) PooledParser
@@ -240,7 +240,7 @@ classDiagram
     Step3Parser o-- BaseReasoningParser
 
     BaseReasoningParser o-- ParserConfig
-    ReasoningParserFactory o-- ParserRegistry
+    ParserFactory o-- ParserRegistry
     ParserRegistry o-- ReasoningParser
 ```
 
@@ -302,7 +302,7 @@ classDiagram
    - Delegate to get_pooled_parser
    - Case-insensitive comparison
 
-**ReasoningParserFactory Methods**:
+**ParserFactory Methods**:
 
 1. **`new()`**:
    - Register all built-in parsers
@@ -325,7 +325,7 @@ classDiagram
 - `qwen3`: Qwen3 base model (initial_in_reasoning=false)
 - `qwen3_thinking`: Qwen3 thinking variant (initial_in_reasoning=true)
 - `kimi`: Kimi with Unicode tokens
-- `glm45`: GLM-4.5 / GLM-4.6 parser
+- `glm45`: GLM-4.5 parser
 - `step3`: Step3 parser
 - `passthrough`: No-op fallback parser
 
@@ -437,7 +437,7 @@ impl ReasoningParser for MyModelParser {
 **Step 2: Register in Factory**
 
 ```rust
-// In factory.rs ReasoningParserFactory::new()
+// In factory.rs ParserFactory::new()
 registry.register_parser("mymodel", || {
     Box::new(MyModelParser::new())
 });

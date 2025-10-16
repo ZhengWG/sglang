@@ -20,10 +20,12 @@ from sglang.srt.utils import is_flashinfer_available
 if is_flashinfer_available():
     import flashinfer
 
+from sglang.srt.speculative.eagle_utils import EagleDraftInput
+
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
-    from sglang.srt.speculative.spec_info import SpecInput
+    from sglang.srt.speculative.spec_info import SpecInfo
 
 # Constants
 DEFAULT_WORKSPACE_SIZE_MB = (
@@ -199,7 +201,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         seq_lens: torch.Tensor,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[SpecInfo],
     ):
         """Initialize metadata for CUDA graph capture."""
         metadata = TRTLLMMHAMetadata()
@@ -312,7 +314,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
         seq_lens_sum: int,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[SpecInfo],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
         """Replay CUDA graph with new inputs."""
@@ -637,7 +639,7 @@ class TRTLLMHAAttnMultiStepDraftBackend(FlashInferMultiStepDraftBackend):
         self, model_runner: ModelRunner, topk: int, speculative_num_steps: int
     ):
         super().__init__(model_runner, topk, speculative_num_steps)
-        for i in range(self.speculative_num_steps - 1):
+        for i in range(speculative_num_steps):
             self.attn_backends[i] = TRTLLMHAAttnBackend(
                 model_runner,
                 skip_prefill=True,
@@ -651,7 +653,7 @@ class TRTLLMHAAttnMultiStepDraftBackend(FlashInferMultiStepDraftBackend):
             self.attn_backends[i].init_forward_metadata(forward_batch)
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
-        for i in range(self.speculative_num_steps - 1):
+        for i in range(self.speculative_num_steps):
             self.attn_backends[i].init_cuda_graph_state(max_bs, max_num_tokens)
 
     def init_forward_metadata_capture_cuda_graph(
@@ -659,7 +661,7 @@ class TRTLLMHAAttnMultiStepDraftBackend(FlashInferMultiStepDraftBackend):
         forward_batch: ForwardBatch,
     ):
         assert forward_batch.spec_info is not None
-        assert forward_batch.spec_info.is_draft_input()
+        assert isinstance(forward_batch.spec_info, EagleDraftInput)
 
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_forward_metadata_capture_cuda_graph(
@@ -676,7 +678,7 @@ class TRTLLMHAAttnMultiStepDraftBackend(FlashInferMultiStepDraftBackend):
         self, forward_batch: ForwardBatch, bs: int
     ):
         assert forward_batch.spec_info is not None
-        assert forward_batch.spec_info.is_draft_input()
+        assert isinstance(forward_batch.spec_info, EagleDraftInput)
 
         for i in range(self.speculative_num_steps - 1):
 

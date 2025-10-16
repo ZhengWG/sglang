@@ -792,7 +792,6 @@ class StreamExecutor:
             "n",
             "stop",
             "stop_token_ids",
-            "stop_regex",
             "temperature",
             "top_p",
             "top_k",

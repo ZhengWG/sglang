@@ -3,11 +3,10 @@ from typing import Optional, Union
 import torch
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.attention.nsa.nsa_indexer import BaseIndexerMetadata
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.speculative.spec_info import SpecInput
+from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
 
 
 class HybridAttnBackend(AttentionBackend):
@@ -22,7 +21,6 @@ class HybridAttnBackend(AttentionBackend):
         self.model_runner = model_runner
         self.prefill_backend = prefill_backend
         self.decode_backend = decode_backend
-        self.data_type = model_runner.kv_cache_dtype
 
     def _select_backend(self, forward_mode: ForwardMode) -> AttentionBackend:
         """
@@ -72,7 +70,7 @@ class HybridAttnBackend(AttentionBackend):
         seq_lens: torch.Tensor,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
     ):
         backend = self._select_backend(forward_mode)
         backend.init_forward_metadata_capture_cuda_graph(
@@ -93,7 +91,7 @@ class HybridAttnBackend(AttentionBackend):
         seq_lens_sum: int,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
         backend = self._select_backend(forward_mode)
@@ -139,9 +137,3 @@ class HybridAttnBackend(AttentionBackend):
         return backend.forward_extend(
             q, k, v, layer, forward_batch, save_kv_cache, **kwargs
         )
-
-    def get_indexer_metadata(
-        self, layer_id: int, forward_batch: ForwardBatch
-    ) -> Optional[BaseIndexerMetadata]:
-        backend = self._select_backend(forward_batch.forward_mode)
-        return backend.get_indexer_metadata(layer_id, forward_batch)

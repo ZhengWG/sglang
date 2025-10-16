@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Mixin class and utils for multi-http-worker mode"""
+"""MultiTokenizerMixin is a class that provides nesscary methods for MultiTokenizerManager and DetokenizerManager."""
 import asyncio
 import logging
 import multiprocessing as multiprocessing
@@ -30,10 +30,10 @@ import zmq.asyncio
 from sglang.srt.disaggregation.utils import DisaggregationMode, TransferBackend
 from sglang.srt.managers.disagg_service import start_disagg_service
 from sglang.srt.managers.io_struct import (
-    BatchEmbeddingOutput,
-    BatchMultimodalOutput,
-    BatchStrOutput,
-    BatchTokenIDOutput,
+    BatchEmbeddingOut,
+    BatchMultimodalOut,
+    BatchStrOut,
+    BatchTokenIDOut,
     MultiTokenizerRegisterReq,
     MultiTokenizerWrapper,
 )
@@ -83,8 +83,8 @@ class SocketMapping:
 
 def _handle_output_by_index(output, i):
     """NOTE: A maintainable method is better here."""
-    if isinstance(output, BatchTokenIDOutput):
-        new_output = BatchTokenIDOutput(
+    if isinstance(output, BatchTokenIDOut):
+        new_output = BatchTokenIDOut(
             rids=[output.rids[i]],
             finished_reasons=(
                 [output.finished_reasons[i]]
@@ -190,11 +190,6 @@ def _handle_output_by_index(output, i):
                 if output.output_token_ids_logprobs_idx
                 else None
             ),
-            output_token_entropy_val=(
-                [output.output_token_entropy_val[i]]
-                if output.output_token_entropy_val
-                else None
-            ),
             output_hidden_states=(
                 [output.output_hidden_states[i]]
                 if output.output_hidden_states
@@ -202,15 +197,14 @@ def _handle_output_by_index(output, i):
             ),
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
-            token_steps=([output.token_steps[i]] if output.token_steps else None),
             first_scheduled_times=(
                 [output.first_scheduled_times[i]]
                 if len(output.first_scheduled_times) > i
                 else None
             ),
         )
-    elif isinstance(output, BatchEmbeddingOutput):
-        new_output = BatchEmbeddingOutput(
+    elif isinstance(output, BatchEmbeddingOut):
+        new_output = BatchEmbeddingOut(
             rids=[output.rids[i]],
             finished_reasons=(
                 [output.finished_reasons[i]]
@@ -227,8 +221,8 @@ def _handle_output_by_index(output, i):
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
         )
-    elif isinstance(output, BatchStrOutput):
-        new_output = BatchStrOutput(
+    elif isinstance(output, BatchStrOut):
+        new_output = BatchStrOut(
             rids=[output.rids[i]],
             finished_reasons=(
                 [output.finished_reasons[i]]
@@ -256,11 +250,6 @@ def _handle_output_by_index(output, i):
             ),
             spec_verify_ct=(
                 [output.spec_verify_ct[i]] if len(output.spec_verify_ct) > i else None
-            ),
-            spec_accepted_tokens=(
-                [output.spec_accepted_tokens[i]]
-                if len(output.spec_accepted_tokens) > i
-                else None
             ),
             input_token_logprobs_val=(
                 [output.input_token_logprobs_val[i]]
@@ -322,11 +311,6 @@ def _handle_output_by_index(output, i):
                 if output.output_token_ids_logprobs_idx
                 else None
             ),
-            output_token_entropy_val=(
-                [output.output_token_entropy_val[i]]
-                if output.output_token_entropy_val
-                else None
-            ),
             output_hidden_states=(
                 [output.output_hidden_states[i]]
                 if output.output_hidden_states
@@ -339,10 +323,9 @@ def _handle_output_by_index(output, i):
             ),
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
-            token_steps=([output.token_steps[i]] if output.token_steps else None),
         )
-    elif isinstance(output, BatchMultimodalOutput):
-        new_output = BatchMultimodalOutput(
+    elif isinstance(output, BatchMultimodalOut):
+        new_output = BatchMultimodalOut(
             rids=[output.rids[i]],
             finished_reasons=(
                 [output.finished_reasons[i]]
@@ -370,7 +353,7 @@ def _handle_output_by_index(output, i):
 
 
 class MultiHttpWorkerDetokenizerMixin:
-    """Mixin class for DetokenizerManager"""
+    """Mixin class for MultiTokenizerManager and DetokenizerManager"""
 
     def get_worker_ids_from_req_rids(self, rids):
         if isinstance(rids, list):
@@ -413,7 +396,7 @@ class MultiHttpWorkerDetokenizerMixin:
 
 
 class MultiTokenizerRouter:
-    """A router to receive requests from TokenizerWorker"""
+    """A router to receive requests from MultiTokenizerManager"""
 
     def __init__(
         self,
@@ -481,8 +464,8 @@ class MultiTokenizerRouter:
                 self.socket_mapping.send_output(worker_id, new_recv_obj)
 
 
-class TokenizerWorker(TokenizerManager):
-    """Tokenizer Worker in multi-http-worker mode"""
+class MultiTokenizerManager(TokenizerManager):
+    """Multi Process Tokenizer Manager that tokenizes the text."""
 
     def __init__(
         self,

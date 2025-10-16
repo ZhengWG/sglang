@@ -3,8 +3,6 @@ Run one test prompt.
 
 Usage:
 python3 -m sglang.test.send_one
-python3 -m sglang.test.send_one --profile --profile-steps 5
-python3 -m sglang.test.send_one --profile --profile-by-stage
 """
 
 import argparse
@@ -12,8 +10,6 @@ import dataclasses
 import json
 
 import requests
-
-from sglang.profiler import run_profile
 
 
 @dataclasses.dataclass
@@ -33,9 +29,6 @@ class BenchArgs:
     image: bool = False
     many_images: bool = False
     stream: bool = False
-    profile: bool = False
-    profile_steps: int = 3
-    profile_by_stage: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -58,11 +51,6 @@ class BenchArgs:
         parser.add_argument("--image", action="store_true")
         parser.add_argument("--many-images", action="store_true")
         parser.add_argument("--stream", action="store_true")
-        parser.add_argument("--profile", action="store_true")
-        parser.add_argument(
-            "--profile-steps", type=int, default=BenchArgs.profile_steps
-        )
-        parser.add_argument("--profile-by-stage", action="store_true")
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -71,8 +59,6 @@ class BenchArgs:
 
 
 def send_one_prompt(args):
-    base_url = f"http://{args.host}:{args.port}"
-
     if args.image:
         args.prompt = (
             "Human: Describe this image in a very short sentence.\n\nAssistant:"
@@ -122,20 +108,8 @@ def send_one_prompt(args):
         "stream": args.stream,
     }
 
-    # Run profiler if requested
-    if args.profile:
-        print(f"Running profiler with {args.profile_steps} steps...")
-        run_profile(
-            base_url,
-            args.profile_steps,
-            ["CPU", "GPU"],
-            None,
-            None,
-            args.profile_by_stage,
-        )
-
     response = requests.post(
-        f"{base_url}/generate",
+        f"http://{args.host}:{args.port}/generate",
         json=json_data,
         stream=args.stream,
     )

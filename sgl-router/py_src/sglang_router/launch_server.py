@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import copy
 import logging
 import multiprocessing as mp
@@ -14,6 +13,7 @@ import requests
 from setproctitle import setproctitle
 from sglang_router.launch_router import RouterArgs, launch_router
 
+from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_port_available
 
@@ -72,15 +72,7 @@ def run_server(server_args, dp_rank):
     # Set SGLANG_DP_RANK environment variable
     os.environ["SGLANG_DP_RANK"] = str(dp_rank)
 
-    # Launch server in appropriate mode (HTTP or gRPC)
-    if server_args.grpc_mode:
-        from sglang.srt.entrypoints.grpc_server import serve_grpc
-
-        asyncio.run(serve_grpc(server_args))
-    else:
-        from sglang.srt.entrypoints.http_server import launch_server
-
-        launch_server(server_args)
+    launch_server(server_args)
 
 
 def launch_server_process(
@@ -194,10 +186,8 @@ def main():
     )
 
     # Update router args with worker URLs
-    # Use grpc:// protocol if server is in gRPC mode, otherwise http://
-    protocol = "grpc" if server_args.grpc_mode else "http"
     router_args.worker_urls = [
-        f"{protocol}://{server_args.host}:{port}" for port in worker_ports
+        f"http://{server_args.host}:{port}" for port in worker_ports
     ]
 
     # Start the router

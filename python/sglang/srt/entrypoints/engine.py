@@ -47,7 +47,6 @@ from sglang.srt.managers.data_parallel_controller import (
 )
 from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 from sglang.srt.managers.io_struct import (
-    DestroyWeightsUpdateGroupReqInput,
     EmbeddingReqInput,
     GenerateReqInput,
     GetWeightsByNameReqInput,
@@ -68,6 +67,7 @@ from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils import (
     MultiprocessingSerializer,
     assert_pkg_version,
@@ -81,7 +81,6 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
-from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -434,19 +433,6 @@ class Engine(EngineBase):
             self.tokenizer_manager.init_weights_update_group(obj, None)
         )
 
-    def destroy_weights_update_group(
-        self,
-        group_name: str,
-    ):
-        """Destroy parameter update group."""
-        obj = DestroyWeightsUpdateGroupReqInput(
-            group_name=group_name,
-        )
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(
-            self.tokenizer_manager.destroy_weights_update_group(obj, None)
-        )
-
     def update_weights_from_distributed(
         self,
         names: list[str],
@@ -680,13 +666,6 @@ def _set_envs_and_config(server_args: ServerArgs):
     if os.environ.get("TRTLLM_ENABLE_PDL", "1") != "0":
         os.environ["TRTLLM_ENABLE_PDL"] = "1"
 
-    if os.environ.get("CUTE_DSL_LOG_LEVEL") is None:
-        # Default to warning level, to avoid too many logs
-        os.environ["CUTE_DSL_LOG_LEVEL"] = "30"
-    if os.environ.get("CUTE_DSL_LOG_TO_CONSOLE") is None:
-        # Need to set log to console, otherwise the log level won't take effect
-        os.environ["CUTE_DSL_LOG_TO_CONSOLE"] = "1"
-
     # Can also be passed as argument
     os.environ["SGLANG_RUN_ID"] = (
         f"sglang-run-{time.time()}-{random.randint(0, 100000000)}"
@@ -703,7 +682,7 @@ def _set_envs_and_config(server_args: ServerArgs):
     if server_args.attention_backend == "flashinfer":
         assert_pkg_version(
             "flashinfer_python",
-            "0.4.0",
+            "0.3.1",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
@@ -711,7 +690,7 @@ def _set_envs_and_config(server_args: ServerArgs):
     if _is_cuda and not get_bool_env_var("SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK"):
         assert_pkg_version(
             "sgl-kernel",
-            "0.3.15",
+            "0.3.9.post2",
             "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
         )
 
@@ -812,6 +791,7 @@ def _launch_subprocesses(
                         pp_rank,
                         None,
                         writer,
+                        None,
                     ),
                 )
 

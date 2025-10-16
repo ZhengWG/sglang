@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 import requests
+import torch
 
 from sglang.srt.utils import is_cuda, is_hip, kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
@@ -10,7 +11,6 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
-    is_in_ci,
     popen_launch_server,
 )
 
@@ -50,7 +50,6 @@ class TestMLADeepseekV3(CustomTestCase):
         self.assertGreater(metrics["accuracy"], 0.62)
 
 
-@unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
 class TestMLADeepseekV3DisableFusedFunc(CustomTestCase):
     @classmethod
     def setUpClass(cls):

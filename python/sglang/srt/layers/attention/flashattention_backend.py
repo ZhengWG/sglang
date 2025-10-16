@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import torch
@@ -10,10 +10,10 @@ import triton.language as tl
 
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-from sglang.srt.layers.radix_attention import AttentionType
+from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.mem_cache.memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.server_args import get_global_server_args
-from sglang.srt.speculative.spec_info import SpecInput
+from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -305,7 +305,6 @@ class FlashAttentionBackend(AttentionBackend):
         speculative_step_id=0,
         topk=0,
         speculative_num_steps=0,
-        fa_impl_ver=3,
     ):
         super().__init__()
 
@@ -339,8 +338,6 @@ class FlashAttentionBackend(AttentionBackend):
         )
         self.speculative_step_id = speculative_step_id
 
-        self.fa_impl_ver = fa_impl_ver
-
         # Local attention settings
         self.attention_chunk_size = (
             model_runner.attention_chunk_size
@@ -353,13 +350,6 @@ class FlashAttentionBackend(AttentionBackend):
         self.sliding_window_size = model_runner.sliding_window_size
         self.has_swa = (
             self.sliding_window_size is not None and self.sliding_window_size > -1
-        )
-
-        # If num_splits == 0, we use a heuristic to automatically determine the number of splits.
-        # We set nums splits to 1 if deterministic inference is enabled.
-        # See https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/ for more details.
-        self.num_splits = (
-            1 if model_runner.server_args.enable_deterministic_inference else 0
         )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
@@ -692,13 +682,8 @@ class FlashAttentionBackend(AttentionBackend):
         k_descale, v_descale = None, None
         # only use kv scaling if: 1) fp8 kv is explicitly enabled, 2) RadixAttention
         # has corresponding quantization method so that layer.k_scale is not None,
-        # 3) layer.head_dim <= 256 since fa3 kernel require fp16 and bf16 data type in this case,
-        # 4) fa_impl_ver != 4 since fa4 does not currently support fp8 queries and keys.
-        if (
-            self.kv_cache_dtype_str != "auto"
-            and layer.head_dim <= 256
-            and self.fa_impl_ver != 4
-        ):
+        # 3) layer.head_dim <= 256 since fa3 kernel require fp16 and bf16 data type in this case.
+        if self.kv_cache_dtype_str != "auto" and layer.head_dim <= 256:
             if layer.k_scale is not None:
                 descale_shape = (forward_batch.batch_size, layer.tp_k_head_num)
                 k_descale = layer.k_scale.expand(descale_shape)
@@ -706,9 +691,7 @@ class FlashAttentionBackend(AttentionBackend):
             q = q.to(self.kv_cache_dtype)
             q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None
             k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
-        causal = True
-        if layer.is_cross_attention or layer.attn_type == AttentionType.ENCODER_ONLY:
-            causal = False
+        causal = not layer.is_cross_attention
 
         # Check if we should use local attention
         use_local_attn = (
@@ -729,8 +712,6 @@ class FlashAttentionBackend(AttentionBackend):
 
         # For fa3 interface version compatibility, we put new fields into conditional keyword args
         kwargs = {}
-        if self.fa_impl_ver != 3:
-            kwargs["ver"] = self.fa_impl_ver
         if sinks is not None:
             kwargs["sinks"] = sinks
 
@@ -789,7 +770,6 @@ class FlashAttentionBackend(AttentionBackend):
                 k_descale=k_descale,
                 v_descale=v_descale,
                 return_softmax_lse=use_cascade_attn,
-                num_splits=self.num_splits,
                 **kwargs,
             )
 
@@ -811,7 +791,6 @@ class FlashAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=True,
-                    num_splits=self.num_splits,
                     **kwargs,
                 )
                 o, _ = merge_state_v2_wrapper(
@@ -830,7 +809,7 @@ class FlashAttentionBackend(AttentionBackend):
             ):
                 # Do multi-head attention with chunked prefix cache
                 if forward_batch.attn_attend_prefix_cache:
-                    assert not get_global_server_args().disable_chunked_prefix_cache
+                    assert not global_server_args_dict["disable_chunked_prefix_cache"]
                     # MHA for chunked prefix kv cache when running model with MLA
                     assert forward_batch.prefix_chunk_idx is not None
                     assert forward_batch.prefix_chunk_cu_seq_lens is not None
@@ -851,7 +830,6 @@ class FlashAttentionBackend(AttentionBackend):
                         softmax_scale=layer.scaling,
                         causal=False,
                         return_softmax_lse=True,
-                        **kwargs,
                     )
                 else:
                     # MHA for extend part of sequence without attending prefix kv cache
@@ -866,7 +844,6 @@ class FlashAttentionBackend(AttentionBackend):
                         softmax_scale=layer.scaling,
                         causal=True,
                         return_softmax_lse=forward_batch.mha_return_lse,
-                        **kwargs,
                     )
                 if forward_batch.mha_return_lse:
                     output, lse, *rest = output
@@ -874,7 +851,6 @@ class FlashAttentionBackend(AttentionBackend):
                     return output, lse
                 return output
             else:
-                assert self.fa_impl_ver in [3], "Only FA3 support here"
                 # Do absorbed multi-latent attention
                 kv_cache = forward_batch.token_to_kv_pool.get_key_buffer(
                     layer.layer_id
@@ -916,7 +892,6 @@ class FlashAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
-                    num_splits=self.num_splits,
                 )
                 if use_cascade_attn:
                     o, softmax_lse, *rest = result
@@ -938,7 +913,6 @@ class FlashAttentionBackend(AttentionBackend):
                             k_descale=k_descale,
                             v_descale=v_descale,
                             return_softmax_lse=True,
-                            num_splits=self.num_splits,
                         )
                     )
                     o, _ = merge_state_v2_wrapper(
@@ -965,7 +939,6 @@ class FlashAttentionBackend(AttentionBackend):
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert self.fa_impl_ver in [3], "Only FA3 support decoding"
         if k is not None:
             assert v is not None
             if save_kv_cache:
@@ -1008,14 +981,10 @@ class FlashAttentionBackend(AttentionBackend):
             if layer.sliding_window_size is not None and layer.sliding_window_size > -1
             else (-1, -1)
         )
-        causal = True
-        if layer.is_cross_attention or layer.attn_type == AttentionType.ENCODER_ONLY:
-            causal = False
+        causal = not layer.is_cross_attention
 
         # For fa3 interface version compatibility, we put new fields into conditional keyword args
         kwargs = {}
-        if self.fa_impl_ver != 3:
-            kwargs["ver"] = self.fa_impl_ver
         if sinks is not None:
             kwargs["sinks"] = sinks
 
@@ -1061,7 +1030,6 @@ class FlashAttentionBackend(AttentionBackend):
                     softcap=layer.logit_cap,
                     k_descale=k_descale,
                     v_descale=v_descale,
-                    num_splits=self.num_splits,
                     **kwargs,
                 )
             elif use_local_attn:
@@ -1081,7 +1049,6 @@ class FlashAttentionBackend(AttentionBackend):
                     softcap=layer.logit_cap,
                     k_descale=k_descale,
                     v_descale=v_descale,
-                    num_splits=self.num_splits,
                     **kwargs,
                 )
             else:
@@ -1110,7 +1077,6 @@ class FlashAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
-                    num_splits=self.num_splits,
                     **kwargs,
                 )
                 if use_cascade_attn:
@@ -1132,7 +1098,6 @@ class FlashAttentionBackend(AttentionBackend):
                             k_descale=k_descale,
                             v_descale=v_descale,
                             return_softmax_lse=True,
-                            num_splits=self.num_splits,
                             **kwargs,
                         )
                     )
@@ -1188,7 +1153,6 @@ class FlashAttentionBackend(AttentionBackend):
                 k_descale=k_descale,
                 v_descale=v_descale,
                 return_softmax_lse=use_cascade_attn,  # softmax_lse is needed for merge states
-                num_splits=self.num_splits,
             )
             if use_cascade_attn:
                 o, softmax_lse, *rest = result
@@ -1209,7 +1173,6 @@ class FlashAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=True,
-                    num_splits=self.num_splits,
                 )
                 o, _ = merge_state_v2(
                     o,
@@ -1490,7 +1453,7 @@ class FlashAttentionBackend(AttentionBackend):
         seq_lens: torch.Tensor,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
     ):
         """Initialize forward metadata for capturing CUDA graph."""
         metadata = FlashAttentionMetadata()
@@ -1725,7 +1688,7 @@ class FlashAttentionBackend(AttentionBackend):
         seq_lens_sum: int,
         encoder_lens: Optional[torch.Tensor],
         forward_mode: ForwardMode,
-        spec_info: Optional[SpecInput],
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
         seq_lens_cpu: Optional[torch.Tensor],
         out_cache_loc: Optional[torch.Tensor] = None,
     ):
@@ -2320,7 +2283,7 @@ class FlashAttentionMultiStepBackend:
         self.topk = topk
         self.speculative_num_steps = speculative_num_steps
         self.attn_backends = []
-        for i in range(self.speculative_num_steps - 1):
+        for i in range(self.speculative_num_steps):
             self.attn_backends.append(
                 FlashAttentionBackend(
                     model_runner,
@@ -2335,7 +2298,7 @@ class FlashAttentionMultiStepBackend:
             self.attn_backends[i].init_forward_metadata(forward_batch)
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
-        for i in range(self.speculative_num_steps - 1):
+        for i in range(self.speculative_num_steps):
             self.attn_backends[i].init_cuda_graph_state(max_bs, max_num_tokens)
 
     def init_forward_metadata_capture_cuda_graph(
@@ -2343,7 +2306,7 @@ class FlashAttentionMultiStepBackend:
         forward_batch: ForwardBatch,
     ):
         assert forward_batch.spec_info is not None
-        assert forward_batch.spec_info.is_draft_input()
+        assert isinstance(forward_batch.spec_info, EagleDraftInput)
 
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_forward_metadata_capture_cuda_graph(
@@ -2360,7 +2323,7 @@ class FlashAttentionMultiStepBackend:
         self, forward_batch: ForwardBatch, bs: int
     ):
         assert forward_batch.spec_info is not None
-        assert forward_batch.spec_info.is_draft_input()
+        assert isinstance(forward_batch.spec_info, EagleDraftInput)
 
         for i in range(self.speculative_num_steps - 1):
             # TODO: incrementally update the metadata for the later steps,
