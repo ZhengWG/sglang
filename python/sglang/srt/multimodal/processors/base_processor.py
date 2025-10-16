@@ -322,8 +322,9 @@ class BaseMultimodalProcessor(ABC):
 
         except Exception as e:
             rte = RuntimeError(f"Error while loading data {data}: {e}")
-            if hasattr(e, "response") and e.response.status_code:
-                rte.error_code = e.response.status_code
+            e_response = getattr(e, "response", None)
+            if e_response is not None:
+                rte.error_code = getattr(e_response, "status_code", 400)
             else:
                 rte.error_code = 400
             raise rte
@@ -508,7 +509,9 @@ class BaseMultimodalProcessor(ABC):
                 rte = RuntimeError(
                     f"An exception occurred while loading multimodal data: {e}"
                 )
-                rte.error_code = getattr(e, "error_code", 400)
+                error_code = getattr(e, "error_code", 400)
+                if isinstance(error_code, int):
+                    rte.error_code = error_code
                 raise rte
         return BaseMultiModalProcessorOutput(
             images=images,
