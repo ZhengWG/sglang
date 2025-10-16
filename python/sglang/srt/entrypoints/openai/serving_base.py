@@ -6,6 +6,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+import orjson
 from fastapi import HTTPException, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
@@ -29,10 +30,10 @@ class OpenAIServingBase(ABC):
         self.tokenizer_manager = tokenizer_manager
         self.allowed_custom_labels = (
             set(
-                self.tokenizer_manager.server_args.tokenizer_metrics_allowed_customer_labels
+                self.tokenizer_manager.server_args.tokenizer_metrics_allowed_custom_labels
             )
             if isinstance(self.tokenizer_manager.server_args, ServerArgs)
-            and self.tokenizer_manager.server_args.tokenizer_metrics_allowed_customer_labels
+            and self.tokenizer_manager.server_args.tokenizer_metrics_allowed_custom_labels
             else None
         )
 
@@ -67,12 +68,19 @@ class OpenAIServingBase(ABC):
             return self.create_error_response(
                 message=e.detail, err_type=str(e.status_code), status_code=e.status_code
             )
+        except ValueError as e:
+            logger.exception(f"ValueError in request: {e}")
+            return self.create_error_response(
+                message=str(e),
+                err_type="BadRequest",
+                status_code=400,
+            )
         except Exception as e:
             logger.exception(f"Error in request: {e}")
             return self.create_error_response(
                 message=f"Internal server error: {str(e)}",
                 err_type="InternalServerError",
-                status_code=500,
+                status_code=getattr(e, "error_code", 500),
             )
 
     @abstractmethod
@@ -90,6 +98,19 @@ class OpenAIServingBase(ABC):
             return rid
 
         return f"{self._request_id_prefix()}{uuid.uuid4().hex}"
+
+    def _compute_extra_key(self, request: OpenAIServingRequest) -> Optional[str]:
+        """Compute the final extra_key by concatenating cache_salt and extra_key if both are provided."""
+        parts = []
+        for key in ["cache_salt", "extra_key"]:
+            value = getattr(request, key, None)
+            if value:
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"Value of {key} must be a string, but got {type(value).__name__}"
+                    )
+                parts.append(value)
+        return "".join(parts) if parts else None
 
     @abstractmethod
     def _convert_to_internal_request(
@@ -170,20 +191,20 @@ class OpenAIServingBase(ABC):
         )
         return json.dumps({"error": error.model_dump()})
 
-    def extract_customer_labels(self, raw_request):
+    def extract_custom_labels(self, raw_request):
         if (
             not self.allowed_custom_labels
             or not self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels_header
         ):
             return None
 
-        customer_labels = None
+        custom_labels = None
         header = (
             self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels_header
         )
         try:
             raw_labels = (
-                json.loads(raw_request.headers.get(header))
+                orjson.loads(raw_request.headers.get(header))
                 if raw_request and raw_request.headers.get(header)
                 else None
             )
@@ -192,12 +213,12 @@ class OpenAIServingBase(ABC):
             raw_labels = None
 
         if isinstance(raw_labels, dict):
-            customer_labels = {
+            custom_labels = {
                 label: value
                 for label, value in raw_labels.items()
                 if label in self.allowed_custom_labels
             }
-        return customer_labels
+        return custom_labels
 
     def set_trace_id(self, request: OpenAIServingRequest, raw_request: Request):
         # 0. 判断是否包含rid属性
