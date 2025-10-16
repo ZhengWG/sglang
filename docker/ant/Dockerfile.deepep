@@ -88,6 +88,11 @@ RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-c
 # For EPLB initialization
 COPY ./docker/ant/expert_workload.json /root/expert_workload.json
 
+# 安装deepgemm编译缓存
+RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_gemm_cache.tar" && \
+    tar -xPf deep_gemm_cache.tar && \
+    rm -rf deep_gemm_cache.tar
+
 # 配置环境变量，在gpu机器上启动容器时，无需在命令行中添加
 ENV NVIDIA_VISIBLE_DEVICES=all
 WORKDIR /root/
