@@ -51,7 +51,7 @@ class VILAMultimodalProcessor(BaseMultimodalProcessor):
         request_obj: GenerateReqInput | EmbeddingReqInput,
         **kwargs,
     ) -> Optional[Dict[str, Any]]:
-        base_output = self.load_mm_data(
+        base_output = await self.load_mm_data_async(
             prompt=input_text,
             multimodal_tokens=self.mm_tokens,
             image_data=image_data,
