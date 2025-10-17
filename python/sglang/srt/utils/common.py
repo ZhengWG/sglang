@@ -162,6 +162,76 @@ def get_http_session() -> requests.Session:
         return _http_session
 
 
+#-------------------------------------------------------------------------------
+# Async HTTP utilities
+#-------------------------------------------------------------------------------
+try:
+    import aiohttp  # type: ignore
+except Exception:  # pragma: no cover - optional dependency already in project
+    aiohttp = None  # type: ignore
+
+_async_http_session: Optional["aiohttp.ClientSession"] = None
+_async_http_session_lock: Optional[asyncio.Lock] = None
+_async_http_semaphore: Optional[asyncio.Semaphore] = None
+
+
+async def get_async_http_session() -> "aiohttp.ClientSession":
+    """Get or create a shared aiohttp session with pooling and timeouts."""
+    if aiohttp is None:
+        raise RuntimeError("aiohttp not available")
+
+    global _async_http_session, _async_http_session_lock, _async_http_semaphore
+    if _async_http_session and not _async_http_session.closed:
+        return _async_http_session
+
+    if _async_http_session_lock is None:
+        _async_http_session_lock = asyncio.Lock()
+
+    async with _async_http_session_lock:
+        if _async_http_session and not _async_http_session.closed:
+            return _async_http_session
+
+        connector = aiohttp.TCPConnector(
+            limit=int(os.getenv("SGLANG_HTTP_POOL_MAXSIZE", "256")),
+            limit_per_host=int(os.getenv("SGLANG_HTTP_LIMIT_PER_HOST", "64")),
+            ttl_dns_cache=300,
+            enable_cleanup_closed=True,
+        )
+        timeout = aiohttp.ClientTimeout(
+            connect=int(os.getenv("REQUEST_CONNECT_TIMEOUT", "3")),
+            sock_read=int(os.getenv("REQUEST_READ_TIMEOUT", "10")),
+            total=None,
+        )
+        _async_http_session = aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        )
+        if _async_http_semaphore is None:
+            _async_http_semaphore = asyncio.Semaphore(
+                int(os.getenv("SGLANG_FETCH_CONCURRENCY", "128"))
+            )
+        return _async_http_session
+
+
+async def async_fetch_bytes(url: str, timeout: float | None = None) -> bytes:
+    """Fetch bytes via aiohttp with global concurrency control."""
+    if aiohttp is None:
+        raise RuntimeError("aiohttp not available")
+
+    session = await get_async_http_session()
+    assert _async_http_semaphore is not None
+    async with _async_http_semaphore:
+        async with session.get(url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
+
+async def shutdown_async_http_session():
+    """Close the shared aiohttp session if present."""
+    global _async_http_session
+    if _async_http_session and not _async_http_session.closed:
+        await _async_http_session.close()
+
+
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
 

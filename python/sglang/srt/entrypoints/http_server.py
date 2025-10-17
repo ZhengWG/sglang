@@ -119,6 +119,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     kill_process_tree,
     set_uvicorn_logging_configs,
+    shutdown_async_http_session,
 )
 from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
@@ -288,6 +289,11 @@ async def lifespan(fast_api_app: FastAPI):
     try:
         yield
     finally:
+        # Gracefully close shared async HTTP session
+        try:
+            await shutdown_async_http_session()
+        except Exception:
+            pass
         if server_args.tokenizer_worker_num > 1:
             pid = os.getpid()
             logger.info(f"uvicorn worker {pid} ending...")
