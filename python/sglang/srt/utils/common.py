@@ -911,9 +911,13 @@ def get_image_bytes(image_file: Union[str, bytes]):
     if isinstance(image_file, bytes):
         return image_file
     elif image_file.startswith("http://") or image_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, timeout=timeout)
-        return response.content
+        _ensure_mm_async_client()
+        t = _get_timeout_seconds("REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 3.0)
+        wait_timeout = max(1.0, t + 1.0)
+        future = asyncio.run_coroutine_threadsafe(
+            _async_fetch_bytes(image_file, t), _mm_download_loop
+        )
+        return future.result(timeout=wait_timeout)
     elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
         with open(image_file, "rb") as f:
             return f.read()
