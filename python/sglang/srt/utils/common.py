@@ -174,6 +174,43 @@ def submit_async_image_download(url: str):
         _async_fetch_image_bytes(url), _image_download_loop
     )
 
+def _get_timeout_seconds(env_key: str, fallback_env_key: str, default_value: float) -> float:
+    try:
+        return float(os.getenv(env_key, os.getenv(fallback_env_key, str(default_value))))
+    except Exception:
+        return default_value
+
+async def _async_fetch_audio_bytes(url: str) -> bytes:
+    assert _image_async_client is not None
+    t = _get_timeout_seconds("AUDIO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 5.0)
+    timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
+    resp = await _image_async_client.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+def submit_async_audio_download(url: str):
+    _ensure_image_async_client()
+    return asyncio.run_coroutine_threadsafe(
+        _async_fetch_audio_bytes(url), _image_download_loop
+    )
+
+async def _async_fetch_video_bytes(url: str) -> bytes:
+    assert _image_async_client is not None
+    t = _get_timeout_seconds("VIDEO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 10.0)
+    timeout = httpx.Timeout(connect=t, read=t, write=t, pool=t)
+    async with _image_async_client.stream("GET", url, timeout=timeout) as resp:
+        resp.raise_for_status()
+        data = bytearray()
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            data += chunk
+        return bytes(data)
+
+def submit_async_video_download(url: str):
+    _ensure_image_async_client()
+    return asyncio.run_coroutine_threadsafe(
+        _async_fetch_video_bytes(url), _image_download_loop
+    )
+
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
@@ -845,11 +882,16 @@ def load_audio(
             BytesIO(pybase64.b64decode(audio_file, validate=True))
         )
     elif audio_file.startswith("http://") or audio_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-        response = requests.get(audio_file, stream=True, timeout=timeout)
-        audio_file = BytesIO(response.content)
-        response.close()
-        audio, original_sr = sf.read(audio_file)
+        # Use async httpx client in background to fetch audio bytes
+        _ensure_image_async_client()
+        t = _get_timeout_seconds("AUDIO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 5.0)
+        wait_timeout = max(1.0, t + 1.0)
+        future = asyncio.run_coroutine_threadsafe(
+            _async_fetch_audio_bytes(audio_file), _image_download_loop
+        )
+        content = future.result(timeout=wait_timeout)
+        audio_io = BytesIO(content)
+        audio, original_sr = sf.read(audio_io)
     elif isinstance(audio_file, str):
         audio, original_sr = sf.read(audio_file)
     else:
@@ -958,12 +1000,16 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
             vr = VideoReader(tmp_file.name, ctx=ctx)
         elif isinstance(video_file, str):
             if video_file.startswith(("http://", "https://")):
-                timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-                response = requests.get(video_file, stream=True, timeout=timeout)
-                response.raise_for_status()
+                # Use async httpx client in background to fetch video bytes (streamed)
+                _ensure_image_async_client()
+                t = _get_timeout_seconds("VIDEO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 10.0)
+                wait_timeout = max(1.0, t + 2.0)
+                future = asyncio.run_coroutine_threadsafe(
+                    _async_fetch_video_bytes(video_file), _image_download_loop
+                )
+                video_bytes = future.result(timeout=wait_timeout)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
+                tmp_file.write(video_bytes)
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):

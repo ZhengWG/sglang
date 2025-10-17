@@ -24,6 +24,8 @@ from sglang.srt.utils import (
     load_video,
     logger,
     submit_async_image_download,
+    submit_async_video_download,
+    submit_async_audio_download,
 )
 
 _is_npu = is_npu()
@@ -421,6 +423,41 @@ class BaseMultimodalProcessor(ABC):
                                 discard_alpha_channel,
                             )
                         )
+                elif modality == Modality.VIDEO and isinstance(data, str) and (
+                    data.startswith("http://") or data.startswith("https://")
+                ):
+                    # Download video bytes asynchronously, then open via decord
+                    bytes_future = submit_async_video_download(data)
+
+                    composed_future = concurrent.futures.Future()
+
+                    def _on_video_bytes_done(f):
+                        try:
+                            content = f.result()
+                            result = load_video(content, frame_count_limit)
+                            composed_future.set_result(result)
+                        except Exception as e:
+                            composed_future.set_exception(e)
+
+                    bytes_future.add_done_callback(_on_video_bytes_done)
+                    futures.append(composed_future)
+                elif modality == Modality.AUDIO and isinstance(data, str) and (
+                    data.startswith("http://") or data.startswith("https://")
+                ):
+                    # Download audio bytes asynchronously, then decode
+                    bytes_future = submit_async_audio_download(data)
+                    composed_future = concurrent.futures.Future()
+
+                    def _on_audio_bytes_done(f):
+                        try:
+                            content = f.result()
+                            result = load_audio(content, audio_sample_rate)
+                            composed_future.set_result(result)
+                        except Exception as e:
+                            composed_future.set_exception(e)
+
+                    bytes_future.add_done_callback(_on_audio_bytes_done)
+                    futures.append(composed_future)
                 else:
                     futures.append(
                         self.io_executor.submit(
