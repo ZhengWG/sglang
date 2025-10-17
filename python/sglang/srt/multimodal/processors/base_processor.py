@@ -16,17 +16,7 @@ from io import BytesIO
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import (
-    ImageData,
-    is_npu,
-    load_audio,
-    load_image,
-    load_video,
-    logger,
-    submit_async_image_download,
-    submit_async_video_download,
-    submit_async_audio_download,
-)
+from sglang.srt.utils import ImageData, is_npu, load_audio, load_image, load_video, logger
 
 _is_npu = is_npu()
 
