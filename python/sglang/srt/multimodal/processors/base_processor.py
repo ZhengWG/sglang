@@ -1,4 +1,6 @@
 import concurrent
+import asyncio
+import functools
 import concurrent.futures
 import dataclasses
 import multiprocessing as mp
@@ -10,10 +12,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from PIL import Image
+from io import BytesIO
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import is_npu, load_audio, load_image, load_video, logger
+from sglang.srt.utils import ImageData, is_npu, load_audio, load_image, load_video, logger
 
 _is_npu = is_npu()
 
@@ -506,6 +509,35 @@ class BaseMultimodalProcessor(ABC):
             videos=videos,
             input_text="".join(new_text_parts),
         )
+
+    async def load_mm_data_async(
+        self,
+        prompt: str,
+        multimodal_tokens: MultimodalSpecialTokens,
+        image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
+        audio_data: Optional[list] = None,
+        return_text: Optional[bool] = True,
+        discard_alpha_channel: bool = True,
+        audio_sample_rate: Optional[int] = None,
+    ) -> BaseMultiModalProcessorOutput:
+        """
+        Async wrapper to offload sync load_mm_data into the IO executor, so the
+        event loop thread is not blocked while waiting for network/file IO.
+        """
+        loop = asyncio.get_event_loop()
+        func = functools.partial(
+            self.load_mm_data,
+            prompt=prompt,
+            multimodal_tokens=multimodal_tokens,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            return_text=return_text,
+            discard_alpha_channel=discard_alpha_channel,
+            audio_sample_rate=audio_sample_rate,
+        )
+        return await loop.run_in_executor(self.io_executor, func)
 
     @staticmethod
     def get_mm_items_offset(

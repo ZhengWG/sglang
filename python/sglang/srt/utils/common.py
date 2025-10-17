@@ -73,6 +73,7 @@ import orjson
 import psutil
 import pybase64
 import requests
+import httpx
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -94,6 +95,77 @@ logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
+
+_mm_download_loop = None
+_mm_download_thread = None
+_mm_async_client = None
+_mm_client_lock = threading.Lock()
+
+def _ensure_mm_async_client():
+    """
+    Lazily start a background asyncio loop with a shared httpx.AsyncClient
+    for multimodal data downloads. This avoids spawning many connections/loops under load.
+    Timeout is applied per-request instead of at the client level.
+    """
+    global _mm_download_loop, _mm_download_thread, _mm_async_client
+    if _mm_download_loop is not None and _mm_async_client is not None:
+        return
+
+    with _mm_client_lock:
+        if _mm_download_loop is not None and _mm_async_client is not None:
+            return
+
+        loop = asyncio.new_event_loop()
+        _mm_download_loop = loop
+
+        def _run_loop_forever():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        thread = threading.Thread(
+            target=_run_loop_forever, name="sgl-mm-httpx-loop", daemon=True
+        )
+        thread.start()
+        _mm_download_thread = thread
+
+        limits = httpx.Limits(
+            max_connections=int(os.getenv("HTTPX_MAX_CONNECTIONS", "200")),
+            max_keepalive_connections=int(os.getenv("HTTPX_MAX_KEEPALIVE", "50")),
+        )
+
+        async def _create_client():
+            return httpx.AsyncClient(
+                limits=limits,
+                follow_redirects=True,
+                trust_env=True,
+            )
+
+        _mm_async_client = asyncio.run_coroutine_threadsafe(
+            _create_client(), loop
+        ).result()
+
+async def _async_fetch_bytes(url: str, timeout_seconds: float) -> bytes:
+    assert _mm_async_client is not None
+    timeout = httpx.Timeout(connect=timeout_seconds, read=timeout_seconds, write=timeout_seconds, pool=timeout_seconds)
+    resp = await _mm_async_client.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+def _get_timeout_seconds(env_key: str, fallback_env_key: str, default_value: float) -> float:
+    try:
+        return float(os.getenv(env_key, os.getenv(fallback_env_key, str(default_value))))
+    except Exception:
+        return default_value
+
+async def _async_fetch_stream_bytes(url: str, timeout_seconds: float) -> bytes:
+    assert _mm_async_client is not None
+    timeout = httpx.Timeout(connect=timeout_seconds, read=timeout_seconds, write=timeout_seconds, pool=timeout_seconds)
+    async with _mm_async_client.stream("GET", url, timeout=timeout) as resp:
+        resp.raise_for_status()
+        data = bytearray()
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            data += chunk
+        return bytes(data)
 
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
@@ -766,11 +838,16 @@ def load_audio(
             BytesIO(pybase64.b64decode(audio_file, validate=True))
         )
     elif audio_file.startswith("http://") or audio_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-        response = requests.get(audio_file, stream=True, timeout=timeout)
-        audio_file = BytesIO(response.content)
-        response.close()
-        audio, original_sr = sf.read(audio_file)
+        # Use async httpx client in background to fetch audio bytes
+        _ensure_mm_async_client()
+        t = _get_timeout_seconds("AUDIO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 5.0)
+        wait_timeout = max(1.0, t + 1.0)
+        future = asyncio.run_coroutine_threadsafe(
+            _async_fetch_bytes(audio_file, t), _mm_download_loop
+        )
+        content = future.result(timeout=wait_timeout)
+        audio_io = BytesIO(content)
+        audio, original_sr = sf.read(audio_io)
     elif isinstance(audio_file, str):
         audio, original_sr = sf.read(audio_file)
     else:
@@ -807,14 +884,16 @@ def load_image(
     elif isinstance(image_file, bytes):
         image = Image.open(BytesIO(image_file))
     elif image_file.startswith("http://") or image_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, stream=True, timeout=timeout)
-        try:
-            response.raise_for_status()
-            image = Image.open(response.raw)
-            image.load()  # Force loading to avoid issues after closing the stream
-        finally:
-            response.close()
+        # Use a shared async httpx client to avoid exhausting connections under high concurrency.
+        _ensure_mm_async_client()
+        t = _get_timeout_seconds("REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 3.0)
+        wait_timeout = max(1.0, t + 1.0)
+        future = asyncio.run_coroutine_threadsafe(
+            _async_fetch_bytes(image_file, t), _mm_download_loop
+        )
+        content = future.result(timeout=wait_timeout)
+        image = Image.open(BytesIO(content))
+        image.load()  # fully load to detach from the underlying buffer
     elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
         image = Image.open(image_file)
     elif image_file.startswith("data:"):
@@ -832,9 +911,13 @@ def get_image_bytes(image_file: Union[str, bytes]):
     if isinstance(image_file, bytes):
         return image_file
     elif image_file.startswith("http://") or image_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, timeout=timeout)
-        return response.content
+        _ensure_mm_async_client()
+        t = _get_timeout_seconds("REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 3.0)
+        wait_timeout = max(1.0, t + 1.0)
+        future = asyncio.run_coroutine_threadsafe(
+            _async_fetch_bytes(image_file, t), _mm_download_loop
+        )
+        return future.result(timeout=wait_timeout)
     elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
         with open(image_file, "rb") as f:
             return f.read()
@@ -869,12 +952,16 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
             vr = VideoReader(tmp_file.name, ctx=ctx)
         elif isinstance(video_file, str):
             if video_file.startswith(("http://", "https://")):
-                timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-                response = requests.get(video_file, stream=True, timeout=timeout)
-                response.raise_for_status()
+                # Use async httpx client in background to fetch video bytes (streamed)
+                _ensure_mm_async_client()
+                t = _get_timeout_seconds("VIDEO_REQUEST_TIMEOUT", "REQUEST_TIMEOUT", 10.0)
+                wait_timeout = max(1.0, t + 2.0)
+                future = asyncio.run_coroutine_threadsafe(
+                    _async_fetch_stream_bytes(video_file, t), _mm_download_loop
+                )
+                video_bytes = future.result(timeout=wait_timeout)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
+                tmp_file.write(video_bytes)
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
