@@ -163,6 +163,17 @@ async def _async_fetch_image_bytes(url: str) -> bytes:
     resp.raise_for_status()
     return resp.content
 
+def submit_async_image_download(url: str):
+    """
+    Schedule an async HTTP download for an image URL and return a
+    concurrent.futures.Future that resolves to bytes.
+    This avoids blocking worker threads on network I/O.
+    """
+    _ensure_image_async_client()
+    return asyncio.run_coroutine_threadsafe(
+        _async_fetch_image_bytes(url), _image_download_loop
+    )
+
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 

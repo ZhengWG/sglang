@@ -1,4 +1,6 @@
 import concurrent
+import asyncio
+import functools
 import concurrent.futures
 import dataclasses
 import multiprocessing as mp
@@ -10,10 +12,19 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from PIL import Image
+from io import BytesIO
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import is_npu, load_audio, load_image, load_video, logger
+from sglang.srt.utils import (
+    ImageData,
+    is_npu,
+    load_audio,
+    load_image,
+    load_video,
+    logger,
+    submit_async_image_download,
+)
 
 _is_npu = is_npu()
 
@@ -370,16 +381,57 @@ class BaseMultimodalProcessor(ABC):
                             "Mismatch between image tokens and estimated frame counts."
                         )
 
-                futures.append(
-                    self.io_executor.submit(
-                        BaseMultimodalProcessor._load_single_item,
-                        data,
-                        modality,
-                        frame_count_limit,
-                        audio_sample_rate,
-                        discard_alpha_channel,
+                # For HTTP(S) image URLs, schedule async HTTPX download to avoid blocking IO threads
+                if (
+                    modality == Modality.IMAGE
+                    and not isinstance(data, dict)
+                ):
+                    url_candidate = (
+                        data.url if isinstance(data, ImageData) else data
                     )
-                )
+                    if isinstance(url_candidate, str) and (
+                        url_candidate.startswith("http://")
+                        or url_candidate.startswith("https://")
+                    ):
+                        bytes_future = submit_async_image_download(url_candidate)
+
+                        composed_future = concurrent.futures.Future()
+
+                        def _on_image_bytes_done(f):
+                            try:
+                                content = f.result()
+                                img = Image.open(BytesIO(content))
+                                img.load()
+                                if discard_alpha_channel and img.mode != "RGB":
+                                    img = img.convert("RGB")
+                                composed_future.set_result(img)
+                            except Exception as e:
+                                composed_future.set_exception(e)
+
+                        bytes_future.add_done_callback(_on_image_bytes_done)
+                        futures.append(composed_future)
+                    else:
+                        futures.append(
+                            self.io_executor.submit(
+                                BaseMultimodalProcessor._load_single_item,
+                                data,
+                                modality,
+                                frame_count_limit,
+                                audio_sample_rate,
+                                discard_alpha_channel,
+                            )
+                        )
+                else:
+                    futures.append(
+                        self.io_executor.submit(
+                            BaseMultimodalProcessor._load_single_item,
+                            data,
+                            modality,
+                            frame_count_limit,
+                            audio_sample_rate,
+                            discard_alpha_channel,
+                        )
+                    )
                 task_info.append((modality, data, frame_count_limit))
 
         for modality, iterator in data_iterators.items():
@@ -506,6 +558,35 @@ class BaseMultimodalProcessor(ABC):
             videos=videos,
             input_text="".join(new_text_parts),
         )
+
+    async def load_mm_data_async(
+        self,
+        prompt: str,
+        multimodal_tokens: MultimodalSpecialTokens,
+        image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
+        audio_data: Optional[list] = None,
+        return_text: Optional[bool] = True,
+        discard_alpha_channel: bool = True,
+        audio_sample_rate: Optional[int] = None,
+    ) -> BaseMultiModalProcessorOutput:
+        """
+        Async wrapper to offload sync load_mm_data into the IO executor, so the
+        event loop thread is not blocked while waiting for network/file IO.
+        """
+        loop = asyncio.get_event_loop()
+        func = functools.partial(
+            self.load_mm_data,
+            prompt=prompt,
+            multimodal_tokens=multimodal_tokens,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            return_text=return_text,
+            discard_alpha_channel=discard_alpha_channel,
+            audio_sample_rate=audio_sample_rate,
+        )
+        return await loop.run_in_executor(self.io_executor, func)
 
     @staticmethod
     def get_mm_items_offset(
