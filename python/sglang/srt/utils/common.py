@@ -73,6 +73,7 @@ import orjson
 import psutil
 import pybase64
 import requests
+import httpx
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -94,6 +95,73 @@ logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
+
+_image_download_loop = None
+_image_download_thread = None
+_image_async_client = None
+_image_client_lock = threading.Lock()
+
+def _ensure_image_async_client():
+    """
+    Lazily start a background asyncio loop with a shared httpx.AsyncClient
+    for image downloads. This avoids spawning many connections/loops under load.
+    """
+    global _image_download_loop, _image_download_thread, _image_async_client
+    if _image_download_loop is not None and _image_async_client is not None:
+        return
+
+    with _image_client_lock:
+        if _image_download_loop is not None and _image_async_client is not None:
+            return
+
+        loop = asyncio.new_event_loop()
+        _image_download_loop = loop
+
+        def _run_loop_forever():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        thread = threading.Thread(
+            target=_run_loop_forever, name="sgl-image-httpx-loop", daemon=True
+        )
+        thread.start()
+        _image_download_thread = thread
+
+        # Configure shared AsyncClient with sane limits/timeouts
+        timeout_seconds_env = os.getenv("REQUEST_TIMEOUT", "3")
+        try:
+            timeout_seconds = float(timeout_seconds_env)
+        except Exception:
+            timeout_seconds = 3.0
+
+        timeout = httpx.Timeout(
+            connect=timeout_seconds,
+            read=timeout_seconds,
+            write=timeout_seconds,
+            pool=timeout_seconds,
+        )
+        limits = httpx.Limits(
+            max_connections=int(os.getenv("HTTPX_MAX_CONNECTIONS", "200")),
+            max_keepalive_connections=int(os.getenv("HTTPX_MAX_KEEPALIVE", "50")),
+        )
+
+        async def _create_client():
+            return httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                follow_redirects=True,
+                trust_env=True,
+            )
+
+        _image_async_client = asyncio.run_coroutine_threadsafe(
+            _create_client(), loop
+        ).result()
+
+async def _async_fetch_image_bytes(url: str) -> bytes:
+    assert _image_async_client is not None
+    resp = await _image_async_client.get(url)
+    resp.raise_for_status()
+    return resp.content
 
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
@@ -807,14 +875,24 @@ def load_image(
     elif isinstance(image_file, bytes):
         image = Image.open(BytesIO(image_file))
     elif image_file.startswith("http://") or image_file.startswith("https://"):
-        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, stream=True, timeout=timeout)
+        # Use a shared async httpx client to avoid exhausting connections under high concurrency.
+        _ensure_image_async_client()
+        timeout_seconds_env = os.getenv("REQUEST_TIMEOUT", "3")
         try:
-            response.raise_for_status()
-            image = Image.open(response.raw)
-            image.load()  # Force loading to avoid issues after closing the stream
-        finally:
-            response.close()
+            wait_timeout = float(timeout_seconds_env)
+        except Exception:
+            wait_timeout = 3.0
+        # Slightly longer wait for future to allow for scheduling jitter
+        wait_timeout = max(1.0, wait_timeout + 1.0)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                _async_fetch_image_bytes(image_file), _image_download_loop
+            )
+            content = future.result(timeout=wait_timeout)
+            image = Image.open(BytesIO(content))
+            image.load()  # fully load to detach from the underlying buffer
+        except Exception as e:
+            raise
     elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
         image = Image.open(image_file)
     elif image_file.startswith("data:"):
