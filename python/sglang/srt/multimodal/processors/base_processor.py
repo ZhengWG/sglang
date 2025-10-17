@@ -13,7 +13,14 @@ from PIL import Image
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import is_npu, load_audio, load_image, load_video, logger
+from sglang.srt.utils import (
+    is_npu,
+    load_audio,
+    load_image,
+    load_video,
+    logger,
+    async_fetch_bytes,
+)
 
 _is_npu = is_npu()
 
@@ -324,6 +331,69 @@ class BaseMultimodalProcessor(ABC):
         except Exception as e:
             raise RuntimeError(f"Error while loading data {data}: {e}")
 
+    async def _load_single_item_async(
+        self,
+        data,
+        modality: Modality,
+        frame_count_limit=None,
+        audio_sample_rate: Optional[int] = None,
+        discard_alpha_channel=True,
+    ):
+        """Async variant that performs network IO asynchronously when data is a URL.
+
+        Decoding remains in threads to avoid blocking event loop.
+        """
+        try:
+            if isinstance(data, dict):
+                return data
+
+            # URL path handled asynchronously
+            if isinstance(data, str) and data.startswith(("http://", "https://")):
+                if modality == Modality.IMAGE:
+                    from PIL import Image
+                    from io import BytesIO
+
+                    img_bytes = await async_fetch_bytes(data)
+                    def _decode_img(b: bytes):
+                        im = Image.open(BytesIO(b))
+                        if discard_alpha_channel and im.mode != "RGB":
+                            im = im.convert("RGB")
+                        im.load()
+                        return im
+
+                    return await asyncio.to_thread(_decode_img, img_bytes)
+                elif modality == Modality.AUDIO:
+                    import soundfile as sf
+                    from io import BytesIO
+                    from scipy.signal import resample
+
+                    audio_bytes = await async_fetch_bytes(data)
+
+                    def _decode_audio(b: bytes):
+                        audio, original_sr = sf.read(BytesIO(b))
+                        if audio_sample_rate is not None and original_sr != audio_sample_rate:
+                            num_samples = int(len(audio) * float(audio_sample_rate) / original_sr)
+                            audio = resample(audio, num_samples)
+                        return audio
+
+                    return await asyncio.to_thread(_decode_audio, audio_bytes)
+                elif modality == Modality.VIDEO:
+                    # For videos, we reuse existing load_video by bytes to keep behavior
+                    video_bytes = await async_fetch_bytes(data)
+                    return await asyncio.to_thread(load_video, video_bytes, frame_count_limit)
+
+            # Non-URL path: delegate to sync implementation via threads
+            return await asyncio.to_thread(
+                BaseMultimodalProcessor._load_single_item,
+                data,
+                modality,
+                frame_count_limit,
+                audio_sample_rate,
+                discard_alpha_channel,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+
     def submit_data_loading_tasks(
         self,
         text_parts: List[str],
@@ -394,6 +464,125 @@ class BaseMultimodalProcessor(ABC):
                 pass
 
         return futures, task_info
+
+    async def load_mm_data_async(
+        self,
+        prompt: str,
+        multimodal_tokens: MultimodalSpecialTokens,
+        image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
+        audio_data: Optional[list] = None,
+        return_text: Optional[bool] = True,
+        discard_alpha_channel: bool = True,
+        audio_sample_rate: Optional[int] = None,
+    ) -> BaseMultiModalProcessorOutput:
+        """Async version of load_mm_data with non-blocking network IO."""
+        multimodal_tokens_pattern = multimodal_tokens.get_combined_regex()
+
+        if isinstance(prompt, list) and return_text:
+            assert len(prompt) and isinstance(prompt[0], int)
+            prompt = self._processor.tokenizer.decode(prompt)
+        else:
+            prompt = prompt
+
+        assert isinstance(prompt, str)
+        text_parts = re.split(multimodal_tokens_pattern, prompt)
+
+        data_iterators = {}
+        if multimodal_tokens.image_token and image_data:
+            data_iterators[Modality.IMAGE] = iter(image_data)
+        if multimodal_tokens.video_token and video_data:
+            data_iterators[Modality.VIDEO] = iter(video_data)
+        if multimodal_tokens.audio_token and audio_data:
+            data_iterators[Modality.AUDIO] = iter(audio_data)
+
+        # Build async tasks preserving order of tokens
+        tasks = []
+        task_info: list[tuple[Modality, Any, Any]] = []
+        for text_part in text_parts:
+            modality = multimodal_tokens.get_modality_of_token(text_part)
+            if modality is not None:
+                iterator = data_iterators.get(modality)
+                if iterator is None:
+                    raise ValueError(f"No data iterator found for token: {text_part}")
+                try:
+                    data = next(iterator)
+                except StopIteration:
+                    raise ValueError(
+                        f"Mismatch: More '{text_part}' tokens found than corresponding data items provided."
+                    )
+
+                frame_count_limit = None
+                # we don't pre-estimate frames here; keep parity with sync path
+                tasks.append(
+                    self._load_single_item_async(
+                        data,
+                        modality,
+                        frame_count_limit,
+                        audio_sample_rate,
+                        discard_alpha_channel,
+                    )
+                )
+                task_info.append((modality, data, frame_count_limit))
+
+        # warn for extra data
+        for modality, iterator in data_iterators.items():
+            try:
+                next(iterator)
+                logger.warning(
+                    f"Warning: More {modality.name.lower()} data items provided than corresponding tokens found in the prompt."
+                )
+            except StopIteration:
+                pass
+            except Exception:
+                pass
+
+        # Execute async loads
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        images, videos, audios = [], [], []
+        new_text_parts: list[str] = []
+        result_iter = iter(results)
+        info_iter = iter(task_info)
+        for text_part in text_parts:
+            if multimodal_tokens_pattern.match(text_part):
+                modality, raw_data, frame_limit = next(info_iter)
+                result = next(result_iter)
+                if isinstance(result, Exception):
+                    raise RuntimeError(
+                        f"An exception occurred while loading multimodal data: {result}"
+                    )
+
+                is_precomputed = isinstance(raw_data, dict)
+                if modality == Modality.IMAGE:
+                    mm_tokens = (
+                        text_part if is_precomputed else multimodal_tokens.image_token
+                    )
+                    frames = [result] if not isinstance(result, list) else result
+                    if frames:
+                        images += frames
+                        new_text_parts += mm_tokens * len(frames)
+                elif modality == Modality.VIDEO:
+                    mm_tokens = (
+                        text_part if is_precomputed else multimodal_tokens.video_token
+                    )
+                    videos += [result]
+                    new_text_parts += mm_tokens
+                elif modality == Modality.AUDIO:
+                    mm_tokens = (
+                        text_part if is_precomputed else multimodal_tokens.audio_token
+                    )
+                    audios += [result]
+                    new_text_parts += mm_tokens
+            else:
+                new_text_parts += [text_part]
+
+        return BaseMultiModalProcessorOutput(
+            images=images,
+            audios=audios,
+            videos=videos,
+            input_text="".join(new_text_parts),
+        )
 
     def load_mm_data(
         self,
