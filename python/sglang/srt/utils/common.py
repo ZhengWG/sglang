@@ -96,6 +96,72 @@ show_time_cost = False
 time_infos = {}
 
 
+#-------------------------------------------------------------------------------
+# HTTP session with connection pooling for outbound media downloads
+#-------------------------------------------------------------------------------
+# High-concurrency image/video/audio downloads previously used requests.get
+# directly. That can exhaust TCP connection resources. We centralize a
+# pooled, retrying Session here and have helpers use it.
+try:
+    # Imported here to avoid hard dependency issues in unrelated contexts
+    from requests.adapters import HTTPAdapter  # type: ignore
+    from urllib3.util.retry import Retry  # type: ignore
+except Exception:  # pragma: no cover - defensive import guard
+    HTTPAdapter = None  # type: ignore
+    Retry = None  # type: ignore
+
+_http_session: Optional[requests.Session] = None
+_http_session_lock = threading.Lock()
+
+
+def get_http_session() -> requests.Session:
+    """Return a module-wide pooled HTTP session for outbound GET requests.
+
+    Pool sizes and retries can be tuned via env vars:
+    - SGLANG_HTTP_POOL_CONNECTIONS (default: 256)
+    - SGLANG_HTTP_POOL_MAXSIZE (default: 256)
+    - SGLANG_HTTP_MAX_RETRIES (default: 3)
+    - SGLANG_HTTP_BACKOFF (default: 0.3)
+    """
+    global _http_session
+    if _http_session is not None:
+        return _http_session
+
+    with _http_session_lock:
+        if _http_session is not None:
+            return _http_session
+
+        session = requests.Session()
+
+        # If adapter deps are available, configure pooling and retries
+        if HTTPAdapter is not None and Retry is not None:
+            pool_connections = int(os.getenv("SGLANG_HTTP_POOL_CONNECTIONS", "256"))
+            pool_maxsize = int(os.getenv("SGLANG_HTTP_POOL_MAXSIZE", "256"))
+            max_retries = int(os.getenv("SGLANG_HTTP_MAX_RETRIES", "3"))
+            backoff_factor = float(os.getenv("SGLANG_HTTP_BACKOFF", "0.3"))
+
+            retry_strategy = Retry(
+                total=max_retries,
+                connect=max_retries,
+                read=max_retries,
+                status=max_retries,
+                backoff_factor=backoff_factor,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"],
+            )
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=pool_connections,
+                pool_maxsize=pool_maxsize,
+            )
+            # Mount both http and https
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+
+        _http_session = session
+        return _http_session
+
+
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
 
@@ -767,7 +833,7 @@ def load_audio(
         )
     elif audio_file.startswith("http://") or audio_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-        response = requests.get(audio_file, stream=True, timeout=timeout)
+        response = get_http_session().get(audio_file, stream=True, timeout=timeout)
         audio_file = BytesIO(response.content)
         response.close()
         audio, original_sr = sf.read(audio_file)
@@ -808,7 +874,7 @@ def load_image(
         image = Image.open(BytesIO(image_file))
     elif image_file.startswith("http://") or image_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, stream=True, timeout=timeout)
+        response = get_http_session().get(image_file, stream=True, timeout=timeout)
         try:
             response.raise_for_status()
             image = Image.open(response.raw)
@@ -833,8 +899,9 @@ def get_image_bytes(image_file: Union[str, bytes]):
         return image_file
     elif image_file.startswith("http://") or image_file.startswith("https://"):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-        response = requests.get(image_file, timeout=timeout)
-        return response.content
+        with get_http_session().get(image_file, timeout=timeout) as response:
+            response.raise_for_status()
+            return response.content
     elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
         with open(image_file, "rb") as f:
             return f.read()
@@ -870,12 +937,15 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
         elif isinstance(video_file, str):
             if video_file.startswith(("http://", "https://")):
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-                response = requests.get(video_file, stream=True, timeout=timeout)
+                response = get_http_session().get(
+                    video_file, stream=True, timeout=timeout
+                )
                 response.raise_for_status()
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 for chunk in response.iter_content(chunk_size=8192):
                     tmp_file.write(chunk)
                 tmp_file.close()
+                response.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
                 _, encoded = video_file.split(",", 1)
