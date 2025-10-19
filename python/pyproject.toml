@@ -16,6 +16,7 @@ classifiers = [
 
 dependencies = [
   "IPython",
+  "aiofiles",
   "aiohttp",
   "anthropic>=0.20.0",
   "blobfile==3.0.0",
@@ -28,6 +29,7 @@ dependencies = [
   "fastapi",
   "flashinfer_python==0.4.0",
   "hf_transfer",
+  "httpx",
   "huggingface_hub",
   "interegular",
   "llguidance>=0.7.11,<0.8.0",
