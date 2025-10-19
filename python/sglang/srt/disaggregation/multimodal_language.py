@@ -1,11 +1,15 @@
 """
-1. PreallocQueue:
+Life cycle of a request in the multimodal language server
 
-2. TransferQueue:
+1. Bootstrap Queue
+    a. Initialize a receiver for each request
+    b. Use the queue to store requests whose bootstrap (handshake and preallocation) has not finished
+    c. Poll receivers to check bootstrap state
+    d. Once bootstrap is complete, move request to Inflight Queue
 
-3. WaitingQueue:
-
-4. RunningBatch:
+2. Inflight Queue
+    a. Poll (non-blocking) the receiver of the request
+    b. Once the transfer has finished, move request to Waiting Queue
 """
 
 from __future__ import annotations
@@ -61,7 +65,7 @@ class MultimodalLanguageRequest:
     metadata_buffer_index: int = -1
 
 
-class MultimodalLanguagePreallocQueue:
+class MultimodalLanguageBootstrapQueue:
     def __init__(
         self,
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
@@ -156,10 +160,11 @@ class MultimodalLanguagePreallocQueue:
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-    def pop_preallocated(self):
+    def pop_bootstrapped(self):
+        """pop the reqs which has finished bootstrapping"""
         self._update_handshake_waiters()
 
-        preallocated_reqs = []
+        bootstrapped_reqs = []
         indices_to_remove = set()
 
         for i, language_req in enumerate(self.queue):
@@ -190,17 +195,17 @@ class MultimodalLanguagePreallocQueue:
             language_req.embedding_receiver.init(
                 embedding_index=language_req.metadata_buffer_index
             )
-            preallocated_reqs.append(language_req)
+            bootstrapped_reqs.append(language_req)
             indices_to_remove.add(i)
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
 
-        return preallocated_reqs
+        return bootstrapped_reqs
 
 
-class MultimodalLanguageTransferQueue:
+class MultimodalLanguageInflightQueue:
     def __init__(
         self,
         gloo_group: ProcessGroup,
@@ -245,7 +250,8 @@ class MultimodalLanguageTransferQueue:
         if self.scheduler.enable_metrics:
             self.scheduler.metrics_collector.increment_transfer_failed_reqs()
 
-    def pop_transferred(self):
+    def pop_done(self):
+        """Pop the requests which have finished transfer"""
         if not self.queue:
             return []
 
@@ -254,7 +260,7 @@ class MultimodalLanguageTransferQueue:
             self.gloo_group,
         )
 
-        transferred_reqs = []
+        done_reqs = []
         indices_to_remove = set()
         for i, (language_req, poll) in enumerate(zip(self.queue, polls)):
             if poll == KVPoll.Failed:
@@ -310,7 +316,7 @@ class MultimodalLanguageTransferQueue:
                 else:
                     self.req_to_metadata_buffer_idx_allocator.free(idx, fake=True)
 
-                transferred_reqs.append(language_req.req)
+                done_reqs.append(language_req.req)
                 indices_to_remove.add(i)
             elif poll in [
                 KVPoll.Bootstrapping,
@@ -328,7 +334,7 @@ class MultimodalLanguageTransferQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
-        return transferred_reqs
+        return done_reqs
 
 
 class SchedulerDisaggregationMultiModalLanguageMixin:
@@ -395,7 +401,8 @@ class SchedulerDisaggregationMultiModalLanguageMixin:
             self.last_batch = batch
 
     def process_multimodal_language_queue(self: Scheduler):
-        req_conns = self.disagg_language_prealloc_queue.pop_preallocated()
-        self.disagg_language_transfer_queue.extend(req_conns)
-        alloc_reqs = self.disagg_language_transfer_queue.pop_transferred()
-        self.waiting_queue.extend(alloc_reqs)
+        """Process multimodal language queues: bootstrap -> inflight -> waiting"""
+        bootstrapped_reqs = self.disagg_language_bootstrap_queue.pop_bootstrapped()
+        self.disagg_language_inflight_queue.extend(bootstrapped_reqs)
+        done_reqs = self.disagg_language_inflight_queue.pop_done()
+        self.waiting_queue.extend(done_reqs)

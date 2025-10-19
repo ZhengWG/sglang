@@ -49,13 +49,13 @@ from sglang.srt.disaggregation.decode_kvcache_offload_manager import (
     DecodeKVCacheOffloadManager,
 )
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
-from sglang.srt.disaggregation.multimodal_embedding import (
+from sglang.srt.disaggregation.encode import (
     MultimodalEmbeddingBootstrapQueue,
     SchedulerDisaggregationMultimodalEmbeddingMixin,
 )
 from sglang.srt.disaggregation.multimodal_language import (
-    MultimodalLanguagePreallocQueue,
-    MultimodalLanguageTransferQueue,
+    MultimodalLanguageBootstrapQueue,
+    MultimodalLanguageInflightQueue,
     SchedulerDisaggregationMultiModalLanguageMixin,
 )
 from sglang.srt.disaggregation.prefill import (
@@ -1024,14 +1024,14 @@ class Scheduler(
             self.disagg_metadata_buffers = MultimodalDataBuffers(
                 buffer_size, self.max_req_len, self.model_config.hidden_size
             )
-            self.disagg_language_transfer_queue = MultimodalLanguageTransferQueue(
+            self.disagg_language_inflight_queue = MultimodalLanguageInflightQueue(
                 gloo_group=self.attn_tp_cpu_group,
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
                 scheduler=self,
                 tree_cache=self.tree_cache,
             )
-            self.disagg_language_prealloc_queue = MultimodalLanguagePreallocQueue(
+            self.disagg_language_bootstrap_queue = MultimodalLanguageBootstrapQueue(
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
                 tp_rank=self.tp_rank,
@@ -1589,7 +1589,7 @@ class Scheduler(
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             self.disagg_embedding_bootstrap_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
-            self.disagg_language_prealloc_queue.add(req)
+            self.disagg_language_bootstrap_queue.add(req)
         else:
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
@@ -1639,7 +1639,7 @@ class Scheduler(
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             self.disagg_embedding_bootstrap_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
-            self.disagg_language_prealloc_queue.add(req)
+            self.disagg_language_bootstrap_queue.add(req)
         else:
             raise ValueError(f"Invalid {self.disaggregation_mode=}")
 
@@ -2755,7 +2755,7 @@ class Scheduler(
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
             load += sum(
                 len(req.req.origin_input_ids)
-                for req in self.disagg_language_prealloc_queue.queue
+                for req in self.disagg_language_bootstrap_queue.queue
             )
             num_waiting_reqs += len(self.disagg_prefill_bootstrap_queue.queue)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -2940,16 +2940,16 @@ class Scheduler(
                         decode_req.kv_receiver.abort()
 
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
-            # Abort requests that have not yet finished preallocation
-            for i, language_req in enumerate(self.disagg_language_prealloc_queue.queue):
-                logger.debug(f"Abort prealloc queue request. {language_req.req.rid=}")
+            # Abort requests that have not yet finished bootstrapping
+            for i, language_req in enumerate(self.disagg_language_bootstrap_queue.queue):
+                logger.debug(f"Abort bootstrap queue request. {language_req.req.rid=}")
                 if recv_req.abort_all or language_req.req.rid.startswith(recv_req.rid):
                     # TODO: keep naming consistent
                     if hasattr(language_req.embedding_receiver, "abort"):
                         language_req.embedding_receiver.abort()
 
             # Abort in-flight requests
-            for i, language_req in enumerate(self.disagg_language_transfer_queue.queue):
+            for i, language_req in enumerate(self.disagg_language_inflight_queue.queue):
                 logger.debug(f"Abort inflight queue request. {language_req.req.rid=}")
                 if recv_req.abort_all or language_req.req.rid.startswith(recv_req.rid):
                     if hasattr(language_req.embedding_receiver, "abort"):

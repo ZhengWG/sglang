@@ -274,16 +274,14 @@ def get_kv_class(
     if transfer_backend == TransferBackend.MOONCAKE:
         from sglang.srt.disaggregation.base import KVArgs
         from sglang.srt.disaggregation.mooncake import (
-            MooncakeKVBootstrapServer,
-            MooncakeKVManager,
-            MooncakeKVReceiver,
-            MooncakeKVSender,
-        )
-        from sglang.srt.disaggregation.mooncake.conn_multimodal import (
             MooncakeEmbeddingBootstrapServer,
             MooncakeEmbeddingManager,
             MooncakeEmbeddingReceiver,
             MooncakeEmbeddingSender,
+            MooncakeKVBootstrapServer,
+            MooncakeKVManager,
+            MooncakeKVReceiver,
+            MooncakeKVSender,
         )
 
         class_mapping = {
