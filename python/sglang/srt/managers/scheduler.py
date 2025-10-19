@@ -48,18 +48,16 @@ from sglang.srt.disaggregation.decode import (
 from sglang.srt.disaggregation.decode_kvcache_offload_manager import (
     DecodeKVCacheOffloadManager,
 )
-from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.encode import (
     MultimodalEmbeddingBootstrapQueue,
     SchedulerDisaggregationMultimodalEmbeddingMixin,
 )
-from sglang.srt.disaggregation.multimodal_language import (
+from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
+from sglang.srt.disaggregation.prefill import (
     MultimodalLanguageBootstrapQueue,
     MultimodalLanguageInflightQueue,
-    SchedulerDisaggregationMultiModalLanguageMixin,
-)
-from sglang.srt.disaggregation.prefill import (
     PrefillBootstrapQueue,
+    SchedulerDisaggregationMultiModalLanguageMixin,
     SchedulerDisaggregationPrefillMixin,
 )
 from sglang.srt.disaggregation.utils import (
@@ -2941,7 +2939,9 @@ class Scheduler(
 
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
             # Abort requests that have not yet finished bootstrapping
-            for i, language_req in enumerate(self.disagg_language_bootstrap_queue.queue):
+            for i, language_req in enumerate(
+                self.disagg_language_bootstrap_queue.queue
+            ):
                 logger.debug(f"Abort bootstrap queue request. {language_req.req.rid=}")
                 if recv_req.abort_all or language_req.req.rid.startswith(recv_req.rid):
                     # TODO: keep naming consistent
