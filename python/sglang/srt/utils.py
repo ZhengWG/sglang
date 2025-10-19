@@ -90,10 +90,50 @@ from typing_extensions import Literal
 
 from sglang.srt.metrics.func_timer import enable_func_timer
 
+# Optional async I/O libraries
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+try:
+    import aiofiles
+except ImportError:
+    aiofiles = None
+
 logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
+
+# Shared httpx async client for efficient connection pooling
+_httpx_async_client = None
+_httpx_client_lock = asyncio.Lock() if asyncio else None
+
+
+async def get_httpx_async_client():
+    """Get or create a shared httpx AsyncClient with connection pooling."""
+    global _httpx_async_client, _httpx_client_lock
+    
+    if httpx is None:
+        raise ImportError(
+            "httpx is not installed. Install with: pip install httpx"
+        )
+    
+    if _httpx_async_client is None:
+        async with _httpx_client_lock:
+            if _httpx_async_client is None:  # Double-check after acquiring lock
+                _httpx_async_client = httpx.AsyncClient(
+                    limits=httpx.Limits(
+                        max_keepalive_connections=50,
+                        max_connections=200,
+                    ),
+                    timeout=httpx.Timeout(60.0, connect=10.0),
+                    follow_redirects=True,
+                )
+                logger.info("Created httpx AsyncClient with connection pooling")
+    
+    return _httpx_async_client
 
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
@@ -762,6 +802,63 @@ def load_audio(
     return audio
 
 
+async def load_audio_async(
+    audio_file: str, sr: Optional[int] = None, mono: bool = True, executor=None
+) -> np.ndarray:
+    """Fully async version of load_audio using httpx for HTTP and aiofiles for local files."""
+    import soundfile as sf
+    from scipy.signal import resample
+
+    if sr is None:
+        sr = 16000
+
+    # Load audio data
+    if isinstance(audio_file, bytes):
+        audio, original_sr = sf.read(BytesIO(audio_file))
+    elif audio_file.startswith("data:"):
+        audio_data = audio_file.split(",")[1]
+        audio, original_sr = sf.read(
+            BytesIO(pybase64.b64decode(audio_data, validate=True))
+        )
+    elif audio_file.startswith("http://") or audio_file.startswith("https://"):
+        timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+        try:
+            # Async HTTP download with httpx
+            client = await get_httpx_async_client()
+            response = await client.get(audio_file, timeout=timeout)
+            response.raise_for_status()
+            content = response.content
+            audio_file_obj = BytesIO(content)
+            audio, original_sr = sf.read(audio_file_obj)
+        except Exception as e:
+            # Fallback to sync
+            logger.warning(f"httpx failed for audio, falling back to sync: {e}")
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(executor, load_audio, audio_file, sr, mono)
+    elif isinstance(audio_file, str):
+        # Local file - use aiofiles for async read
+        if aiofiles is not None:
+            async with aiofiles.open(audio_file, 'rb') as f:
+                content = await f.read()
+            audio, original_sr = sf.read(BytesIO(content))
+        else:
+            # Fallback to sync read
+            audio, original_sr = sf.read(audio_file)
+    else:
+        raise ValueError(f"Invalid audio format: {audio_file}")
+
+    # Resample audio if the original sample rate is different from the desired sample rate
+    if original_sr != sr:
+        num_samples = int(len(audio) * float(sr) / original_sr)
+        audio = resample(audio, num_samples)
+
+    # Convert to mono if requested and audio is stereo
+    if mono and len(audio.shape) > 1:
+        audio = np.mean(audio, axis=1)
+
+    return audio
+
+
 @dataclass
 class ImageData:
     url: str
@@ -796,6 +893,59 @@ def load_image(
         image = Image.open(BytesIO(pybase64.b64decode(image_file, validate=True)))
     elif isinstance(image_file, str):
         image = Image.open(BytesIO(pybase64.b64decode(image_file, validate=True)))
+    else:
+        raise ValueError(f"Invalid image: {image_file}")
+
+    return image, image_size
+
+
+async def load_image_async(
+    image_file: Union[Image.Image, str, ImageData, bytes],
+    executor=None,
+) -> tuple[Image.Image, tuple[int, int]]:
+    """Fully async version of load_image using httpx for HTTP and aiofiles for local files."""
+    if isinstance(image_file, ImageData):
+        image_file = image_file.url
+
+    image = image_size = None
+    if isinstance(image_file, Image.Image):
+        image = image_file
+        image_size = (image.width, image.height)
+    elif isinstance(image_file, bytes):
+        # bytes -> PIL is fast, do it directly
+        image = Image.open(BytesIO(image_file))
+    elif image_file.startswith("http://") or image_file.startswith("https://"):
+        # Async HTTP request with httpx
+        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
+        try:
+            client = await get_httpx_async_client()
+            response = await client.get(image_file, timeout=timeout)
+            response.raise_for_status()
+            content = response.content
+            image = Image.open(BytesIO(content))
+        except Exception as e:
+            # Fallback to sync if httpx fails
+            logger.warning(f"httpx failed, falling back to sync: {e}")
+            loop = asyncio.get_event_loop()
+            image, image_size = await loop.run_in_executor(executor, load_image, image_file)
+            return image, image_size
+    elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
+        # Async file read with aiofiles
+        if aiofiles is not None:
+            async with aiofiles.open(image_file, 'rb') as f:
+                content = await f.read()
+            image = Image.open(BytesIO(content))
+        else:
+            # Fallback to sync if aiofiles not available
+            image = Image.open(image_file)
+    elif image_file.startswith("data:"):
+        decoded_data = image_file.split(",")[1]
+        decoded_bytes = pybase64.b64decode(decoded_data, validate=True)
+        image = Image.open(BytesIO(decoded_bytes))
+    elif isinstance(image_file, str):
+        # Assume base64
+        decoded_bytes = pybase64.b64decode(image_file, validate=True)
+        image = Image.open(BytesIO(decoded_bytes))
     else:
         raise ValueError(f"Invalid image: {image_file}")
 
@@ -849,6 +999,69 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 for chunk in response.iter_content(chunk_size=8192):
                     tmp_file.write(chunk)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+            elif video_file.startswith("data:"):
+                _, encoded = video_file.split(",", 1)
+                video_bytes = pybase64.b64decode(encoded)
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(video_bytes)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+            elif os.path.isfile(video_file):
+                vr = VideoReader(video_file, ctx=ctx)
+            else:
+                video_bytes = pybase64.b64decode(video_file)
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(video_bytes)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+        else:
+            raise ValueError(f"Unsupported video input type: {type(video_file)}")
+
+        return vr
+
+    finally:
+        if tmp_file and os.path.exists(tmp_file.name):
+            os.unlink(tmp_file.name)
+
+
+async def load_video_async(video_file: Union[str, bytes], use_gpu: bool = True, executor=None):
+    """Fully async version of load_video using httpx for HTTP downloads."""
+    from decord import VideoReader, cpu, gpu
+
+    try:
+        from decord.bridge import decord_bridge
+        ctx = gpu(0)
+        _ = decord_bridge.get_ctx_device(ctx)
+    except Exception:
+        ctx = cpu(0)
+
+    tmp_file = None
+    vr = None
+    try:
+        if isinstance(video_file, bytes):
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tmp_file.write(video_file)
+            tmp_file.close()
+            vr = VideoReader(tmp_file.name, ctx=ctx)
+        elif isinstance(video_file, str):
+            if video_file.startswith(("http://", "https://")):
+                timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+                try:
+                    # Async HTTP download with httpx
+                    client = await get_httpx_async_client()
+                    response = await client.get(video_file, timeout=timeout)
+                    response.raise_for_status()
+                    content = response.content
+                except Exception as e:
+                    # Fallback to sync
+                    logger.warning(f"httpx failed for video, falling back to sync: {e}")
+                    loop = asyncio.get_event_loop()
+                    return await loop.run_in_executor(executor, load_video, video_file, use_gpu)
+                
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(content)
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
@@ -1879,7 +2092,7 @@ def direct_register_custom_op(
         if fake_impl is not None:
             my_lib._register_fake(op_name, fake_impl)
     except RuntimeError as error:
-        if "Tried to register an operator" in str(e) and "multiple times" in str(e):
+        if "Tried to register an operator" in str(error) and "multiple times" in str(error):
             # Silently ignore duplicate registration errors
             # This can happen in multi-engine scenarios
             pass
