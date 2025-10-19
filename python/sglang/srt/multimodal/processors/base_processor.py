@@ -14,7 +14,16 @@ from PIL import Image
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import is_npu, load_audio, load_image, load_video, logger
+from sglang.srt.utils import (
+    is_npu,
+    load_audio,
+    load_audio_async,
+    load_image,
+    load_image_async,
+    load_video,
+    load_video_async,
+    logger,
+)
 
 _is_npu = is_npu()
 
@@ -325,6 +334,36 @@ class BaseMultimodalProcessor(ABC):
         except Exception as e:
             raise RuntimeError(f"Error while loading data {data}: {e}")
 
+    @staticmethod
+    async def _load_single_item_async(
+        data,
+        modality: Modality,
+        frame_count_limit=None,
+        audio_sample_rate: Optional[int] = None,
+        discard_alpha_channel=True,
+        executor=None,
+    ):
+        """
+        Async version of _load_single_item for loading multimodal data.
+        
+        Runs sync load methods in thread pool executor.
+        """
+        if isinstance(data, dict):
+            return data
+        try:
+            if modality == Modality.IMAGE:
+                img, _ = await load_image_async(data, executor=executor)
+                if discard_alpha_channel and img.mode != "RGB":
+                    img = img.convert("RGB")
+                return img
+            elif modality == Modality.VIDEO:
+                return await load_video_async(data, use_gpu=True, executor=executor)
+            elif modality == Modality.AUDIO:
+                return await load_audio_async(data, sr=audio_sample_rate, mono=True, executor=executor)
+
+        except Exception as e:
+            raise RuntimeError(f"Error while loading data {data}: {e}")
+
     def submit_data_loading_tasks(
         self,
         text_parts: List[str],
@@ -337,9 +376,8 @@ class BaseMultimodalProcessor(ABC):
         Submit async tasks for loading multimodal data.
         
         Returns:
-            Tuple of (tasks, task_info) where tasks are asyncio tasks and task_info contains metadata
+            Tuple of (tasks, task_info) where tasks are coroutines and task_info contains metadata
         """
-        loop = asyncio.get_event_loop()
         tasks = []
         task_info = []
         
@@ -359,15 +397,14 @@ class BaseMultimodalProcessor(ABC):
 
                 frame_count_limit = None
                 
-                # Create async task using run_in_executor
-                task = loop.run_in_executor(
-                    self.io_executor,
-                    BaseMultimodalProcessor._load_single_item,
-                    data,
-                    modality,
-                    frame_count_limit,
-                    audio_sample_rate,
-                    discard_alpha_channel,
+                # Create async task with io_executor
+                task = BaseMultimodalProcessor._load_single_item_async(
+                    data=data,
+                    modality=modality,
+                    frame_count_limit=frame_count_limit,
+                    audio_sample_rate=audio_sample_rate,
+                    discard_alpha_channel=discard_alpha_channel,
+                    executor=self.io_executor,
                 )
                 tasks.append(task)
                 task_info.append((modality, data, frame_count_limit))
