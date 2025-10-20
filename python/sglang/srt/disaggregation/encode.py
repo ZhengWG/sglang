@@ -36,6 +36,7 @@ from sglang.srt.managers.schedule_batch import (
     ScheduleBatch,
     global_server_args_dict,
 )
+from sglang.srt.utils import get_int_env_var
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -304,13 +305,65 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         req: Req,
         last_chunk: bool = False,
     ):
-        assert last_chunk == True
-        if last_chunk:
-            self.disagg_metadata_buffers.set_buf(req)
-            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(req)
-        req.disagg_embedding_sender.send_embedding(
-            req.metadata_buffer_index, last_chunk, chunk_info
-        )
+        """
+        Send embedding data in two-phase transmission:
+        Phase 1: Send partial embeddings + complete aux_datas (contains actual length)
+        Phase 2: Send remaining embeddings after Language side reallocates
+        """
+        # Initialize transfer state for first transmission
+        if not hasattr(req, 'embedding_transfer_state'):
+            req.embedding_transfer_state = 'first'  # 'first', 'waiting_realloc', 'second', 'completed'
+            req.embedding_transferred_tokens = 0
+        
+        # Always set buffer data before any transmission
+        self.disagg_metadata_buffers.set_buf(req)
+        
+        if req.embedding_transfer_state == 'first':
+            # Phase 1: Send partial embeddings + aux_datas
+            allocated_tokens = get_int_env_var("SGLANG_INITIAL_EMBEDDING_TOKENS", 1024)
+            actual_tokens = len(req.fill_ids)
+            
+            if actual_tokens <= allocated_tokens:
+                # Data fits in first transmission, send all at once
+                chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(req)
+                req.disagg_embedding_sender.send_embedding(
+                    req.metadata_buffer_index,
+                    last_chunk=True,  # This is the only chunk needed
+                    chunk_info=chunk_info,
+                    is_first_chunk=True  # This is the first (and only) chunk
+                )
+                req.embedding_transfer_state = 'completed'
+            else:
+                # Data doesn't fit, send first chunk
+                chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info_first(
+                    req, allocated_tokens
+                )
+                req.disagg_embedding_sender.send_embedding(
+                    req.metadata_buffer_index,
+                    last_chunk=False,  # Not the last chunk, need second phase
+                    chunk_info=chunk_info,
+                    is_first_chunk=True  # This is the first chunk
+                )
+                req.embedding_transferred_tokens = allocated_tokens
+                req.embedding_transfer_state = 'waiting_realloc'
+                
+                # TODO: Wait for Language side to reallocate and notify
+                # For now, immediately proceed to second phase
+                # In production, this should wait for a notification from Language side
+                req.embedding_transfer_state = 'second'
+        
+        if req.embedding_transfer_state == 'second':
+            # Phase 2: Send remaining embeddings
+            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info_remaining(
+                req, req.embedding_transferred_tokens
+            )
+            req.disagg_embedding_sender.send_embedding(
+                req.metadata_buffer_index,
+                last_chunk=True,  # This is the final chunk
+                chunk_info=chunk_info,
+                is_first_chunk=False  # This is the second chunk
+            )
+            req.embedding_transfer_state = 'completed'
 
     def get_num_allocatable_reqs(self: Scheduler, running_bs: int):
         return global_server_args_dict["max_micro_batch_size"] - running_bs

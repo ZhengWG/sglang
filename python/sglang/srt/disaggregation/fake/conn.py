@@ -55,11 +55,11 @@ class FakeKVSender(BaseKVSender):
         logger.debug(f"FakeKVSender send with kv_indices: {kv_indices}")
 
     def send_embedding(
-        self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]]
+        self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]], is_first_chunk: bool = True
     ):
         self.has_sent = True
         logger.debug(
-            f"FakeKVSender send_embedding with embedding_index: {embedding_index}, last_chunk: {last_chunk}, chunk_info: {chunk_info}"
+            f"FakeKVSender send_embedding with embedding_index: {embedding_index}, last_chunk: {last_chunk}, chunk_info: {chunk_info}, is_first_chunk: {is_first_chunk}"
         )
 
     def failure_exception(self):

@@ -1248,6 +1248,7 @@ class TransferEmbeddingChunk:
     embedding_index: int
     is_last: bool
     chunk_info: List[Tuple[int, int]]
+    is_first_chunk: bool = True  # Flag to identify first transfer in two-phase transmission
 
 
 @dataclasses.dataclass
@@ -1403,6 +1404,11 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
         for i in range(len(self.data_args.aux_item_lens)):
             chunk_offset, chunk_size = chunk_info[i]
+            
+            # Skip chunks with size 0 (not transferred in this round)
+            if chunk_size == 0:
+                continue
+            
             embedding_item_len = self.data_args.aux_item_lens[i]
             embedding_addr = (
                 self.data_args.aux_data_ptrs[i]
@@ -1638,9 +1644,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
         embedding_index: int,
         is_last: bool,
         chunk_info: List[Tuple[int, int]],
+        is_first_chunk: bool = True,
     ):
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
-        assert is_last  # For embedding data, we only send once at the end
+        # Removed: assert is_last  # Now supports two-phase transmission
 
         if (
             bootstrap_room not in self.request_status
@@ -1668,6 +1675,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 embedding_index=embedding_index,
                 is_last=is_last,
                 chunk_info=chunk_info,
+                is_first_chunk=is_first_chunk,
             )
         )
 
@@ -1786,11 +1794,11 @@ class MooncakeEmbeddingSender(BaseKVSender):
         pass
 
     def send_embedding(
-        self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]]
+        self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]], is_first_chunk: bool = True
     ):
         """Send embedding data to language instances"""
         self.embedding_mgr.add_transfer_request(
-            self.bootstrap_room, embedding_index, last_chunk, chunk_info
+            self.bootstrap_room, embedding_index, last_chunk, chunk_info, is_first_chunk
         )
 
     def poll(self) -> KVPoll:

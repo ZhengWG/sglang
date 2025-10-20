@@ -429,6 +429,66 @@ class MultimodalDataBuffers:
             (0, self.aux_datas.shape[1] * self.aux_datas.itemsize),
         ]
 
+    def get_buf_chunk_info_first(self, req: Req, allocated_tokens: int):
+        """
+        Get chunk info for first transfer: partial embeddings + complete aux_datas.
+        
+        Args:
+            req: Request object containing fill_ids
+            allocated_tokens: Number of tokens allocated by Language side
+            
+        Returns:
+            List of (offset, size) tuples for each buffer:
+            - input_embeddings: only send allocated_tokens
+            - fill_ids: send actual length (small data)
+            - mrope_positions: send actual length (small data)
+            - aux_datas: send complete (contains embed_length info)
+        """
+        actual_tokens = len(req.fill_ids)
+        send_tokens = min(allocated_tokens, actual_tokens)
+        
+        return [
+            # input_embeddings: only send allocated_tokens size
+            (
+                0,
+                send_tokens * self.embedding_dim * self.input_embeddings.itemsize,
+            ),
+            # fill_ids: send actual length (small data, send all)
+            (0, actual_tokens * self.fill_ids.itemsize),
+            # mrope_positions: send actual length (small data, send all)
+            (0, actual_tokens * 3 * self.mrope_positions.itemsize),
+            # aux_datas: send complete (contains embed_length for reallocation)
+            (0, self.aux_datas.shape[1] * self.aux_datas.itemsize),
+        ]
+
+    def get_buf_chunk_info_remaining(self, req: Req, transferred_tokens: int):
+        """
+        Get chunk info for second transfer: remaining embeddings only.
+        
+        Args:
+            req: Request object containing fill_ids
+            transferred_tokens: Number of tokens already transferred in first round
+            
+        Returns:
+            List of (offset, size) tuples for each buffer:
+            - input_embeddings: send remaining part
+            - Other buffers: size 0 (already sent in first transfer)
+        """
+        actual_tokens = len(req.fill_ids)
+        remaining_tokens = actual_tokens - transferred_tokens
+        
+        return [
+            # input_embeddings: send remaining part
+            (
+                transferred_tokens * self.embedding_dim * self.input_embeddings.itemsize,
+                remaining_tokens * self.embedding_dim * self.input_embeddings.itemsize,
+            ),
+            # Other buffers already sent in first transfer, set size to 0
+            (0, 0),
+            (0, 0),
+            (0, 0),
+        ]
+
     def get_buf_infos(self):
         ptrs = [
             self.input_embeddings.data_ptr(),
