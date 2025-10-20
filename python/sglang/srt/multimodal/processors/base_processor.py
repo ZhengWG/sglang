@@ -1,6 +1,8 @@
+import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
+import functools
 import multiprocessing as mp
 import os
 import re
@@ -163,7 +165,7 @@ class BaseMultimodalProcessor(ABC):
         self.NUM_TOKEN_PER_FRAME = 330
 
         self.io_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=int(os.environ.get("SGLANG_IO_WORKERS", 4))
+            max_workers=int(os.environ.get("SGLANG_IO_WORKERS", 32))
         )
         self.cpu_executor = concurrent.futures.ProcessPoolExecutor(
             mp_context=mp.get_context("fork"),
@@ -522,6 +524,34 @@ class BaseMultimodalProcessor(ABC):
             videos=videos,
             input_text="".join(new_text_parts),
         )
+
+    async def load_mm_data_async(
+        self,
+        prompt: str,
+        multimodal_tokens: MultimodalSpecialTokens,
+        image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
+        audio_data: Optional[list] = None,
+        return_text: Optional[bool] = True,
+        discard_alpha_channel: bool = True,
+        audio_sample_rate: Optional[int] = None,
+    ) -> BaseMultiModalProcessorOutput:
+        """
+        Async wrapper to offload sync load_mm_data into the IO executor, so the
+        event loop thread is not blocked while waiting for network/file IO.
+        """
+        func = functools.partial(
+            self.load_mm_data,
+            prompt=prompt,
+            multimodal_tokens=multimodal_tokens,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            return_text=return_text,
+            discard_alpha_channel=discard_alpha_channel,
+            audio_sample_rate=audio_sample_rate,
+        )
+        return await asyncio.to_thread(func)
 
     @staticmethod
     def get_mm_items_offset(
