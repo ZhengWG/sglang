@@ -1,82 +1,82 @@
-# Mini Load Balancer - 文档索引
+# Mini Load Balancer - Documentation Index
 
-## 📖 文档导航
+## 📖 Documentation Navigation
 
-### 🚀 快速开始
-如果您是第一次使用 Mini Load Balancer，从这里开始：
-- [**快速开始指南 (中文)**](examples/QUICK_START_ZH.md) - 最快上手的方式
+### 🚀 Quick Start
+If you're using Mini Load Balancer for the first time, start here:
+- [**Quick Start Guide**](examples/QUICK_START.md) - Fastest way to get started
 
-### 📚 完整文档
-需要深入了解所有功能和配置：
-- [**完整使用文档 (英文)**](examples/mini_lb_README.md) - 详细的功能说明和 API 参考
+### 📚 Complete Documentation
+For in-depth understanding of all features and configuration:
+- [**Complete Usage Documentation**](examples/mini_lb_README.md) - Detailed feature descriptions and API reference
 
-### 📝 实现说明
-了解实现细节和设计决策：
-- [**实现总结**](examples/MINI_LB_IMPLEMENTATION_SUMMARY.md) - 实现概述和功能对比
-- [**功能总结**](../MINI_LB_FEATURE_SUMMARY.md) - 完整的功能清单和代码统计
+### 📝 Implementation Details
+Learn about implementation details and design decisions:
+- [**Implementation Summary**](examples/MINI_LB_IMPLEMENTATION_SUMMARY.md) - Implementation overview and feature comparison
+- [**Feature Summary**](../MINI_LB_FEATURE_SUMMARY.md) - Complete feature list and code statistics
 
-## 💻 代码示例
+## 💻 Code Examples
 
-### Rust 示例
-1. [**基础示例**](examples/mini_lb_basic.rs) - 简单配置和启动
-2. [**自定义配置示例**](examples/mini_lb_custom_config.rs) - 高级配置
-3. [**客户端示例**](examples/mini_lb_client.rs) - 如何调用 API
+### Rust Examples
+1. [**Basic Example**](examples/mini_lb_basic.rs) - Simple configuration and startup
+2. [**Custom Config Example**](examples/mini_lb_custom_config.rs) - Advanced configuration
+3. [**Client Example**](examples/mini_lb_client.rs) - How to call the API
 
-### Python 示例
-1. [**Python 客户端**](examples/mini_lb_python_example.py) - 从 Python 使用 Mini LB
+### Python Examples
+1. [**Python Client**](examples/mini_lb_python_example.py) - Using Mini LB from Python
 
-## 🧪 测试
-- [**单元测试**](tests/mini_lb_test.rs) - 测试用例和验证
+## 🧪 Tests
+- [**Unit Tests**](tests/mini_lb_test.rs) - Test cases and validation
 
-## 📂 源代码
+## 📂 Source Code
 ```
 sgl-router/src/mini_lb/
-├── mod.rs      # 模块定义
-├── types.rs    # 数据类型
-└── router.rs   # 核心实现
+├── mod.rs      # Module definition
+├── types.rs    # Data types
+└── router.rs   # Core implementation
 ```
 
-## 🎯 使用场景
+## 🎯 Use Cases
 
-| 场景 | 推荐文档 |
-|-----|---------|
-| 我想快速试用 | [快速开始指南](examples/QUICK_START_ZH.md) |
-| 我需要配置多个服务器 | [自定义配置示例](examples/mini_lb_custom_config.rs) |
-| 我想了解所有 API | [完整使用文档](examples/mini_lb_README.md) |
-| 我想从 Python 使用 | [Python 客户端示例](examples/mini_lb_python_example.py) |
-| 我想了解实现细节 | [实现总结](examples/MINI_LB_IMPLEMENTATION_SUMMARY.md) |
-| 我想查看所有功能 | [功能总结](../MINI_LB_FEATURE_SUMMARY.md) |
+| Scenario | Recommended Documentation |
+|----------|--------------------------|
+| I want to try it quickly | [Quick Start Guide](examples/QUICK_START.md) |
+| I need to configure multiple servers | [Custom Config Example](examples/mini_lb_custom_config.rs) |
+| I want to understand all APIs | [Complete Documentation](examples/mini_lb_README.md) |
+| I want to use from Python | [Python Client Example](examples/mini_lb_python_example.py) |
+| I want implementation details | [Implementation Summary](examples/MINI_LB_IMPLEMENTATION_SUMMARY.md) |
+| I want to see all features | [Feature Summary](../MINI_LB_FEATURE_SUMMARY.md) |
 
-## 🛠️ 快速命令
+## 🛠️ Quick Commands
 
 ```bash
-# 运行基础示例
+# Run basic example
 cargo run --example mini_lb_basic
 
-# 运行客户端测试
+# Run client test
 cargo run --example mini_lb_client
 
-# 运行 Python 测试
+# Run Python test
 python examples/mini_lb_python_example.py
 
-# 运行单元测试
+# Run unit tests
 cargo test --test mini_lb_test
 ```
 
-## 🔗 相关链接
+## 🔗 Related Links
 
-- [SGLang 官方文档](https://sglang.readthedocs.io/)
-- [Prefill-Decode 分离](https://sglang.readthedocs.io/en/latest/advanced_features/disaggregation.html)
-- [完整 Router 文档](../README.md)
+- [SGLang Official Documentation](https://sglang.readthedocs.io/)
+- [Prefill-Decode Disaggregation](https://sglang.readthedocs.io/en/latest/advanced_features/disaggregation.html)
+- [Full Router Documentation](../README.md)
 
-## 📞 获取帮助
+## 📞 Getting Help
 
-遇到问题？
-1. 查看[快速开始指南](examples/QUICK_START_ZH.md)的常见问题部分
-2. 阅读[完整文档](examples/mini_lb_README.md)的故障排除章节
-3. 查看示例代码
-4. 提交 GitHub Issue
+Having issues?
+1. Check the FAQ section in the [Quick Start Guide](examples/QUICK_START.md)
+2. Read the Troubleshooting chapter in the [Complete Documentation](examples/mini_lb_README.md)
+3. Review the example code
+4. Submit a GitHub Issue
 
 ---
 
-**提示**: 所有文档都包含详细的代码示例和配置说明，建议根据您的需求选择合适的文档阅读。
+**Tip**: All documentation includes detailed code examples and configuration instructions. Choose the appropriate documentation based on your needs.
