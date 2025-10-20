@@ -1248,6 +1248,31 @@ class TransferEmbeddingChunk:
     embedding_index: int
     is_last: bool
     chunk_info: List[Tuple[int, int]]
+    transmission_id: int = 0  # Track which round of transmission this is
+
+
+@dataclasses.dataclass
+class EmbeddingTransmissionState:
+    """Track the state of a multi-round embedding transmission"""
+    room: int
+    embedding_index: int
+    total_size_per_buffer: List[int]  # Total size for each buffer
+    transmitted_size_per_buffer: List[int]  # How much has been transmitted for each buffer
+    transmission_count: int = 0  # Number of transmission rounds completed
+    
+    def is_complete(self) -> bool:
+        """Check if all data has been transmitted"""
+        return all(
+            transmitted >= total 
+            for transmitted, total in zip(self.transmitted_size_per_buffer, self.total_size_per_buffer)
+        )
+    
+    def get_remaining_chunks(self) -> List[Tuple[int, int]]:
+        """Get chunk info for remaining data"""
+        return [
+            (transmitted, total - transmitted)
+            for transmitted, total in zip(self.transmitted_size_per_buffer, self.total_size_per_buffer)
+        ]
 
 
 @dataclasses.dataclass
@@ -1258,9 +1283,13 @@ class TransferEmbeddingInfo:
     mooncake_session_id: str
     dst_embedding_index: int
     required_dst_info_num: int
+    transmission_id: int = 0  # Track current transmission round
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
+        transmission_id = 0
+        if len(msg) > 6:
+            transmission_id = int(msg[6].decode("ascii")) if msg[6] else 0
         return cls(
             room=int(msg[0].decode("ascii")),
             endpoint=msg[1].decode("ascii"),
@@ -1268,6 +1297,35 @@ class TransferEmbeddingInfo:
             mooncake_session_id=msg[3].decode("ascii"),
             dst_embedding_index=int(msg[4].decode("ascii")),
             required_dst_info_num=int(msg[5].decode("ascii")),
+            transmission_id=transmission_id,
+        )
+
+
+@dataclasses.dataclass
+class RequestMoreCacheInfo:
+    """Request from Language side to Embedding side for more cache allocation"""
+    room: int
+    endpoint: str
+    dst_port: int
+    mooncake_session_id: str
+    dst_embedding_index: int
+    new_chunk_info: List[Tuple[int, int]]  # Updated chunk allocation info
+    transmission_id: int  # Which transmission round this is for
+    
+    @classmethod
+    def from_zmq(cls, msg: List[bytes]):
+        import json
+        chunk_info_json = msg[5].decode("ascii")
+        new_chunk_info = json.loads(chunk_info_json) if chunk_info_json else []
+        
+        return cls(
+            room=int(msg[0].decode("ascii")),
+            endpoint=msg[1].decode("ascii"),
+            dst_port=int(msg[2].decode("ascii")),
+            mooncake_session_id=msg[3].decode("ascii"),
+            dst_embedding_index=int(msg[4].decode("ascii")),
+            new_chunk_info=[(offset, size) for offset, size in new_chunk_info],
+            transmission_id=int(msg[6].decode("ascii")),
         )
 
 
@@ -1291,6 +1349,10 @@ class EmbeddingArgsRegisterInfo:
 
 
 class MooncakeEmbeddingManager(BaseKVManager):
+    # Message headers for different types of communication
+    REQUEST_MORE_CACHE_HEADER = b"REQUEST_MORE_CACHE"
+    EMBEDDING_DATA_HEADER = b"EMBEDDING_DATA"
+    
     def __init__(
         self,
         args: KVArgs,
@@ -1317,6 +1379,9 @@ class MooncakeEmbeddingManager(BaseKVManager):
         if self.disaggregation_mode == DisaggregationMode.ENCODE:
             self.transfer_infos: Dict[int, Dict[str, TransferEmbeddingInfo]] = {}
             self.language_args_table: Dict[str, EmbeddingArgsRegisterInfo] = {}
+            # Track transmission state for multi-round transfers
+            self.transmission_states: Dict[int, EmbeddingTransmissionState] = {}
+            self.transmission_state_lock = threading.Lock()
             self.start_embedding_thread()
             self._register_to_bootstrap()
             self.session_failures = defaultdict(int)
@@ -1357,6 +1422,9 @@ class MooncakeEmbeddingManager(BaseKVManager):
             self.session_pool_lock = threading.Lock()
             self.addr_to_rooms_tracker = defaultdict(set)
             self.connection_lock = threading.Lock()
+            # Track incomplete transmissions that need more cache
+            self.pending_cache_requests: Dict[int, RequestMoreCacheInfo] = {}
+            self.pending_cache_lock = threading.Lock()
             # Heartbeat interval should be at least 2 seconds
             self.heartbeat_interval = max(
                 float(os.getenv("SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL", 5.0)), 2.0
@@ -1398,11 +1466,19 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_embedding_index: int,
         chunk_info: List[Tuple[int, int]],
     ):
-
+        """
+        Send embedding data according to chunk_info.
+        Each tuple in chunk_info is (offset, size) for the corresponding buffer.
+        """
         status_list = []
 
         for i in range(len(self.data_args.aux_item_lens)):
             chunk_offset, chunk_size = chunk_info[i]
+            
+            # Skip if chunk_size is 0 (nothing to send for this buffer)
+            if chunk_size == 0:
+                continue
+                
             embedding_item_len = self.data_args.aux_item_lens[i]
             embedding_addr = (
                 self.data_args.aux_data_ptrs[i]
@@ -1424,6 +1500,72 @@ class MooncakeEmbeddingManager(BaseKVManager):
             status_list.append(status)
 
         return 0 if sum(status_list) == 0 else 1
+    
+    def send_request_more_cache_to_embedding(
+        self,
+        remote: str,
+        dst_port: int,
+        room: int,
+        mooncake_session_id: str,
+        dst_embedding_index: int,
+        new_chunk_info: List[Tuple[int, int]],
+        transmission_id: int,
+    ):
+        """Language side sends request to Embedding side for more cache allocation"""
+        import json
+        
+        if ":" in remote:
+            remote = remote.split(":")[0]
+        
+        chunk_info_json = json.dumps(new_chunk_info)
+        
+        self._connect("tcp://" + remote + ":" + str(dst_port)).send_multipart(
+            [
+                MooncakeEmbeddingManager.REQUEST_MORE_CACHE_HEADER,
+                str(room).encode("ascii"),
+                get_local_ip_by_remote().encode("ascii"),
+                str(self.rank_port).encode("ascii"),
+                mooncake_session_id.encode("ascii"),
+                str(dst_embedding_index).encode("ascii"),
+                chunk_info_json.encode("ascii"),
+                str(transmission_id).encode("ascii"),
+            ]
+        )
+        logger.debug(
+            f"Sent REQUEST_MORE_CACHE for room {room}, transmission_id {transmission_id}"
+        )
+    
+    def _handle_request_more_cache(self, msg: List[bytes]):
+        """Embedding side handles request for more cache from Language side"""
+        request_info = RequestMoreCacheInfo.from_zmq(msg[1:])
+        
+        logger.debug(
+            f"Received REQUEST_MORE_CACHE for room {request_info.room}, "
+            f"transmission_id {request_info.transmission_id}"
+        )
+        
+        # Update the transfer info with new chunk allocation
+        if request_info.room in self.transfer_infos:
+            for session_id, transfer_info in self.transfer_infos[request_info.room].items():
+                if session_id == request_info.mooncake_session_id:
+                    # Update transmission_id to indicate this is a continuation
+                    transfer_info.transmission_id = request_info.transmission_id
+                    
+                    # Add the continuation transfer to queue
+                    with self.transmission_state_lock:
+                        if request_info.room in self.transmission_states:
+                            state = self.transmission_states[request_info.room]
+                            state.transmission_count += 1
+                            
+                            # Schedule the next chunk transmission
+                            self.add_transfer_request(
+                                request_info.room,
+                                state.embedding_index,
+                                is_last=state.is_complete(),  # Check if this will be the last transmission
+                                chunk_info=request_info.new_chunk_info,
+                                transmission_id=request_info.transmission_id,
+                            )
+                    break
 
     def sync_status_to_language_endpoint(
         self, remote: str, dst_port: int, room: int, status: int
@@ -1452,6 +1594,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 dst_ranks_infos = []
 
                 for req in reqs_to_be_processed:
+                    # Skip if this transfer info is for a different transmission round
+                    if req.transmission_id != embedding_chunk.transmission_id:
+                        continue
+                    
                     # Early exit if the request has failed
                     with self.session_lock:
                         if req.mooncake_session_id in self.failed_sessions:
@@ -1477,6 +1623,14 @@ class MooncakeEmbeddingManager(BaseKVManager):
                         req.dst_embedding_index,
                         embedding_chunk.chunk_info,
                     )
+                    
+                    # Update transmission state after successful send
+                    if ret == 0 and embedding_chunk.room in self.transmission_states:
+                        with self.transmission_state_lock:
+                            state = self.transmission_states[embedding_chunk.room]
+                            for i, (offset, size) in enumerate(embedding_chunk.chunk_info):
+                                state.transmitted_size_per_buffer[i] += size
+                    
                     if ret != 0:
                         with self.session_lock:
                             self.session_failures[req.mooncake_session_id] += 1
@@ -1504,7 +1658,19 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
                     # Only sync status when all the dst ranks have received the embedding data
                     if len(polls) == req.required_dst_info_num:
-                        status = KVPoll.Success if all(polls) else KVPoll.Failed
+                        # Check if transmission is complete
+                        is_transmission_complete = True
+                        if embedding_chunk.room in self.transmission_states:
+                            with self.transmission_state_lock:
+                                state = self.transmission_states[embedding_chunk.room]
+                                is_transmission_complete = state.is_complete()
+                        
+                        if is_transmission_complete:
+                            status = KVPoll.Success if all(polls) else KVPoll.Failed
+                        else:
+                            # Partial transmission completed, but not final
+                            status = KVPoll.Transferring
+                        
                         self.update_status(req.room, status)
                         for endpoint, dst_port, room in dst_ranks_infos:
                             self.sync_status_to_language_endpoint(
@@ -1532,6 +1698,12 @@ class MooncakeEmbeddingManager(BaseKVManager):
             # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
             while True:
                 waiting_req_bytes = self.server_socket.recv_multipart()
+                
+                # Handle REQUEST_MORE_CACHE messages
+                if waiting_req_bytes[0] == MooncakeEmbeddingManager.REQUEST_MORE_CACHE_HEADER:
+                    self._handle_request_more_cache(waiting_req_bytes)
+                    continue
+                
                 room = waiting_req_bytes[0].decode("ascii")
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
@@ -1565,14 +1737,22 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
         def language_thread():
             while True:
-                (bootstrap_room, status) = self.server_socket.recv_multipart()
-                status = int(status.decode("ascii"))
-                bootstrap_room = int(bootstrap_room.decode("ascii"))
+                msg = self.server_socket.recv_multipart()
+                bootstrap_room = int(msg[0].decode("ascii"))
+                status = int(msg[1].decode("ascii"))
+                
                 if status == KVPoll.Failed:
                     self.record_failure(
                         bootstrap_room,
                         f"Failed to get embedding data from embedding instance, it might be dead",
                     )
+                elif status == KVPoll.Transferring:
+                    # Partial transmission completed, waiting for more cache allocation
+                    logger.debug(
+                        f"Partial transmission completed for room {bootstrap_room}, "
+                        f"status: {status}"
+                    )
+                
                 self.update_status(bootstrap_room, status)
 
         def heartbeat_checker():
@@ -1638,15 +1818,26 @@ class MooncakeEmbeddingManager(BaseKVManager):
         embedding_index: int,
         is_last: bool,
         chunk_info: List[Tuple[int, int]],
+        transmission_id: int = 0,
+        total_sizes: Optional[List[int]] = None,
     ):
+        """
+        Add a transfer request to the queue.
+        
+        Args:
+            bootstrap_room: Room ID for this request
+            embedding_index: Index of the embedding data
+            is_last: Whether this is the last chunk (deprecated for multi-round transmission)
+            chunk_info: List of (offset, size) tuples for each buffer
+            transmission_id: ID to track multi-round transmissions
+            total_sizes: Total sizes for each buffer (only needed for first transmission)
+        """
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
-        assert is_last  # For embedding data, we only send once at the end
 
         if (
             bootstrap_room not in self.request_status
             or self.check_status(bootstrap_room) == KVPoll.Failed
         ):
-
             return
 
         if bootstrap_room not in self.transfer_infos:
@@ -1654,6 +1845,17 @@ class MooncakeEmbeddingManager(BaseKVManager):
             # and it has already been marked as success, so there is no need to
             # add further chunks into the transfer queue.
             return
+
+        # Initialize transmission state on first transmission
+        if transmission_id == 0 and total_sizes is not None:
+            with self.transmission_state_lock:
+                self.transmission_states[bootstrap_room] = EmbeddingTransmissionState(
+                    room=bootstrap_room,
+                    embedding_index=embedding_index,
+                    total_size_per_buffer=total_sizes,
+                    transmitted_size_per_buffer=[0] * len(total_sizes),
+                    transmission_count=0,
+                )
 
         # NOTE(shangming): sharding according to the dst_infos to make sure
         # requests with the same dst_sessions will be added into the same
@@ -1668,6 +1870,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 embedding_index=embedding_index,
                 is_last=is_last,
                 chunk_info=chunk_info,
+                transmission_id=transmission_id,
             )
         )
 
@@ -1771,6 +1974,7 @@ class MooncakeEmbeddingSender(BaseKVSender):
         self.init_time = None
         self.dest_tp_ranks = dest_tp_ranks
         self.pp_rank = pp_rank
+        self.current_transmission_id = 0
 
     def init(self, embedding_index: Optional[int] = None):
         # For embedding data, we don't need num_kv_indices, but we keep the interface consistent
@@ -1786,11 +1990,60 @@ class MooncakeEmbeddingSender(BaseKVSender):
         pass
 
     def send_embedding(
-        self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]]
+        self, 
+        embedding_index: int, 
+        last_chunk: bool, 
+        chunk_info: List[Tuple[int, int]],
+        total_sizes: Optional[List[int]] = None,
     ):
-        """Send embedding data to language instances"""
+        """
+        Send embedding data to language instances.
+        
+        Args:
+            embedding_index: Index of the embedding data
+            last_chunk: Whether this is expected to be the last chunk (may not be if allocation is insufficient)
+            chunk_info: List of (offset, size) tuples for each buffer
+            total_sizes: Total sizes for each buffer (only needed for first transmission)
+        """
         self.embedding_mgr.add_transfer_request(
-            self.bootstrap_room, embedding_index, last_chunk, chunk_info
+            self.bootstrap_room, 
+            embedding_index, 
+            last_chunk, 
+            chunk_info,
+            transmission_id=self.current_transmission_id,
+            total_sizes=total_sizes,
+        )
+    
+    def continue_transmission(self, chunk_info: List[Tuple[int, int]]):
+        """
+        Continue transmission with new chunk allocation from Language side.
+        Called after receiving notification that more cache has been allocated.
+        """
+        self.current_transmission_id += 1
+        
+        # Check if this will complete the transmission
+        is_last = False
+        if self.bootstrap_room in self.embedding_mgr.transmission_states:
+            with self.embedding_mgr.transmission_state_lock:
+                state = self.embedding_mgr.transmission_states[self.bootstrap_room]
+                # Calculate if the new chunks will complete the transmission
+                remaining = state.get_remaining_chunks()
+                is_last = all(
+                    chunk_info[i][1] >= remaining[i][1] 
+                    for i in range(len(chunk_info))
+                )
+        
+        self.embedding_mgr.add_transfer_request(
+            self.bootstrap_room,
+            self.embedding_index,
+            is_last,
+            chunk_info,
+            transmission_id=self.current_transmission_id,
+        )
+        
+        logger.debug(
+            f"Continuing transmission for room {self.bootstrap_room}, "
+            f"transmission_id {self.current_transmission_id}, is_last={is_last}"
         )
 
     def poll(self) -> KVPoll:
@@ -1855,6 +2108,8 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
         self.embedding_mgr.update_status(self.bootstrap_room, KVPoll.Bootstrapping)
         self.conclude_state = None
         self.data_parallel_rank = prefill_dp_rank
+        self.current_transmission_id = 0
+        self.embedding_index = None
 
         if self.bootstrap_addr not in self.embedding_mgr.embedding_dp_size_table:
             self.embedding_tp_size, self.embedding_dp_size = (
@@ -2010,6 +2265,7 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
             return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
 
     def init(self, embedding_index: Optional[int] = None):
+        self.embedding_index = embedding_index
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (
                 f"{bootstrap_info['rank_ip']}:{bootstrap_info['rank_port']}"
@@ -2025,14 +2281,52 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                         self.session_id.encode("ascii"),
                         str(embedding_index).encode("ascii"),
                         str(self.required_dst_info_num).encode("ascii"),
+                        str(self.current_transmission_id).encode("ascii"),
                     ]
                 )
+    
+    def request_more_cache(self, new_chunk_info: List[Tuple[int, int]]):
+        """
+        Request more cache allocation from Embedding side.
+        Called by Language side when allocated block is smaller than needed.
+        
+        Args:
+            new_chunk_info: Updated allocation info with (offset, size) for each buffer
+        """
+        self.current_transmission_id += 1
+        
+        for bootstrap_info in self.bootstrap_infos:
+            embedding_server_url = (
+                f"{bootstrap_info['rank_ip']}:{bootstrap_info['rank_port']}"
+            )
+            
+            # Send request to Embedding side
+            self.embedding_mgr.send_request_more_cache_to_embedding(
+                remote=bootstrap_info['rank_ip'],
+                dst_port=bootstrap_info['rank_port'],
+                room=self.bootstrap_room,
+                mooncake_session_id=self.session_id,
+                dst_embedding_index=self.embedding_index,
+                new_chunk_info=new_chunk_info,
+                transmission_id=self.current_transmission_id,
+            )
+        
+        # Reset status to wait for the next transmission
+        self.embedding_mgr.update_status(self.bootstrap_room, KVPoll.Transferring)
+        
+        logger.debug(
+            f"Requested more cache for room {self.bootstrap_room}, "
+            f"transmission_id {self.current_transmission_id}"
+        )
 
     def poll(self) -> KVPoll:
         if self.conclude_state is None:
             status = self.embedding_mgr.check_status(self.bootstrap_room)
             if status in (KVPoll.Success, KVPoll.Failed):
                 self.conclude_state = status
+            elif status == KVPoll.Transferring:
+                # Partial transmission in progress, not final state yet
+                pass
 
             return status
         else:
