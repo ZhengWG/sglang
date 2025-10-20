@@ -1,15 +1,15 @@
-# Mini Load Balancer 快速开始指南
+# Mini Load Balancer Quick Start Guide
 
-## 概述
+## Overview
 
-Mini Load Balancer (Mini LB) 是一个轻量级的 Rust 实现的负载均衡器，专门为 SGLang 的 Prefill-Decode 分离架构设计。
+Mini Load Balancer (Mini LB) is a lightweight Rust-based load balancer specifically designed for SGLang's Prefill-Decode disaggregation architecture.
 
-## 快速开始
+## Quick Start
 
-### 1. 启动 Prefill 服务器
+### 1. Start Prefill Servers
 
 ```bash
-# 启动第一个 Prefill 服务器
+# Start the first Prefill server
 python -m sglang.launch_server \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --port 30000 \
@@ -17,7 +17,7 @@ python -m sglang.launch_server \
   --disagg-prefill-only \
   --bootstrap-port 30001
 
-# （可选）启动第二个 Prefill 服务器
+# (Optional) Start the second Prefill server
 python -m sglang.launch_server \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --port 30002 \
@@ -26,17 +26,17 @@ python -m sglang.launch_server \
   --bootstrap-port 30003
 ```
 
-### 2. 启动 Decode 服务器
+### 2. Start Decode Servers
 
 ```bash
-# 启动第一个 Decode 服务器
+# Start the first Decode server
 python -m sglang.launch_server \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --port 31000 \
   --host 0.0.0.0 \
   --disagg-decode-only
 
-# （可选）启动第二个 Decode 服务器
+# (Optional) Start the second Decode server
 python -m sglang.launch_server \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --port 31001 \
@@ -44,26 +44,26 @@ python -m sglang.launch_server \
   --disagg-decode-only
 ```
 
-### 3. 启动 Mini Load Balancer
+### 3. Start Mini Load Balancer
 
 ```bash
-# 方式 1: 运行基础示例
+# Method 1: Run basic example
 cd sgl-router
 cargo run --example mini_lb_basic
 
-# 方式 2: 运行自定义配置示例
+# Method 2: Run custom config example
 cargo run --example mini_lb_custom_config
 ```
 
-### 4. 发送测试请求
+### 4. Send Test Requests
 
-#### 使用 cURL
+#### Using cURL
 
 ```bash
-# 健康检查
+# Health check
 curl http://localhost:8080/health
 
-# 聊天补全
+# Chat completion
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -75,7 +75,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "max_tokens": 100
   }'
 
-# 流式聊天补全
+# Streaming chat completion
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -87,7 +87,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "max_tokens": 50
   }'
 
-# 文本生成
+# Text generation
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
   -d '{
@@ -99,24 +99,24 @@ curl -X POST http://localhost:8080/generate \
   }'
 ```
 
-#### 使用 Python
+#### Using Python
 
 ```bash
-# 运行 Python 测试客户端
+# Run Python test client
 cd sgl-router/examples
 python mini_lb_python_example.py
 ```
 
-#### 使用 Rust 客户端
+#### Using Rust Client
 
 ```bash
 cd sgl-router
 cargo run --example mini_lb_client
 ```
 
-## 配置说明
+## Configuration Guide
 
-### 基础配置
+### Basic Configuration
 
 ```rust
 let config = MiniLbConfig::new(
