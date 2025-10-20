@@ -55,6 +55,7 @@ class TransferEmbeddingChunk:
     embedding_index: int
     is_last: bool
     chunk_info: List[Tuple[int, int]]
+    sent_tokens: int = 0  # Number of tokens already sent
 
 
 @dataclasses.dataclass
@@ -65,6 +66,7 @@ class TransferEmbeddingInfo:
     mooncake_session_id: str
     dst_embedding_index: int
     required_dst_info_num: int
+    sent_tokens: int = 0  # Number of tokens already sent (0 = first transfer, >0 = continuation)
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -75,6 +77,7 @@ class TransferEmbeddingInfo:
             mooncake_session_id=msg[3].decode("ascii"),
             dst_embedding_index=int(msg[4].decode("ascii")),
             required_dst_info_num=int(msg[5].decode("ascii")),
+            sent_tokens=int(msg[6].decode("ascii")) if len(msg) > 6 else 0,  # Backward compatible
         )
 
 
@@ -204,6 +207,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_embedding_ptrs: list[int],
         dst_embedding_index: int,
         chunk_info: List[Tuple[int, int]],
+        sent_tokens: int = 0,  # Number of tokens already sent (for continuation)
     ):
 
         status_list = []
@@ -283,6 +287,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                         ].dst_embedding_ptrs,
                         req.dst_embedding_index,
                         embedding_chunk.chunk_info,
+                        sent_tokens=embedding_chunk.sent_tokens,  # Pass sent_tokens offset
                     )
                     if ret != 0:
                         with self.session_lock:
@@ -342,6 +347,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 room = waiting_req_bytes[0].decode("ascii")
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
+                    # Register Language buffer pointers (one-time)
                     self.language_args_table[mooncake_session_id] = (
                         EmbeddingArgsRegisterInfo.from_zmq(waiting_req_bytes)
                     )
@@ -350,19 +356,67 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             self.failed_sessions.remove(mooncake_session_id)
                         if mooncake_session_id in self.session_failures:
                             del self.session_failures[mooncake_session_id]
+                    logger.debug(f"Registered language buffer for session {mooncake_session_id}")
                     continue
                 else:
+                    # Normal request processing
                     required_dst_info_num = int(waiting_req_bytes[5].decode("ascii"))
                     room = int(room)
-                    if room not in self.transfer_infos:
-                        self.transfer_infos[room] = {}
-
-                    self.transfer_infos[room][mooncake_session_id] = (
-                        TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
-                    )
-                    # NOTE: after bootstrapping we can mark the req as waiting for input
-                    if len(self.transfer_infos[room]) == required_dst_info_num:
-                        self.update_status(room, KVPoll.WaitingForInput)
+                    
+                    # Parse sent_tokens (backward compatible)
+                    sent_tokens = 0
+                    if len(waiting_req_bytes) > 6:
+                        sent_tokens = int(waiting_req_bytes[6].decode("ascii"))
+                    
+                    # Create or update TransferEmbeddingInfo
+                    transfer_info = TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
+                    
+                    if sent_tokens > 0:
+                        # Continuation request
+                        logger.debug(
+                            f"Received continuation request: room={room}, "
+                            f"session={mooncake_session_id}, sent_tokens={sent_tokens}, "
+                            f"new_buffer_index={transfer_info.dst_embedding_index}"
+                        )
+                        
+                        # Update existing transfer_info
+                        if room in self.transfer_infos and mooncake_session_id in self.transfer_infos[room]:
+                            # Update dst_embedding_index (Language side's new buffer) and sent_tokens
+                            self.transfer_infos[room][mooncake_session_id].dst_embedding_index = (
+                                transfer_info.dst_embedding_index
+                            )
+                            self.transfer_infos[room][mooncake_session_id].sent_tokens = sent_tokens
+                            
+                            # Reset status to WaitingForInput, ready to send second batch
+                            self.update_status(room, KVPoll.WaitingForInput)
+                            
+                            logger.debug(
+                                f"Updated transfer_info for continuation: room={room}, "
+                                f"new_sent_tokens={sent_tokens}"
+                            )
+                        else:
+                            logger.error(
+                                f"Received continuation for unknown room={room}, session={mooncake_session_id}"
+                            )
+                    else:
+                        # First request
+                        if room not in self.transfer_infos:
+                            self.transfer_infos[room] = {}
+                        
+                        self.transfer_infos[room][mooncake_session_id] = transfer_info
+                        
+                        logger.debug(
+                            f"Registered first request: room={room}, session={mooncake_session_id}, "
+                            f"buffer_index={transfer_info.dst_embedding_index}"
+                        )
+                        
+                        # When all dst ranks are registered, mark as WaitingForInput
+                        if len(self.transfer_infos[room]) == required_dst_info_num:
+                            self.update_status(room, KVPoll.WaitingForInput)
+                            logger.debug(
+                                f"All {required_dst_info_num} dst ranks registered for room={room}, "
+                                f"status -> WaitingForInput"
+                            )
 
         threading.Thread(target=embedding_thread).start()
 
@@ -447,7 +501,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
         chunk_info: List[Tuple[int, int]],
     ):
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
-        assert is_last  # For embedding data, we only send once at the end
+        # NOTE: is_last can now be False (first transfer not complete) or True (complete)
 
         if (
             bootstrap_room not in self.request_status
@@ -462,6 +516,12 @@ class MooncakeEmbeddingManager(BaseKVManager):
             # add further chunks into the transfer queue.
             return
 
+        # Get current sent_tokens from transfer_info
+        sent_tokens = 0
+        for transfer_info in self.transfer_infos[bootstrap_room].values():
+            sent_tokens = transfer_info.sent_tokens
+            break  # All dst should have the same sent_tokens
+
         # NOTE(shangming): sharding according to the dst_infos to make sure
         # requests with the same dst_sessions will be added into the same
         # queue, which enables early abort with failed sessions.
@@ -475,7 +535,13 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 embedding_index=embedding_index,
                 is_last=is_last,
                 chunk_info=chunk_info,
+                sent_tokens=sent_tokens,  # Pass sent_tokens to chunk
             )
+        )
+        
+        logger.debug(
+            f"Added transfer chunk to queue: room={bootstrap_room}, "
+            f"is_last={is_last}, sent_tokens={sent_tokens}"
         )
 
     def check_status(self, bootstrap_room: int):
@@ -816,7 +882,18 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                 cls._socket_locks[endpoint] = threading.Lock()
             return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
 
-    def init(self, embedding_index: Optional[int] = None):
+    def init(self, embedding_index: Optional[int] = None, allocation=None):
+        """
+        Initialize first transfer request.
+        
+        Args:
+            embedding_index: Buffer index (for legacy index-based allocation)
+            allocation: MetadataAllocation (for block-based allocation)
+        """
+        # For block-based allocation, use first block index
+        if allocation is not None:
+            embedding_index = allocation.block_indices[0]
+        
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (
                 f"{bootstrap_info['rank_ip']}:{bootstrap_info['rank_port']}"
@@ -832,8 +909,46 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                         self.session_id.encode("ascii"),
                         str(embedding_index).encode("ascii"),
                         str(self.required_dst_info_num).encode("ascii"),
+                        str(0).encode("ascii"),  # sent_tokens=0 for first request
                     ]
                 )
+    
+    def init_continuation(self, embedding_index: Optional[int] = None, allocation=None, sent_tokens: int = 0):
+        """
+        Request continuation transfer.
+        
+        Args:
+            embedding_index: Buffer index (for legacy index-based allocation)
+            allocation: MetadataAllocation (for block-based allocation)
+            sent_tokens: Number of tokens already received
+        """
+        # For block-based allocation, use first block index
+        if allocation is not None:
+            embedding_index = allocation.block_indices[0]
+        
+        for bootstrap_info in self.bootstrap_infos:
+            self.embedding_server_url = (
+                f"{bootstrap_info['rank_ip']}:{bootstrap_info['rank_port']}"
+            )
+
+            sock, lock = self._connect("tcp://" + self.embedding_server_url)
+            with lock:
+                sock.send_multipart(
+                    [
+                        str(self.bootstrap_room).encode("ascii"),  # room stays the same!
+                        get_local_ip_by_remote().encode("ascii"),
+                        str(self.embedding_mgr.rank_port).encode("ascii"),
+                        self.session_id.encode("ascii"),
+                        str(embedding_index).encode("ascii"),  # new buffer index
+                        str(self.required_dst_info_num).encode("ascii"),
+                        str(sent_tokens).encode("ascii"),  # sent_tokens > 0 indicates continuation
+                    ]
+                )
+        
+        logger.debug(
+            f"Sent continuation request: room={self.bootstrap_room}, "
+            f"sent_tokens={sent_tokens}, new_buffer_index={embedding_index}"
+        )
 
     def poll(self) -> KVPoll:
         if self.conclude_state is None:
