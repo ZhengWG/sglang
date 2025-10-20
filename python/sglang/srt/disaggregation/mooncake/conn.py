@@ -75,38 +75,71 @@ class TransferKVChunk:
     prefill_aux_index: Optional[int]
 
 
-# decode
+# Unified transfer info for both KV and Embedding modes
 @dataclasses.dataclass
 class TransferInfo:
+    """Unified transfer information for KV and Embedding modes."""
     room: int
     endpoint: str
     dst_port: int
     mooncake_session_id: str
-    dst_kv_indices: npt.NDArray[np.int32]
-    dst_aux_index: int
-    required_dst_info_num: int
-    is_dummy: bool
+    
+    # KV mode fields
+    dst_kv_indices: Optional[npt.NDArray[np.int32]] = None
+    dst_aux_index: Optional[int] = None
+    
+    # Embedding mode fields
+    dst_embedding_index: Optional[int] = None
+    
+    # Common fields
+    required_dst_info_num: int = 1
+    is_dummy: bool = False
+
+    @property
+    def is_kv_mode(self) -> bool:
+        """Check if this is a KV mode transfer."""
+        return self.dst_kv_indices is not None
+    
+    @property
+    def is_embedding_mode(self) -> bool:
+        """Check if this is an Embedding mode transfer."""
+        return self.dst_embedding_index is not None
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
-        if msg[4] == b"" and msg[5] == b"":
-            is_dummy = True
-            dst_kv_indices = np.array([], dtype=np.int32)
-            dst_aux_index = None
-        else:
-            dst_kv_indices = np.frombuffer(msg[4], dtype=np.int32)
-            dst_aux_index = int(msg[5].decode("ascii"))
-            is_dummy = False
-        return cls(
-            room=int(msg[0].decode("ascii")),
-            endpoint=msg[1].decode("ascii"),
-            dst_port=int(msg[2].decode("ascii")),
-            mooncake_session_id=msg[3].decode("ascii"),
-            dst_kv_indices=dst_kv_indices,
-            dst_aux_index=dst_aux_index,
-            required_dst_info_num=int(msg[6].decode("ascii")),
-            is_dummy=is_dummy,
-        )
+        """Construct TransferInfo from ZMQ message (supports both KV and Embedding modes)."""
+        # Detect mode based on message structure
+        # KV mode: has dst_kv_indices (msg[4]) and dst_aux_index (msg[5])
+        # Embedding mode: has dst_embedding_index (msg[4]) and required_dst_info_num (msg[5])
+        
+        if len(msg) >= 7:  # KV mode
+            if msg[4] == b"" and msg[5] == b"":
+                is_dummy = True
+                dst_kv_indices = np.array([], dtype=np.int32)
+                dst_aux_index = None
+            else:
+                dst_kv_indices = np.frombuffer(msg[4], dtype=np.int32)
+                dst_aux_index = int(msg[5].decode("ascii"))
+                is_dummy = False
+            return cls(
+                room=int(msg[0].decode("ascii")),
+                endpoint=msg[1].decode("ascii"),
+                dst_port=int(msg[2].decode("ascii")),
+                mooncake_session_id=msg[3].decode("ascii"),
+                dst_kv_indices=dst_kv_indices,
+                dst_aux_index=dst_aux_index,
+                required_dst_info_num=int(msg[6].decode("ascii")),
+                is_dummy=is_dummy,
+            )
+        else:  # Embedding mode (len(msg) == 6)
+            return cls(
+                room=int(msg[0].decode("ascii")),
+                endpoint=msg[1].decode("ascii"),
+                dst_port=int(msg[2].decode("ascii")),
+                mooncake_session_id=msg[3].decode("ascii"),
+                dst_embedding_index=int(msg[4].decode("ascii")),
+                required_dst_info_num=int(msg[5].decode("ascii")),
+            )
 
 
 # decode
@@ -520,12 +553,49 @@ class MooncakeKVManager(CommonKVManager):
     def send_aux(
         self,
         req: TransferInfo,
-        prefill_aux_index: int,
+        src_aux_index: int,
         dst_aux_ptrs: list[int],
+        dst_aux_index: Optional[int] = None,
+        chunk_info: Optional[List[Tuple[int, int]]] = None,
     ):
+        """
+        Unified auxiliary data transfer method.
+        
+        Supports two modes:
+        1. KV mode (PREFILL -> DECODE):
+           - chunk_info=None, dst_aux_index must be provided
+           - Transfers complete metadata buffers
+        
+        2. Embedding mode (ENCODE -> LANGUAGE/PREFILL):
+           - chunk_info must be provided [(offset, size), ...]
+           - Supports chunked transfer of embedding data
+        
+        Args:
+            req: Transfer request information
+            src_aux_index: Source auxiliary data index
+            dst_aux_ptrs: Destination auxiliary data pointer list
+            dst_aux_index: Destination auxiliary data index (required for KV mode)
+            chunk_info: Chunk information list [(offset, size), ...] (required for Embedding mode)
+        """
+        if chunk_info is None:
+            # KV mode: transfer complete metadata
+            assert dst_aux_index is not None, "dst_aux_index required for KV mode"
+            return self._send_aux_kv(req, src_aux_index, dst_aux_ptrs, dst_aux_index)
+        else:
+            # Embedding mode: chunked transfer
+            return self._send_aux_embedding(req, src_aux_index, dst_aux_ptrs, dst_aux_index or 0, chunk_info)
+
+    def _send_aux_kv(
+        self,
+        req: TransferInfo,
+        src_aux_index: int,
+        dst_aux_ptrs: list[int],
+        dst_aux_index: int,
+    ):
+        """KV mode aux transfer (original send_aux logic)"""
         # TODO(shangming): Fix me when nvlink_transport of Mooncake is bug-free
         if self.enable_custom_mem_pool:
-            return self.send_aux_tcp(req, prefill_aux_index, dst_aux_ptrs)
+            return self.send_aux_tcp(req, src_aux_index, dst_aux_ptrs, dst_aux_index)
 
         transfer_blocks = []
         prefill_aux_ptrs = self.kv_args.aux_data_ptrs
@@ -533,24 +603,62 @@ class MooncakeKVManager(CommonKVManager):
 
         for i, dst_aux_ptr in enumerate(dst_aux_ptrs):
             length = prefill_aux_item_lens[i]
-            src_addr = prefill_aux_ptrs[i] + length * prefill_aux_index
-            dst_addr = dst_aux_ptrs[i] + length * req.dst_aux_index
+            src_addr = prefill_aux_ptrs[i] + length * src_aux_index
+            dst_addr = dst_aux_ptrs[i] + length * dst_aux_index
             transfer_blocks.append((src_addr, dst_addr, length))
 
         return self._transfer_data(req.mooncake_session_id, transfer_blocks)
 
+    def _send_aux_embedding(
+        self,
+        req: TransferInfo,
+        src_aux_index: int,
+        dst_aux_ptrs: list[int],
+        dst_aux_index: int,
+        chunk_info: List[Tuple[int, int]],
+    ):
+        """Embedding mode aux transfer (original send_embedding logic)"""
+        status_list = []
+
+        for i in range(len(self.kv_args.aux_item_lens)):
+            chunk_offset, chunk_size = chunk_info[i]
+            embedding_item_len = self.kv_args.aux_item_lens[i]
+            
+            src_addr = (
+                self.kv_args.aux_data_ptrs[i]
+                + src_aux_index * embedding_item_len
+                + chunk_offset
+            )
+            dst_addr = (
+                dst_aux_ptrs[i]
+                + dst_aux_index * embedding_item_len
+                + chunk_offset
+            )
+
+            status = self.engine.transfer_sync(
+                req.mooncake_session_id,
+                src_addr,
+                dst_addr,
+                chunk_size,
+            )
+            status_list.append(status)
+
+        return 0 if sum(status_list) == 0 else 1
+
     def send_aux_tcp(
         self,
         req: TransferInfo,
-        prefill_aux_index: int,
+        src_aux_index: int,
         dst_aux_ptrs: list[int],
+        dst_aux_index: int,
     ):
+        """TCP-based aux transfer (for custom memory pool)"""
         prefill_aux_ptrs = self.kv_args.aux_data_ptrs
         prefill_aux_item_lens = self.kv_args.aux_item_lens
 
         for i in range(len(prefill_aux_ptrs)):
             length = prefill_aux_item_lens[i]
-            src_addr = prefill_aux_ptrs[i] + length * prefill_aux_index
+            src_addr = prefill_aux_ptrs[i] + length * src_aux_index
             data = AuxDataCodec.serialize_data_from_buffer(src_addr, length)
 
             self.send_aux_data_to_endpoint(
@@ -558,7 +666,7 @@ class MooncakeKVManager(CommonKVManager):
                 dst_port=req.dst_port,
                 room=req.room,
                 buffer_index=i,
-                aux_index=req.dst_aux_index,
+                aux_index=dst_aux_index,
                 data=data,
             )
 
@@ -624,18 +732,44 @@ class MooncakeKVManager(CommonKVManager):
     def transfer_worker(
         self, queue: FastQueue, executor: concurrent.futures.ThreadPoolExecutor
     ):
+        """
+        Unified transfer worker for both KV and Embedding modes.
+        
+        Handles:
+        - TransferKVChunk: KV cache transfer (PREFILL -> DECODE)
+        - TransferEmbeddingChunk: Embedding transfer (ENCODE -> LANGUAGE)
+        """
         while True:
             try:
-                kv_chunk: TransferKVChunk = queue.get()
-                reqs_to_be_processed = (
-                    self.transfer_infos[kv_chunk.room].values()
-                    if kv_chunk.room in self.transfer_infos
-                    else []
+                chunk = queue.get()
+                
+                # Dispatch based on chunk type
+                if isinstance(chunk, TransferKVChunk):
+                    self._handle_kv_chunk(chunk, executor)
+                elif isinstance(chunk, TransferEmbeddingChunk):
+                    self._handle_embedding_chunk(chunk, executor)
+                else:
+                    raise ValueError(f"Unknown chunk type: {type(chunk)}")
+                    
+            except Exception as e:
+                # NOTE(shangming): Remove this when we make sure the transfer thread is bug-free
+                raise RuntimeError(
+                    f"Transfer thread failed because of {e}. Instance with bootstrap_port={self.bootstrap_port} is dead."
                 )
-                polls = []
-                dst_ranks_infos = []
-                local_rank = self.attn_tp_rank * self.pp_size + self.pp_rank
-                for req in reqs_to_be_processed:
+    
+    def _handle_kv_chunk(
+        self, kv_chunk: TransferKVChunk, executor: concurrent.futures.ThreadPoolExecutor
+    ):
+        """Handle KV cache chunk transfer (original transfer_worker logic for KV)."""
+        reqs_to_be_processed = (
+            self.transfer_infos[kv_chunk.room].values()
+            if kv_chunk.room in self.transfer_infos
+            else []
+        )
+        polls = []
+        dst_ranks_infos = []
+        local_rank = self.attn_tp_rank * self.pp_size + self.pp_rank
+        for req in reqs_to_be_processed:
                     if not req.is_dummy:
                         # Early exit if the request has failed
                         with self.session_lock:
@@ -723,6 +857,7 @@ class MooncakeKVManager(CommonKVManager):
                                     req,
                                     kv_chunk.prefill_aux_index,
                                     target_rank_registration_info.dst_aux_ptrs,
+                                    dst_aux_index=req.dst_aux_index,
                                 )
                             polls.append(True if ret == 0 else False)
                             dst_ranks_infos.append(
@@ -755,6 +890,83 @@ class MooncakeKVManager(CommonKVManager):
                 raise RuntimeError(
                     f"Transfer thread failed because of {e}. Prefill instance with bootstrap_port={self.bootstrap_port} is dead."
                 )
+
+    def _handle_embedding_chunk(
+        self, embedding_chunk: TransferEmbeddingChunk, executor: concurrent.futures.ThreadPoolExecutor
+    ):
+        """Handle embedding chunk transfer (from original MooncakeEmbeddingManager).\"\"\"
+        reqs_to_be_processed = (
+            self.transfer_infos[embedding_chunk.room].values()
+            if embedding_chunk.room in self.transfer_infos
+            else []
+        )
+        polls = []
+        dst_ranks_infos = []
+
+        for req in reqs_to_be_processed:
+            # Early exit if the request has failed
+            with self.session_lock:
+                if req.mooncake_session_id in self.failed_sessions:
+                    self.record_failure(
+                        embedding_chunk.room,
+                        f"Language instance could be dead, remote mooncake session {req.mooncake_session_id} is not alive",
+                    )
+                    self.update_status(embedding_chunk.room, KVPoll.Failed)
+                    if hasattr(self, 'sync_status_to_language_endpoint'):
+                        self.sync_status_to_language_endpoint(
+                            req.endpoint,
+                            req.dst_port,
+                            req.room,
+                            KVPoll.Failed,
+                        )
+                    break
+
+            # Use unified send_aux for embedding transfer
+            ret = self.send_aux(
+                req,
+                src_aux_index=embedding_chunk.embedding_index,
+                dst_aux_ptrs=self.language_args_table[
+                    req.mooncake_session_id
+                ].dst_embedding_ptrs,
+                dst_aux_index=req.dst_embedding_index,
+                chunk_info=embedding_chunk.chunk_info,
+            )
+            if ret != 0:
+                with self.session_lock:
+                    self.session_failures[req.mooncake_session_id] += 1
+                    if self.session_failures[req.mooncake_session_id] >= 1:
+                        self.failed_sessions.add(req.mooncake_session_id)
+                        logger.error(f"Session {req.mooncake_session_id} failed.")
+                self.record_failure(
+                    embedding_chunk.room,
+                    f"Failed to send embedding chunk of {embedding_chunk.room} to {req.endpoint}:{req.dst_port}",
+                )
+                self.update_status(embedding_chunk.room, KVPoll.Failed)
+                if hasattr(self, 'sync_status_to_language_endpoint'):
+                    self.sync_status_to_language_endpoint(
+                        req.endpoint, req.dst_port, req.room, KVPoll.Failed
+                    )
+                break
+
+            polls.append(True if ret == 0 else False)
+            dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
+
+            # Only sync status when all the dst ranks have received the embedding data
+            if len(polls) == req.required_dst_info_num:
+                status = KVPoll.Success if all(polls) else KVPoll.Failed
+                self.update_status(req.room, status)
+                if hasattr(self, 'sync_status_to_language_endpoint'):
+                    for endpoint, dst_port, room in dst_ranks_infos:
+                        self.sync_status_to_language_endpoint(
+                            endpoint, dst_port, room, status
+                        )
+
+        if (
+            embedding_chunk.room not in self.request_status
+            or self.check_status(embedding_chunk.room) == KVPoll.Success
+        ):
+            if embedding_chunk.room in self.transfer_infos:
+                self.transfer_infos.pop(embedding_chunk.room)
 
     def start_prefill_thread(self):
         self._bind_server_socket()
@@ -1244,31 +1456,16 @@ class EmbeddingTransferError(Exception):
 
 @dataclasses.dataclass
 class TransferEmbeddingChunk:
+    """Embedding transfer chunk information."""
     room: int
     embedding_index: int
     is_last: bool
-    chunk_info: List[Tuple[int, int]]
+    chunk_info: List[Tuple[int, int]]  # List of (offset, size) for each buffer
 
 
-@dataclasses.dataclass
-class TransferEmbeddingInfo:
-    room: int
-    endpoint: str
-    dst_port: int
-    mooncake_session_id: str
-    dst_embedding_index: int
-    required_dst_info_num: int
-
-    @classmethod
-    def from_zmq(cls, msg: List[bytes]):
-        return cls(
-            room=int(msg[0].decode("ascii")),
-            endpoint=msg[1].decode("ascii"),
-            dst_port=int(msg[2].decode("ascii")),
-            mooncake_session_id=msg[3].decode("ascii"),
-            dst_embedding_index=int(msg[4].decode("ascii")),
-            required_dst_info_num=int(msg[5].decode("ascii")),
-        )
+# Note: TransferEmbeddingInfo is now unified into TransferInfo above.
+# Keeping this as an alias for backward compatibility during migration.
+TransferEmbeddingInfo = TransferInfo
 
 
 @dataclasses.dataclass
@@ -1390,6 +1587,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
         socket.connect(endpoint)
         return socket
 
+    # Note: send_embedding is now unified into send_aux above.
+    # Keeping this method for backward compatibility during migration.
     def send_embedding(
         self,
         mooncake_session_id: str,
@@ -1398,32 +1597,22 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_embedding_index: int,
         chunk_info: List[Tuple[int, int]],
     ):
-
-        status_list = []
-
-        for i in range(len(self.data_args.aux_item_lens)):
-            chunk_offset, chunk_size = chunk_info[i]
-            embedding_item_len = self.data_args.aux_item_lens[i]
-            embedding_addr = (
-                self.data_args.aux_data_ptrs[i]
-                + embedding_index * embedding_item_len
-                + chunk_offset
-            )
-            dst_embedding_addr = (
-                dst_embedding_ptrs[i]
-                + dst_embedding_index * embedding_item_len
-                + chunk_offset
-            )
-
-            status = self.engine.transfer_sync(
-                mooncake_session_id,
-                embedding_addr,
-                dst_embedding_addr,
-                chunk_size,
-            )
-            status_list.append(status)
-
-        return 0 if sum(status_list) == 0 else 1
+        """Deprecated: Use send_aux with chunk_info parameter instead."""
+        # Create a minimal TransferInfo for the unified send_aux
+        req = TransferInfo(
+            room=0,  # Not used in embedding transfer
+            endpoint="",
+            dst_port=0,
+            mooncake_session_id=mooncake_session_id,
+            dst_embedding_index=dst_embedding_index,
+        )
+        return self.send_aux(
+            req,
+            src_aux_index=embedding_index,
+            dst_aux_ptrs=dst_embedding_ptrs,
+            dst_aux_index=dst_embedding_index,
+            chunk_info=chunk_info,
+        )
 
     def sync_status_to_language_endpoint(
         self, remote: str, dst_port: int, room: int, status: int
@@ -1468,14 +1657,15 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             )
                             break
 
-                    ret = self.send_embedding(
-                        req.mooncake_session_id,
-                        embedding_chunk.embedding_index,
-                        self.language_args_table[
+                    # Use unified send_aux for embedding transfer
+                    ret = self.send_aux(
+                        req,
+                        src_aux_index=embedding_chunk.embedding_index,
+                        dst_aux_ptrs=self.language_args_table[
                             req.mooncake_session_id
                         ].dst_embedding_ptrs,
-                        req.dst_embedding_index,
-                        embedding_chunk.chunk_info,
+                        dst_aux_index=req.dst_embedding_index,
+                        chunk_info=embedding_chunk.chunk_info,
                     )
                     if ret != 0:
                         with self.session_lock:
@@ -1788,7 +1978,10 @@ class MooncakeEmbeddingSender(BaseKVSender):
     def send_embedding(
         self, embedding_index: int, last_chunk: bool, chunk_info: List[Tuple[int, int]]
     ):
-        """Send embedding data to language instances"""
+        """Send embedding data to language instances.
+        
+        Note: This now uses the unified send_aux internally.
+        """
         self.embedding_mgr.add_transfer_request(
             self.bootstrap_room, embedding_index, last_chunk, chunk_info
         )

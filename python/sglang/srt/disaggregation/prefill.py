@@ -76,7 +76,11 @@ logger = logging.getLogger(__name__)
 
 class PrefillBootstrapQueue:
     """
-    Store the requests in bootstrapping
+    Unified Bootstrap Queue.
+    
+    Supports two modes:
+    - Send mode (PREFILL): Send KV cache to DECODE
+    - Receive mode (LANGUAGE): Receive embedding from ENCODE
     """
 
     def __init__(
@@ -97,6 +101,8 @@ class PrefillBootstrapQueue:
         pp_rank: int,
         pp_size: int,
         transfer_backend: TransferBackend,
+        multimodal_data_buffers: Optional[MultimodalDataBuffers] = None,
+        support_embedding_receive: bool = False,
     ):
         self.token_to_kv_pool = token_to_kv_pool
         self.draft_token_to_kv_pool = draft_token_to_kv_pool
@@ -111,14 +117,22 @@ class PrefillBootstrapQueue:
         self.pp_size = pp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
-        self.queue: List[Req] = []
+        self.queue: List[Req] = []  # KV sender requests
         self.gloo_group = gloo_group
         self.max_total_num_tokens = max_total_num_tokens
         self.scheduler = scheduler
         self.transfer_backend = transfer_backend
         self.kv_manager = self._init_kv_manager()
+        
+        # Support for embedding receive mode
+        self.support_embedding_receive = support_embedding_receive
+        if support_embedding_receive:
+            self.multimodal_data_buffers = multimodal_data_buffers
+            self.embedding_receiver_manager = self._init_embedding_receiver_manager()
+            self.embedding_requests: List[MultimodalLanguageRequest] = []
 
     def _init_kv_manager(self) -> BaseKVManager:
+        """Initialize KV manager for sending KV cache (PREFILL mode)."""
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
         kv_args.engine_rank = self.tp_rank
@@ -164,8 +178,30 @@ class PrefillBootstrapQueue:
             self.is_mla_backend,
         )
         return kv_manager
+    
+    def _init_embedding_receiver_manager(self) -> BaseKVManager:
+        """Initialize embedding receiver manager (LANGUAGE mode)."""
+        from sglang.srt.disaggregation.base import KVArgs
+        
+        kv_args = KVArgs()
+        kv_args.engine_rank = self.tp_rank
+        kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
+            self.multimodal_data_buffers.get_buf_infos()
+        )
+        kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
+        kv_args.gpu_id = self.scheduler.gpu_id
+        
+        manager_class = get_kv_class(
+            self.transfer_backend, KVClassType.MANAGER, is_multimodal=True
+        )
+        return manager_class(
+            kv_args,
+            DisaggregationMode.LANGUAGE,
+            self.scheduler.server_args,
+        )
 
     def add(self, req: Req, num_kv_heads: int) -> None:
+        """Add KV sender request (PREFILL mode)."""
         if self._check_if_req_exceed_kv_capacity(req):
             return
 
@@ -188,8 +224,42 @@ class PrefillBootstrapQueue:
         self.queue.append(req)
 
     def extend(self, reqs: List[Req], num_kv_heads: int) -> None:
+        """Add multiple KV sender requests."""
         for req in reqs:
             self.add(req, num_kv_heads)
+    
+    def add_embedding_receiver(self, req: Req) -> None:
+        """Add embedding receiver request (LANGUAGE mode)."""
+        if not self.support_embedding_receive:
+            raise RuntimeError(
+                "Embedding receive mode is not enabled. "
+                "Set support_embedding_receive=True in __init__."
+            )
+        
+        if req.bootstrap_host == FAKE_BOOTSTRAP_HOST:
+            receiver_class = get_kv_class(
+                TransferBackend.FAKE, KVClassType.RECEIVER, is_multimodal=True
+            )
+        else:
+            receiver_class = get_kv_class(
+                self.transfer_backend, KVClassType.RECEIVER, is_multimodal=True
+            )
+        
+        embedding_receiver = receiver_class(
+            mgr=self.embedding_receiver_manager,
+            bootstrap_addr=f"{req.bootstrap_host}:{self.bootstrap_port}",
+            bootstrap_room=req.bootstrap_room,
+            prefill_dp_rank=req.data_parallel_rank,
+        )
+        
+        self.embedding_requests.append(
+            MultimodalLanguageRequest(req=req, embedding_receiver=embedding_receiver)
+        )
+    
+    def extend_embedding_receivers(self, reqs: List[Req]) -> None:
+        """Add multiple embedding receiver requests."""
+        for req in reqs:
+            self.add_embedding_receiver(req)
 
     def _check_if_req_exceed_kv_capacity(self, req: Req) -> bool:
         if len(req.origin_input_ids) > self.max_total_num_tokens:
@@ -206,23 +276,115 @@ class PrefillBootstrapQueue:
         """
         req.sampling_params.max_new_tokens = 1
 
+    def _update_embedding_handshake_waiters(self) -> None:
+        """Poll embedding receivers for handshake completion."""
+        if not self.embedding_requests:
+            return
+        
+        if all(req.waiting_for_input for req in self.embedding_requests):
+            return
+        
+        polls = poll_and_all_reduce(
+            [req.embedding_receiver for req in self.embedding_requests],
+            self.gloo_group,
+        )
+        
+        for language_req, poll in zip(self.embedding_requests, polls):
+            if poll == KVPoll.Bootstrapping:
+                pass
+            elif poll == KVPoll.WaitingForInput:
+                language_req.waiting_for_input = True
+            elif poll == KVPoll.Failed:
+                error_message = (
+                    f"MultimodalLanguage handshake failed for request "
+                    f"rank={self.tp_rank} {language_req.req.rid=} "
+                    f"{language_req.req.bootstrap_room=}"
+                )
+                try:
+                    language_req.embedding_receiver.failure_exception()
+                except Exception as e:
+                    error_message += f" with exception {e}"
+                logger.error(error_message)
+                prepare_abort(
+                    language_req.req,
+                    error_message,
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+    
+    def _pop_embedding_bootstrapped(self) -> List[Req]:
+        """Pop embedding receiver requests that have finished bootstrapping."""
+        if not self.support_embedding_receive:
+            return []
+        
+        self._update_embedding_handshake_waiters()
+        
+        bootstrapped_reqs = []
+        indices_to_remove = set()
+        
+        # Remove aborted requests
+        for i, language_req in enumerate(self.embedding_requests):
+            if isinstance(language_req.req.finished_reason, FINISH_ABORT):
+                self.scheduler.stream_output(
+                    [language_req.req], language_req.req.return_logprob
+                )
+                indices_to_remove.add(i)
+        
+        # Process bootstrapped requests
+        for i, language_req in enumerate(self.embedding_requests):
+            if i in indices_to_remove:
+                continue
+            
+            if not language_req.waiting_for_input:
+                continue
+            
+            if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
+                break
+            
+            from sglang.srt.disaggregation.fake.conn import FakeKVReceiver
+            
+            language_req.metadata_buffer_index = (
+                self.req_to_metadata_buffer_idx_allocator.alloc(
+                    fake=isinstance(language_req.embedding_receiver, FakeKVReceiver)
+                )
+            )
+            
+            assert language_req.metadata_buffer_index is not None
+            
+            language_req.embedding_receiver.init(
+                embedding_index=language_req.metadata_buffer_index
+            )
+            
+            # Store metadata_buffer_index in req for later use
+            language_req.req.metadata_buffer_index = language_req.metadata_buffer_index
+            language_req.req.embedding_receiver = language_req.embedding_receiver
+            
+            bootstrapped_reqs.append(language_req.req)
+            indices_to_remove.add(i)
+        
+        self.embedding_requests = [
+            entry for i, entry in enumerate(self.embedding_requests)
+            if i not in indices_to_remove
+        ]
+        
+        return bootstrapped_reqs
+    
     def pop_bootstrapped(
         self,
         return_failed_reqs: bool = False,
         rids_to_check: Optional[List[str]] = None,
     ) -> List[Req]:
         """
-        pop the reqs which has finished bootstrapping
+        Pop requests that have finished bootstrapping (both KV and embedding).
 
         return_failed_reqs: For PP, on rank 0, also return the failed reqs to notify the next rank
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
-
-        bootstrapped_reqs = []
-        failed_reqs = []
+        # Pop KV sender requests
+        kv_bootstrapped_reqs = []
+        kv_failed_reqs = []
         indices_to_remove = set()
 
-        if len(self.queue) == 0:
+        if len(self.queue) == 0 and not self.support_embedding_receive:
             if return_failed_reqs is False:
                 return []
             else:
@@ -278,11 +440,20 @@ class PrefillBootstrapQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
+        
+        kv_bootstrapped_reqs = bootstrapped_reqs
+        kv_failed_reqs = failed_reqs
+        
+        # Pop embedding receiver requests
+        embedding_bootstrapped_reqs = self._pop_embedding_bootstrapped()
+        
+        # Combine results
+        all_bootstrapped_reqs = kv_bootstrapped_reqs + embedding_bootstrapped_reqs
 
         if return_failed_reqs is False:
-            return bootstrapped_reqs
+            return all_bootstrapped_reqs
         else:
-            return bootstrapped_reqs, failed_reqs
+            return all_bootstrapped_reqs, kv_failed_reqs
 
 
 class SchedulerDisaggregationPrefillMixin:
@@ -292,14 +463,32 @@ class SchedulerDisaggregationPrefillMixin:
 
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self: Scheduler) -> None:
-        """A normal scheduler loop for prefill worker in disaggregation mode."""
+        """
+        Unified scheduler loop for prefill worker in disaggregation mode.
+        
+        Supports:
+        - KV sending mode (PREFILL): Send KV cache to DECODE
+        - Embedding receiving mode (LANGUAGE): Receive embedding from ENCODE
+        """
 
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
-            )
+            
+            # Pop bootstrapped requests (both KV senders and embedding receivers)
+            bootstrapped_reqs = self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+            
+            # Separate embedding receiver requests from KV sender requests
+            for req in bootstrapped_reqs:
+                if hasattr(req, 'embedding_receiver'):
+                    # Embedding receiver request - add to embedding inflight queue
+                    if not hasattr(self, 'disagg_embedding_inflight_queue'):
+                        self.disagg_embedding_inflight_queue = []
+                    self.disagg_embedding_inflight_queue.append(req)
+                else:
+                    # KV sender request - add to waiting queue for prefill
+                    self.waiting_queue.append(req)
+            
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
 
@@ -311,10 +500,21 @@ class SchedulerDisaggregationPrefillMixin:
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_prefill(batch, result)
 
-            if len(self.disagg_prefill_inflight_queue) > 0:
-                self.process_disagg_prefill_inflight_queue()
+            # Process both KV and embedding inflight queues
+            if len(self.disagg_prefill_inflight_queue) > 0 or (
+                hasattr(self, 'disagg_embedding_inflight_queue') and 
+                len(self.disagg_embedding_inflight_queue) > 0
+            ):
+                done_reqs = self.process_disagg_prefill_inflight_queue()
+                # Add embedding receiver requests that finished to waiting queue
+                for req in done_reqs:
+                    if hasattr(req, 'embedding_receiver'):
+                        self.waiting_queue.append(req)
 
-            if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
+            if batch is None and len(self.disagg_prefill_inflight_queue) == 0 and (
+                not hasattr(self, 'disagg_embedding_inflight_queue') or 
+                len(self.disagg_embedding_inflight_queue) == 0
+            ):
                 self.self_check_during_idle()
 
             self.last_batch = batch
@@ -324,14 +524,33 @@ class SchedulerDisaggregationPrefillMixin:
 
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler) -> None:
+        """
+        Overlap scheduler loop for prefill worker in disaggregation mode.
+        
+        Supports:
+        - KV sending mode (PREFILL): Send KV cache to DECODE
+        - Embedding receiving mode (LANGUAGE): Receive embedding from ENCODE
+        """
         self.result_queue = deque()
 
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
-            )
+            
+            # Pop bootstrapped requests (both KV senders and embedding receivers)
+            bootstrapped_reqs = self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+            
+            # Separate embedding receiver requests from KV sender requests
+            for req in bootstrapped_reqs:
+                if hasattr(req, 'embedding_receiver'):
+                    # Embedding receiver request - add to embedding inflight queue
+                    if not hasattr(self, 'disagg_embedding_inflight_queue'):
+                        self.disagg_embedding_inflight_queue = []
+                    self.disagg_embedding_inflight_queue.append(req)
+                else:
+                    # KV sender request - add to waiting queue for prefill
+                    self.waiting_queue.append(req)
+            
             self.process_prefill_chunk()
             batch = self.get_new_batch_prefill()
 
@@ -348,12 +567,23 @@ class SchedulerDisaggregationPrefillMixin:
                 tmp_batch, tmp_result = self.result_queue.popleft()
                 self.process_batch_result_disagg_prefill(tmp_batch, tmp_result)
 
-            if len(self.disagg_prefill_inflight_queue) > 0:
-                self.process_disagg_prefill_inflight_queue()
+            # Process both KV and embedding inflight queues
+            if len(self.disagg_prefill_inflight_queue) > 0 or (
+                hasattr(self, 'disagg_embedding_inflight_queue') and 
+                len(self.disagg_embedding_inflight_queue) > 0
+            ):
+                done_reqs = self.process_disagg_prefill_inflight_queue()
+                # Add embedding receiver requests that finished to waiting queue
+                for req in done_reqs:
+                    if hasattr(req, 'embedding_receiver'):
+                        self.waiting_queue.append(req)
 
             self.launch_batch_sample_if_needed(batch_result)
 
-            if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
+            if batch is None and len(self.disagg_prefill_inflight_queue) == 0 and (
+                not hasattr(self, 'disagg_embedding_inflight_queue') or 
+                len(self.disagg_embedding_inflight_queue) == 0
+            ):
                 self.self_check_during_idle()
 
             self.last_batch = batch
@@ -488,18 +718,150 @@ class SchedulerDisaggregationPrefillMixin:
 
         self.maybe_send_health_check_signal()
 
+    def _process_embedding_inflight_queue(
+        self: Scheduler,
+    ) -> List[Req]:
+        """
+        Poll embedding receivers in the inflight queue.
+        Returns requests that have finished receiving embedding data.
+        """
+        if not hasattr(self, 'disagg_embedding_inflight_queue'):
+            return []
+        
+        if len(self.disagg_embedding_inflight_queue) == 0:
+            return []
+        
+        done_reqs = []
+        
+        polls = poll_and_all_reduce(
+            [req.embedding_receiver for req in self.disagg_embedding_inflight_queue],
+            self.attn_tp_cpu_group,
+        )
+        
+        undone_reqs: List[Req] = []
+        
+        for req, poll in zip(self.disagg_embedding_inflight_queue, polls):
+            if poll in [KVPoll.WaitingForInput, KVPoll.Transferring, KVPoll.Bootstrapping]:
+                undone_reqs.append(req)
+            elif poll == KVPoll.Success:
+                # Handle embedding transfer success
+                from sglang.srt.disaggregation.fake.conn import FakeKVReceiver
+                
+                idx = req.metadata_buffer_index
+                if not isinstance(req.embedding_receiver, FakeKVReceiver):
+                    embedding_data, fill_ids, mrope_positions, aux_datas = (
+                        self.disagg_multimodal_data_buffers.get_buf(idx)
+                    )
+                    embedding_length = aux_datas[0]
+                    mrope_position_delta = aux_datas[1]
+                    req.input_embeds = embedding_data[:embedding_length, :]
+                    mrope_positions = mrope_positions[: 3 * embedding_length].reshape(
+                        3, embedding_length
+                    )
+                    ori_input_length = len(req.origin_input_ids)
+                    req.origin_input_ids = fill_ids[:embedding_length].tolist()
+                    
+                    mm_inputs = None
+                    if ori_input_length == embedding_length:
+                        mm_inputs = None
+                    elif ori_input_length < embedding_length:
+                        # Mock mm_inputs for multimodal requests
+                        from sglang.srt.managers.schedule_batch import (
+                            Modality,
+                            MultimodalDataItem,
+                            MultimodalInputs,
+                        )
+                        mm_inputs = MultimodalInputs(
+                            mm_items=[
+                                MultimodalDataItem(
+                                    modality=Modality.IMAGE, model_specific_data={}
+                                ),
+                            ]
+                        )
+                        mm_inputs.mrope_positions = mrope_positions
+                        mm_inputs.mrope_position_delta = torch.tensor(
+                            [mrope_position_delta]
+                        ).unsqueeze(1)
+                    else:
+                        # Transfer failed case
+                        error_message = (
+                            f"Embedding transfer failed: ori_input_length > embedding_length "
+                            f"for request rank={self.tp_rank} {req.rid=} {req.bootstrap_room=}"
+                        )
+                        logger.error(error_message)
+                        prepare_abort(
+                            req,
+                            error_message,
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                        self.stream_output([req], req.return_logprob)
+                        continue
+                    
+                    req.multimodal_inputs = mm_inputs
+                else:
+                    # Fake receiver - just free the buffer
+                    self.req_to_metadata_buffer_idx_allocator.free(idx, fake=True)
+                
+                done_reqs.append(req)
+                
+            elif poll == KVPoll.Failed:
+                error_message = (
+                    f"Embedding transfer failed for request rank={self.tp_rank} "
+                    f"{req.rid=} {req.bootstrap_room=}"
+                )
+                try:
+                    req.embedding_receiver.failure_exception()
+                except Exception as e:
+                    error_message += f" with exception {e}"
+                logger.error(error_message)
+                prepare_abort(
+                    req,
+                    error_message,
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                self.stream_output([req], req.return_logprob)
+                if hasattr(req, 'metadata_buffer_index') and req.metadata_buffer_index >= 0:
+                    from sglang.srt.disaggregation.fake.conn import FakeKVReceiver
+                    self.req_to_metadata_buffer_idx_allocator.free(
+                        req.metadata_buffer_index,
+                        fake=isinstance(req.embedding_receiver, FakeKVReceiver),
+                    )
+            else:
+                assert False, f"Unexpected polling state {poll=}"
+        
+        self.disagg_embedding_inflight_queue = undone_reqs
+        return done_reqs
+    
     def process_disagg_prefill_inflight_queue(
         self: Scheduler, rids_to_check: Optional[List[str]] = None
     ) -> List[Req]:
         """
         Poll the requests in the middle of transfer. If done, return the request.
+        Handles both KV senders and embedding receivers.
+        
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
+        # Process KV sender requests
         if len(self.disagg_prefill_inflight_queue) == 0:
-            return []
-
+            kv_done_reqs = []
+        else:
+            kv_done_reqs = self._process_kv_inflight_queue(rids_to_check)
+        
+        # Process embedding receiver requests
+        embedding_done_reqs = self._process_embedding_inflight_queue()
+        
+        return kv_done_reqs + embedding_done_reqs
+    
+    def _process_kv_inflight_queue(
+        self: Scheduler, rids_to_check: Optional[List[str]] = None
+    ) -> List[Req]:
+        """
+        Poll KV senders in the inflight queue.
+        Returns requests that have finished transferring KV cache.
+        """
         done_reqs = []
 
+        # This is the existing KV sender processing logic
         polls = poll_and_all_reduce(
             [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
             self.attn_tp_cpu_group,
@@ -876,10 +1238,13 @@ class SchedulerDisaggregationPrefillMixin:
 
 
 # ==================== Multimodal Language Classes ====================
+# Note: These classes are now deprecated and integrated into PrefillBootstrapQueue.
+# They are kept here for backward compatibility during migration.
 
 
 @dataclass
 class MultimodalLanguageRequest:
+    """Data class for multimodal language requests."""
     req: Req
     embedding_receiver: BaseKVReceiver
     waiting_for_input: bool = False
@@ -887,6 +1252,12 @@ class MultimodalLanguageRequest:
 
 
 class MultimodalLanguageBootstrapQueue:
+    """
+    DEPRECATED: Use PrefillBootstrapQueue with support_embedding_receive=True instead.
+    
+    This class is kept for backward compatibility. New code should use:
+    PrefillBootstrapQueue(..., support_embedding_receive=True)
+    """
     def __init__(
         self,
         req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
@@ -1027,6 +1398,12 @@ class MultimodalLanguageBootstrapQueue:
 
 
 class MultimodalLanguageInflightQueue:
+    """
+    DEPRECATED: Embedding inflight processing is now integrated into
+    SchedulerDisaggregationPrefillMixin.process_disagg_prefill_inflight_queue().
+    
+    This class is kept for backward compatibility.
+    """
     def __init__(
         self,
         gloo_group: ProcessGroup,
@@ -1159,6 +1536,15 @@ class MultimodalLanguageInflightQueue:
 
 
 class SchedulerDisaggregationMultiModalLanguageMixin:
+    """
+    DEPRECATED: Multimodal language support is now integrated into
+    SchedulerDisaggregationPrefillMixin.
+    
+    Use SchedulerDisaggregationPrefillMixin.event_loop_normal_disagg_prefill() instead,
+    with PrefillBootstrapQueue configured with support_embedding_receive=True.
+    
+    This class is kept for backward compatibility during migration.
+    """
 
     @torch.no_grad()
     def event_loop_normal_disagg_multimodal_language(self: Scheduler):
