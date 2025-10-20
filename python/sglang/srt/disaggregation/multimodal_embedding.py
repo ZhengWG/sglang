@@ -34,7 +34,7 @@ from sglang.srt.managers.schedule_batch import (
     FINISH_LENGTH,
     Req,
     ScheduleBatch,
-    global_server_args_dict,
+    get_global_server_args,
 )
 
 if TYPE_CHECKING:
@@ -313,4 +313,4 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         )
 
     def get_num_allocatable_reqs(self: Scheduler, running_bs: int):
-        return global_server_args_dict["max_micro_batch_size"] - running_bs
+        return get_global_server_args().max_micro_batch_size - running_bs

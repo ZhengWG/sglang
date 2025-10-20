@@ -17,7 +17,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Deque, List, Tuple
 
 import numpy as np
 import torch
@@ -45,10 +45,11 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.utils import DynamicGradMode
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.managers.scheduler import Scheduler
+    from sglang.srt.managers.scheduler import GenerationBatchResult, Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +334,7 @@ class MultimodalLanguageTransferQueue:
 
 class SchedulerDisaggregationMultiModalLanguageMixin:
 
-    @torch.no_grad()
+    @DynamicGradMode()
     def event_loop_normal_disagg_multimodal_language(self: Scheduler):
         while True:
             recv_reqs = self.recv_requests()
@@ -352,9 +353,9 @@ class SchedulerDisaggregationMultiModalLanguageMixin:
 
             self.last_batch = batch
 
-    @torch.no_grad()
+    @DynamicGradMode()
     def event_loop_overlap_disagg_multimodal_language(self: Scheduler):
-        self.result_queue = deque()
+        self.result_queue: Deque[Tuple[ScheduleBatch, GenerationBatchResult]] = deque()
 
         while True:
             recv_reqs = self.recv_requests()
@@ -363,35 +364,20 @@ class SchedulerDisaggregationMultiModalLanguageMixin:
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
+            batch_result = None
             if batch:
-                batch.launch_done = threading.Event()
-                result = self.run_batch(batch)
-                self.result_queue.append((batch.copy(), result))
-
-                if self.last_batch is None:
-                    # Create a dummy first batch to start the pipeline for overlap schedule.
-                    # It is now used for triggering the sampling_info_done event.
-                    tmp_batch = ScheduleBatch(
-                        reqs=None,
-                        forward_mode=ForwardMode.DUMMY_FIRST,
-                        next_batch_sampling_info=self.tp_worker.cur_sampling_info,
-                    )
-                    self.process_batch_result(tmp_batch, None, batch.launch_done)
+                batch_result = self.run_batch(batch)
+                self.result_queue.append((batch.copy(), batch_result))
 
             if self.last_batch:
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
-                tmp_batch.next_batch_sampling_info = (
-                    self.tp_worker.cur_sampling_info if batch else None
-                )
-                self.process_batch_result(
-                    tmp_batch, tmp_result, batch.launch_done if batch else None
-                )
+                self.process_batch_result(tmp_batch, tmp_result)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
-                self.check_memory()
-                self.new_token_ratio = self.init_new_token_ratio
+                self.self_check_during_idle()
 
+            self.launch_batch_sample_if_needed(batch_result)
             self.last_batch = batch
 
     def process_multimodal_language_queue(self: Scheduler):

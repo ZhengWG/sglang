@@ -34,12 +34,7 @@ from sglang.srt.disaggregation.common.utils import FastQueue
 from sglang.srt.disaggregation.mooncake.transfer_engine import MooncakeTransferEngine
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import (
-    get_free_port,
-    get_int_env_var,
-    get_ip,
-    get_local_ip_by_remote,
-)
+from sglang.srt.utils import get_free_port, get_int_env_var, get_local_ip_by_remote
 
 logger = logging.getLogger(__name__)
 
