@@ -10,6 +10,7 @@ pub mod grpc_client;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;
+pub mod mini_lb;
 pub mod policies;
 pub mod protocols;
 pub mod reasoning_parser;
