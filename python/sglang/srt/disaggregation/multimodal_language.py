@@ -188,44 +188,19 @@ class MultimodalLanguagePreallocQueue:
             if not language_req.waiting_for_input:
                 continue
 
-            # Allocate buffer
-            if self.metadata_buffers.use_block_allocator:
-                # Block-based: allocate default_buffer_tokens
-                if self.req_to_metadata_buffer_idx_allocator.available_blocks() <= 0:
-                    break
-                
-                default_tokens = self.metadata_buffers.default_buffer_tokens
-                allocation = self.req_to_metadata_buffer_idx_allocator.alloc_default(
-                    default_tokens=default_tokens,
-                    fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
-                    req_id=language_req.req.rid
-                )
-                
-                if allocation is None:
-                    break
-                
-                language_req.current_allocation = allocation
-                language_req.metadata_buffer_index = allocation.block_indices[0]
-                
-                # Init with allocation
-                language_req.embedding_receiver.init(allocation=allocation)
-            else:
-                # Index-based: legacy mode
-                if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
-                    break
-
-                language_req.metadata_buffer_index = (
-                    self.req_to_metadata_buffer_idx_allocator.alloc(
-                        fake=isinstance(language_req.embedding_receiver, FakeKVReceiver)
-                    )
-                )
-
-                assert language_req.metadata_buffer_index is not None
-
-                language_req.embedding_receiver.init(
-                    embedding_index=language_req.metadata_buffer_index
-                )
+            # Allocate default buffer
+            if self.req_to_metadata_buffer_idx_allocator.available_blocks() <= 0:
+                break
             
+            default_tokens = self.metadata_buffers.default_buffer_tokens
+            allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
+                default_tokens, language_req.req.rid, isinstance(language_req.embedding_receiver, FakeKVReceiver)
+            )
+            if not allocation:
+                break
+            
+            language_req.current_allocation = allocation
+            language_req.embedding_receiver.init(allocation=allocation)
             preallocated_reqs.append(language_req)
             indices_to_remove.add(i)
 
@@ -266,32 +241,16 @@ class MultimodalLanguageTransferQueue:
             error_message += f" with exception {e}"
         logger.error(error_message)
         
-        # Clean up partial_data if exists
-        if language_req.partial_data is not None:
+        if language_req.partial_data:
             del language_req.partial_data
-            language_req.partial_data = None
         
-        prepare_abort(
-            language_req.req,
-            error_message,
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-        )
-        self.scheduler.stream_output(
-            [language_req.req], language_req.req.return_logprob
-        )
+        prepare_abort(language_req.req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.scheduler.stream_output([language_req.req], language_req.req.return_logprob)
         
-        # Unlock the buffer
-        if self.metadata_buffers.use_block_allocator:
-            if language_req.current_allocation is not None:
-                self.req_to_metadata_buffer_idx_allocator.free(
-                    language_req.current_allocation,
-                    fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
-                    req_id=language_req.req.rid
-                )
-        else:
+        if language_req.current_allocation:
             self.req_to_metadata_buffer_idx_allocator.free(
-                language_req.metadata_buffer_index,
-                fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
+                language_req.current_allocation, language_req.req.rid, 
+                isinstance(language_req.embedding_receiver, FakeKVReceiver)
             )
         
         if self.scheduler.enable_metrics:
@@ -315,14 +274,10 @@ class MultimodalLanguageTransferQueue:
                 indices_to_remove.add(i)
                 continue
             elif poll == KVPoll.Transferring:
-                # In Transferring state: check if first batch complete and need continuation
-                if self.metadata_buffers.use_block_allocator and not isinstance(
-                    language_req.embedding_receiver, FakeKVReceiver
-                ):
+                # Check if first batch complete and need continuation
+                if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
                     allocation = language_req.current_allocation
-                    embedding_data, fill_ids, mrope_positions, aux_datas = (
-                        self.metadata_buffers.get_buf(allocation=allocation)
-                    )
+                    embedding_data, fill_ids, mrope_positions, aux_datas = self.metadata_buffers.get_buf(allocation)
                     
                     # Check if aux_datas[0] has value (first batch arrived)
                     total_length = int(aux_datas[0])
@@ -352,21 +307,12 @@ class MultimodalLanguageTransferQueue:
                             }
                             language_req.received_tokens = received_length
                             
-                            # Free current allocation
-                            self.req_to_metadata_buffer_idx_allocator.free(
-                                allocation, fake=False, req_id=language_req.req.rid
-                            )
+                            # Free current allocation and request new one
+                            self.req_to_metadata_buffer_idx_allocator.free(allocation, language_req.req.rid)
                             language_req.current_allocation = None
                             
-                            # Calculate remaining tokens needed
                             remaining_tokens = total_length - received_length
-                            
-                            # Try to allocate new buffer for remaining data
-                            new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
-                                num_tokens=remaining_tokens,
-                                fake=False,
-                                req_id=language_req.req.rid
-                            )
+                            new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(remaining_tokens, language_req.req.rid)
                             
                             if new_allocation is not None:
                                 language_req.current_allocation = new_allocation
@@ -391,18 +337,9 @@ class MultimodalLanguageTransferQueue:
                 # Keep in queue
                 
             elif poll == KVPoll.Success:
-                # Transfer complete
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    if self.metadata_buffers.use_block_allocator:
-                        allocation = language_req.current_allocation
-                        embedding_data, fill_ids, mrope_positions, aux_datas = (
-                            self.metadata_buffers.get_buf(allocation=allocation)
-                        )
-                    else:
-                        idx = language_req.metadata_buffer_index
-                        embedding_data, fill_ids, mrope_positions, aux_datas = (
-                            self.metadata_buffers.get_buf(idx=idx)
-                        )
+                    allocation = language_req.current_allocation
+                    embedding_data, fill_ids, mrope_positions, aux_datas = self.metadata_buffers.get_buf(allocation)
                     
                     if language_req.received_tokens == 0:
                         # One-time transfer complete
@@ -463,23 +400,9 @@ class MultimodalLanguageTransferQueue:
                             f"{total_length} tokens total"
                         )
                     
-                    # Free buffer
-                    if self.metadata_buffers.use_block_allocator:
-                        self.req_to_metadata_buffer_idx_allocator.free(
-                            allocation, fake=False, req_id=language_req.req.rid
-                        )
-                    else:
-                        self.req_to_metadata_buffer_idx_allocator.free(idx, fake=False)
+                    self.req_to_metadata_buffer_idx_allocator.free(allocation, language_req.req.rid)
                 else:
-                    # Fake receiver
-                    if self.metadata_buffers.use_block_allocator:
-                        self.req_to_metadata_buffer_idx_allocator.free(
-                            language_req.current_allocation, fake=True, req_id=language_req.req.rid
-                        )
-                    else:
-                        self.req_to_metadata_buffer_idx_allocator.free(
-                            language_req.metadata_buffer_index, fake=True
-                        )
+                    self.req_to_metadata_buffer_idx_allocator.free(language_req.current_allocation, language_req.req.rid, fake=True)
 
                 transferred_reqs.append(language_req.req)
                 indices_to_remove.add(i)
@@ -551,40 +474,18 @@ class SchedulerDisaggregationMultiModalLanguageMixin:
             self.last_batch = batch
 
     def process_multimodal_language_queue(self: Scheduler):
-        # First, handle requests waiting for continuation buffer
-        if self.disagg_metadata_buffers.use_block_allocator:
-            for language_req in self.disagg_language_transfer_queue.queue:
-                if (language_req.needs_continuation and 
-                    language_req.current_allocation is None and
-                    self.req_to_metadata_buffer_idx_allocator.available_blocks() > 0):
-                    
-                    # Calculate remaining tokens
-                    remaining_tokens = language_req.total_embedding_length - language_req.received_tokens
-                    
-                    # Try to allocate buffer
-                    new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
-                        num_tokens=remaining_tokens,
-                        fake=False,
-                        req_id=language_req.req.rid
-                    )
-                    
-                    if new_allocation is not None:
-                        language_req.current_allocation = new_allocation
-                        language_req.needs_continuation = False
-                        
-                        # Send continuation request
-                        language_req.embedding_receiver.init_continuation(
-                            allocation=new_allocation,
-                            sent_tokens=language_req.received_tokens
-                        )
-                        
-                        logger.info(
-                            f"Allocated buffer for continuation: request {language_req.req.rid}, "
-                            f"offset={language_req.received_tokens}, remaining={remaining_tokens} tokens"
-                        )
+        # Handle requests waiting for continuation buffer
+        for language_req in self.disagg_language_transfer_queue.queue:
+            if language_req.needs_continuation and not language_req.current_allocation:
+                remaining = language_req.total_embedding_length - language_req.received_tokens
+                new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(remaining, language_req.req.rid)
+                
+                if new_allocation:
+                    language_req.current_allocation = new_allocation
+                    language_req.needs_continuation = False
+                    language_req.embedding_receiver.init_continuation(new_allocation, language_req.received_tokens)
         
         # Normal processing
         req_conns = self.disagg_language_prealloc_queue.pop_preallocated()
         self.disagg_language_transfer_queue.extend(req_conns)
-        alloc_reqs = self.disagg_language_transfer_queue.pop_transferred()
-        self.waiting_queue.extend(alloc_reqs)
+        self.waiting_queue.extend(self.disagg_language_transfer_queue.pop_transferred())

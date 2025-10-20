@@ -995,39 +995,12 @@ class Scheduler(
             # The prefill requests that are in the middle of kv sending
             self.disagg_prefill_inflight_queue: List[Req] = []
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
-            buffer_size = int(
-                os.environ.get("SGLANG_EMBEDDING_CACHE_BUFFER_SIZE", "64")
-            )
-            
-            # Enable block-based allocator for multimodal embedding
-            use_block_allocator = os.environ.get("SGLANG_USE_BLOCK_ALLOCATOR", "true").lower() == "true"
+            buffer_size = int(os.environ.get("SGLANG_EMBEDDING_CACHE_BUFFER_SIZE", "64"))
             block_size = int(os.environ.get("SGLANG_MULTIMODAL_BLOCK_SIZE", "128"))
+            total_tokens = buffer_size * self.max_req_len
             
-            if use_block_allocator:
-                # Block-based allocator
-                total_tokens = buffer_size * self.max_req_len
-                self.req_to_metadata_buffer_idx_allocator = ReqToMetadataBlockAllocator(
-                    total_tokens=total_tokens,
-                    block_size=block_size,
-                )
-                self.disagg_metadata_buffers = MultimodalDataBuffers(
-                    size=buffer_size,
-                    max_prefill_tokens=self.max_req_len,
-                    embedding_dim=self.model_config.hidden_size,
-                    block_size=block_size,
-                    use_block_allocator=True,
-                )
-            else:
-                # Legacy index-based allocator
-                self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
-                    buffer_size
-                )
-                self.disagg_metadata_buffers = MultimodalDataBuffers(
-                    size=buffer_size,
-                    max_prefill_tokens=self.max_req_len,
-                    embedding_dim=self.model_config.hidden_size,
-                    use_block_allocator=False,
-                )
+            self.req_to_metadata_buffer_idx_allocator = ReqToMetadataBlockAllocator(total_tokens, block_size)
+            self.disagg_metadata_buffers = MultimodalDataBuffers(buffer_size, self.max_req_len, self.model_config.hidden_size, block_size)
             self.disagg_embedding_bootstrap_queue = MultimodalEmbeddingBootstrapQueue(
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
                 metadata_buffers=self.disagg_metadata_buffers,
@@ -1040,39 +1013,12 @@ class Scheduler(
             )
             self.disagg_embedding_inflight_queue: List[Req] = []
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
-            buffer_size = int(
-                os.environ.get("SGLANG_EMBEDDING_CACHE_BUFFER_SIZE", "64")
-            )
-            
-            # Enable block-based allocator for multimodal language
-            use_block_allocator = os.environ.get("SGLANG_USE_BLOCK_ALLOCATOR", "true").lower() == "true"
+            buffer_size = int(os.environ.get("SGLANG_EMBEDDING_CACHE_BUFFER_SIZE", "64"))
             block_size = int(os.environ.get("SGLANG_MULTIMODAL_BLOCK_SIZE", "128"))
+            total_tokens = buffer_size * self.max_req_len
             
-            if use_block_allocator:
-                # Block-based allocator
-                total_tokens = buffer_size * self.max_req_len
-                self.req_to_metadata_buffer_idx_allocator = ReqToMetadataBlockAllocator(
-                    total_tokens=total_tokens,
-                    block_size=block_size,
-                )
-                self.disagg_metadata_buffers = MultimodalDataBuffers(
-                    size=buffer_size,
-                    max_prefill_tokens=self.max_req_len,
-                    embedding_dim=self.model_config.hidden_size,
-                    block_size=block_size,
-                    use_block_allocator=True,
-                )
-            else:
-                # Legacy index-based allocator
-                self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
-                    buffer_size
-                )
-                self.disagg_metadata_buffers = MultimodalDataBuffers(
-                    size=buffer_size,
-                    max_prefill_tokens=self.max_req_len,
-                    embedding_dim=self.model_config.hidden_size,
-                    use_block_allocator=False,
-                )
+            self.req_to_metadata_buffer_idx_allocator = ReqToMetadataBlockAllocator(total_tokens, block_size)
+            self.disagg_metadata_buffers = MultimodalDataBuffers(buffer_size, self.max_req_len, self.model_config.hidden_size, block_size)
             self.disagg_language_transfer_queue = MultimodalLanguageTransferQueue(
                 gloo_group=self.attn_tp_cpu_group,
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,

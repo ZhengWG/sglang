@@ -141,26 +141,9 @@ class MultimodalEmbeddingBootstrapQueue:
                 indices_to_remove.add(i)
                 continue
 
-            # For block-based allocator, defer allocation until we know actual length
-            # For index-based allocator, allocate now
-            if self.metadata_buffers.use_block_allocator:
-                # Defer allocation: will allocate in process_batch_result when actual length is known
-                req.metadata_buffer_index = -1
-                req.metadata_allocation = None
-                # Still call init to establish connection with Language side
-                req.disagg_embedding_sender.init(embedding_index=0)  # Placeholder index
-            else:
-                # Legacy index-based: allocate now
-                if self.req_to_metadata_buffer_idx_allocator.available_size() == 0:
-                    break
-
-                req.metadata_buffer_index = self.req_to_metadata_buffer_idx_allocator.alloc(
-                    fake=isinstance(req.disagg_embedding_sender, FakeKVSender)
-                )
-
-                assert req.metadata_buffer_index is not None
-                req.disagg_embedding_sender.init(embedding_index=req.metadata_buffer_index)
-            
+            # Defer allocation until actual length is known
+            req.metadata_allocation = None
+            req.disagg_embedding_sender.init(embedding_index=0)
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)
 
@@ -225,41 +208,22 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 req.embedding = torch.cat([req.embedding, embedding])
             embedding_offsets += req.extend_input_len
             if req.is_chunked <= 0:
-                # Dummy output token for embedding models
                 req.output_ids.append(0)
                 dummy_output_ids.append(0)
                 
-                # For block-based allocator: allocate buffer based on actual length
-                if self.disagg_metadata_buffers.use_block_allocator:
-                    actual_length = req.embedding.shape[0]
-                    logger.debug(
-                        f"Embedding request {req.rid} room={req.bootstrap_room} "
-                        f"actual length={actual_length} tokens"
-                    )
-                    
-                    # Allocate buffer based on actual length
-                    allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
-                        num_tokens=actual_length,
-                        fake=isinstance(req.disagg_embedding_sender, FakeKVSender),
-                        req_id=req.rid
-                    )
-                    
-                    if allocation is None:
-                        logger.error(
-                            f"Failed to allocate buffer for {actual_length} tokens, "
-                            f"request {req.rid} will fail"
-                        )
-                        # TODO: handle allocation failure
-                        continue
-                    
-                    req.metadata_allocation = allocation
-                    req.metadata_buffer_index = allocation.block_indices[0]  # Use first block index
+                # Allocate buffer based on actual length
+                actual_length = req.embedding.shape[0]
+                allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
+                    actual_length, req.rid, fake=isinstance(req.disagg_embedding_sender, FakeKVSender)
+                )
+                if not allocation:
+                    logger.error(f"Allocation failed for {actual_length} tokens")
+                    continue
                 
-                # release kv cache immediately for embedding models
-                # in order to speed up for batch forward
+                req.metadata_allocation = allocation
                 self.tree_cache.cache_finished_req(req)
                 self.disagg_embedding_inflight_queue.append(req)
-                self.send_embedding_chunk(req, last_chunk=False)  # May not be last if continuation needed
+                self.send_embedding_chunk(req)
             else:
                 req.is_chunked -= 1
 
@@ -328,22 +292,10 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         )
 
         for req in done_reqs:
-            if self.disagg_metadata_buffers.use_block_allocator:
-                # Block-based: free by allocation
-                allocation = getattr(req, 'metadata_allocation', None)
-                if allocation is not None:
-                    self.req_to_metadata_buffer_idx_allocator.free(
-                        allocation,
-                        fake=isinstance(req.disagg_embedding_sender, FakeKVSender),
-                        req_id=req.rid
-                    )
-            else:
-                # Index-based: legacy
+            if req.metadata_allocation:
                 self.req_to_metadata_buffer_idx_allocator.free(
-                    req.metadata_buffer_index,
-                    fake=isinstance(req.disagg_embedding_sender, FakeKVSender),
+                    req.metadata_allocation, req.rid, isinstance(req.disagg_embedding_sender, FakeKVSender)
                 )
-            req.metadata_buffer_index = -1
         self.disagg_embedding_inflight_queue = undone_reqs
 
         return done_reqs
@@ -359,69 +311,30 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
                 self.running_batch.batch_is_full = False
 
-    def send_embedding_chunk(
-        self: Scheduler,
-        req: Req,
-        last_chunk: bool = False,
-    ):
-        """
-        Send embedding chunk to Language side.
-        For block-based allocation, may send in multiple batches if actual_length > default_buffer_tokens.
-        """
-        # Set buffer data
-        if self.disagg_metadata_buffers.use_block_allocator:
-            # Block-based: use allocation
-            allocation = getattr(req, 'metadata_allocation', None)
-            self.disagg_metadata_buffers.set_buf(req, allocation=allocation)
-        else:
-            # Index-based: legacy mode
-            self.disagg_metadata_buffers.set_buf(req)
+    def send_embedding_chunk(self: Scheduler, req: Req):
+        """Send embedding chunk to Language side."""
+        allocation = req.metadata_allocation
+        self.disagg_metadata_buffers.set_buf(req, allocation)
         
-        # Get actual embedding length
         actual_length = req.embedding.shape[0]
         default_tokens = self.disagg_metadata_buffers.default_buffer_tokens
         
-        # Determine sent_tokens from transfer_infos
+        # Get sent_tokens from transfer_infos
         sent_tokens = 0
         if req.bootstrap_room in self.data_manager.transfer_infos:
-            for transfer_info in self.data_manager.transfer_infos[req.bootstrap_room].values():
-                sent_tokens = transfer_info.sent_tokens
+            for info in self.data_manager.transfer_infos[req.bootstrap_room].values():
+                sent_tokens = info.sent_tokens
                 break
         
-        # Calculate chunk_info
-        if self.disagg_metadata_buffers.use_block_allocator:
-            if sent_tokens == 0:
-                # First transfer
-                is_last = (actual_length <= default_tokens)
-                chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(
-                    allocation=allocation,
-                    offset_tokens=0,
-                    max_tokens=default_tokens  # Limit first transfer to default_tokens
-                )
-                logger.debug(
-                    f"Sending first chunk for request {req.rid} room={req.bootstrap_room}: "
-                    f"{min(actual_length, default_tokens)}/{actual_length} tokens, is_last={is_last}"
-                )
-            else:
-                # Continuation transfer
-                is_last = True  # Continuation should send all remaining data
-                chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(
-                    allocation=allocation,
-                    offset_tokens=sent_tokens
-                )
-                remaining = actual_length - sent_tokens
-                logger.debug(
-                    f"Sending continuation for request {req.rid} room={req.bootstrap_room}: "
-                    f"offset={sent_tokens}, remaining={remaining} tokens"
-                )
+        # Calculate chunk_info and is_last
+        if sent_tokens == 0:
+            is_last = actual_length <= default_tokens
+            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, 0, default_tokens)
         else:
-            # Legacy index-based mode
-            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(req)
             is_last = True
+            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, sent_tokens)
         
-        req.disagg_embedding_sender.send_embedding(
-            req.metadata_buffer_index, is_last, chunk_info
-        )
+        req.disagg_embedding_sender.send_embedding(allocation.block_indices[0], is_last, chunk_info)
 
     def get_num_allocatable_reqs(self: Scheduler, running_bs: int):
         return get_global_server_args().max_micro_batch_size - running_bs
