@@ -387,12 +387,12 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             )
                             self.transfer_infos[room][mooncake_session_id].sent_tokens = sent_tokens
                             
-                            # Reset status to WaitingForInput, ready to send remaining data
-                            self.update_status(room, KVPoll.WaitingForInput)
+                            # Don't reset status - it should remain in current state
+                            # sent_tokens > 0 indicates this is a resumed transfer
                             
                             logger.debug(
                                 f"Updated transfer_info for resumed transfer: room={room}, "
-                                f"sent_tokens={sent_tokens}"
+                                f"sent_tokens={sent_tokens}, status unchanged"
                             )
                         else:
                             logger.error(
