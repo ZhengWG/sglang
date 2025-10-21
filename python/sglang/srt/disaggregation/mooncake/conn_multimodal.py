@@ -393,6 +393,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                                 transfer_info.dst_embedding_index
                             )
                             self.transfer_infos[room][mooncake_session_id].sent_tokens = sent_tokens
+                            self.transfer_infos[room][mooncake_session_id].allocated_tokens = transfer_info.allocated_tokens
                             
                             # Don't reset status - it should remain in current state
                             # sent_tokens > 0 indicates this is a resumed transfer
@@ -901,6 +902,9 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
         if allocation is not None:
             embedding_index = allocation.block_indices[0]
         
+        # Calculate allocated tokens
+        allocated_tokens = allocation.num_tokens if allocation else 0
+        
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (
                 f"{bootstrap_info['rank_ip']}:{bootstrap_info['rank_port']}"
@@ -917,6 +921,7 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                         str(embedding_index).encode("ascii"),
                         str(self.required_dst_info_num).encode("ascii"),
                         str(0).encode("ascii"),  # sent_tokens=0 for first request
+                        str(allocated_tokens).encode("ascii"),  # allocated_tokens
                     ]
                 )
     
@@ -932,6 +937,9 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
         # For block-based allocation, use first block index
         if allocation is not None:
             embedding_index = allocation.block_indices[0]
+        
+        # Calculate allocated tokens
+        allocated_tokens = allocation.num_tokens if allocation else 0
         
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (
@@ -949,12 +957,14 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                         str(embedding_index).encode("ascii"),  # new buffer index
                         str(self.required_dst_info_num).encode("ascii"),
                         str(sent_tokens).encode("ascii"),  # sent_tokens > 0 indicates resume
+                        str(allocated_tokens).encode("ascii"),  # allocated_tokens
                     ]
                 )
         
         logger.debug(
             f"Sent resume transfer request: room={self.bootstrap_room}, "
-            f"sent_tokens={sent_tokens}, new_buffer_index={embedding_index}"
+            f"sent_tokens={sent_tokens}, new_buffer_index={embedding_index}, "
+            f"allocated_tokens={allocated_tokens}"
         )
 
     def poll(self) -> KVPoll:
@@ -1118,5 +1128,8 @@ class MooncakeEmbeddingBootstrapServer(BaseKVBootstrapServer):
         if self.thread.is_alive():
             self.thread.join(timeout=2)
             logger.info("Server thread stopped")
+
+    def poll(self) -> KVPoll: ...
+r.info("Server thread stopped")
 
     def poll(self) -> KVPoll: ...

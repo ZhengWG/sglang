@@ -317,22 +317,24 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         self.disagg_metadata_buffers.set_buf(req, allocation)
         
         actual_length = req.embedding.shape[0]
-        default_tokens = self.disagg_metadata_buffers.default_buffer_tokens
         
-        # Get sent_tokens from transfer_infos
+        # Get sent_tokens and allocated_tokens from transfer_infos
         sent_tokens = 0
+        allocated_tokens = 0
         if req.bootstrap_room in self.data_manager.transfer_infos:
             for info in self.data_manager.transfer_infos[req.bootstrap_room].values():
                 sent_tokens = info.sent_tokens
+                allocated_tokens = info.allocated_tokens
                 break
         
-        # Calculate chunk_info and is_last
+        # Calculate chunk_info and is_last based on allocated_tokens from Language side
         if sent_tokens == 0:
-            # First transfer: limit to default_tokens
-            is_last = actual_length <= default_tokens
-            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, 0, default_tokens)
+            # First transfer: send min(actual_length, allocated_tokens)
+            tokens_to_send = min(actual_length, allocated_tokens) if allocated_tokens > 0 else actual_length
+            is_last = actual_length <= allocated_tokens if allocated_tokens > 0 else True
+            chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, 0, tokens_to_send)
         else:
-            # Resumed transfer: send all remaining data
+            # Resumed transfer: send remaining data (should fit in allocated_tokens)
             is_last = True
             chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, sent_tokens)
         
