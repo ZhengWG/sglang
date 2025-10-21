@@ -108,6 +108,8 @@ if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
+from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
+
 _is_npu = is_npu()
 # ModelOpt: QUANT_CFG_CHOICES is imported from modelopt_utils.py
 # which contains the complete mapping of quantization config choices
@@ -244,6 +246,10 @@ def _initialize_model(
     quant_config = _get_quantization_config(
         model_config, load_config, packed_modules_mapping
     )
+    hf_to_sglang_mapper = getattr(model_class, "hf_to_sglang_mapper", None)
+    # pass mappings by reference to quant_config
+    if hf_to_sglang_mapper is not None and isinstance(quant_config, CompressedTensorsConfig):
+        quant_config.apply_sglang_mapper(hf_to_sglang_mapper)
     return model_class(
         config=model_config.hf_config,
         quant_config=quant_config,
