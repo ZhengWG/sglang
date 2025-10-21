@@ -188,13 +188,12 @@ class MultimodalLanguagePreallocQueue:
             if not language_req.waiting_for_input:
                 continue
 
-            # Allocate default buffer
-            if self.req_to_metadata_buffer_idx_allocator.available_blocks() <= 0:
+            # Allocate default blocks (Language side doesn't know actual length)
+            if self.req_to_metadata_buffer_idx_allocator.available_blocks() < self.req_to_metadata_buffer_idx_allocator.default_num_blocks:
                 break
             
-            default_tokens = self.metadata_buffers.default_buffer_tokens
-            allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
-                default_tokens, language_req.req.rid, isinstance(language_req.embedding_receiver, FakeKVReceiver)
+            allocation = self.req_to_metadata_buffer_idx_allocator.alloc_default(
+                language_req.req.rid, isinstance(language_req.embedding_receiver, FakeKVReceiver)
             )
             if not allocation:
                 break
@@ -325,7 +324,7 @@ class MultimodalLanguageTransferQueue:
                                 )
                                 
                                 logger.debug(
-                                    f"Allocated {len(new_allocation.block_indices)} blocks "
+                                    f"Allocated {new_allocation.num_blocks} blocks "
                                     f"to resume transfer: {remaining_tokens} tokens remaining"
                                 )
                             else:

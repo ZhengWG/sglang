@@ -66,7 +66,8 @@ def poll_and_all_reduce(pollers, gloo_group):
 @dataclass
 class MetadataAllocation:
     """Represents a metadata buffer allocation using blocks."""
-    block_indices: List[int]  # List of allocated block indices
+    start_block: int  # Starting block index (blocks are always contiguous)
+    num_blocks: int  # Number of blocks allocated
     num_tokens: int  # Actual number of tokens needed
 
 
@@ -119,32 +120,56 @@ class ReqToMetadataBlockAllocator:
         self.num_blocks = (total_tokens + block_size - 1) // block_size
         self.free_blocks = deque(list(range(self.num_blocks)))
         self.allocations: Dict[int, MetadataAllocation] = {}
+        # Default blocks for Language side initial allocation
+        self.default_num_blocks = int(os.getenv("SGLANG_DEFAULT_MULTIMODAL_BLOCKS", "8"))
 
     def available_blocks(self) -> int:
         return len(self.free_blocks)
 
-    def alloc(self, num_tokens: int, req_id: int = None, fake: bool = False) -> Optional[MetadataAllocation]:
-        """Allocate blocks for num_tokens."""
-        if fake:
-            return MetadataAllocation([0], num_tokens)
+    def alloc_blocks(self, num_blocks: int, num_tokens: int, req_id: int = None, fake: bool = False) -> Optional[MetadataAllocation]:
+        """
+        Allocate specified number of contiguous blocks.
         
-        num_blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
-        if len(self.free_blocks) < num_blocks_needed:
+        Args:
+            num_blocks: Number of blocks to allocate
+            num_tokens: Actual tokens needed (for validation)
+            req_id: Request ID for tracking
+            fake: Fake allocation for testing
+        """
+        if fake:
+            return MetadataAllocation(0, num_blocks, num_tokens)
+        
+        if len(self.free_blocks) < num_blocks:
             return None
 
-        blocks = [self.free_blocks.popleft() for _ in range(num_blocks_needed)]
-        allocation = MetadataAllocation(blocks, num_tokens)
+        # Allocate contiguous blocks
+        start_block = self.free_blocks.popleft()
+        for _ in range(num_blocks - 1):
+            self.free_blocks.popleft()
+        
+        allocation = MetadataAllocation(start_block, num_blocks, num_tokens)
         
         if req_id is not None:
             self.allocations[req_id] = allocation
         return allocation
 
+    def alloc(self, num_tokens: int, req_id: int = None, fake: bool = False) -> Optional[MetadataAllocation]:
+        """Allocate blocks based on num_tokens (for Embedding side)."""
+        num_blocks = (num_tokens + self.block_size - 1) // self.block_size
+        return self.alloc_blocks(num_blocks, num_tokens, req_id, fake)
+
+    def alloc_default(self, req_id: int = None, fake: bool = False) -> Optional[MetadataAllocation]:
+        """Allocate default blocks (for Language side initial allocation)."""
+        num_tokens = self.default_num_blocks * self.block_size
+        return self.alloc_blocks(self.default_num_blocks, num_tokens, req_id, fake)
+
     def free(self, allocation: MetadataAllocation, req_id: int = None, fake: bool = False):
         """Free allocated blocks."""
         if fake:
             return
-        for block_idx in allocation.block_indices:
-            self.free_blocks.append(block_idx)
+        # Return contiguous blocks
+        for i in range(allocation.num_blocks):
+            self.free_blocks.append(allocation.start_block + i)
         if req_id and req_id in self.allocations:
             del self.allocations[req_id]
 
@@ -467,41 +492,43 @@ class MultimodalDataBuffers:
         if max_tokens:
             actual_tokens = min(actual_tokens, max_tokens)
         
-        start_token = min(allocation.block_indices) * self.block_size + offset_tokens
+        # start_token: blocks are contiguous starting from start_block
+        start_token = allocation.start_block * self.block_size + offset_tokens
         
         return [
             (start_token * self.embedding_dim * 2, actual_tokens * self.embedding_dim * 2),  # embeddings
             (start_token * 4, actual_tokens * 4),  # fill_ids
             (start_token * 3 * 4, actual_tokens * 3 * 4),  # mrope_positions
-            (allocation.block_indices[0] * 64, 64),  # aux_datas
+            (allocation.start_block * 64, 64),  # aux_datas (use start_block)
         ]
 
     def get_buf_infos(self):
+        """Return buffer pointers, lengths, and item sizes for RDMA registration."""
         return (
             [self.input_embeddings.data_ptr(), self.fill_ids.data_ptr(), 
              self.mrope_positions.data_ptr(), self.aux_datas.data_ptr()],
             [self.input_embeddings.nbytes, self.fill_ids.nbytes, 
              self.mrope_positions.nbytes, self.aux_datas.nbytes],
             [self.block_size * self.embedding_dim * 2, self.block_size * 4, 
-             3 * self.block_size * 4, 64],
+             3 * self.block_size * 4, 64],  # item_lens per block
         )
 
     def get_buf(self, allocation: MetadataAllocation):
-        """Get buffer data for allocation."""
-        start_token = min(allocation.block_indices) * self.block_size
+        """Get buffer data for allocation (blocks are contiguous)."""
+        start_token = allocation.start_block * self.block_size
         end_token = start_token + allocation.num_tokens
         
         embeddings = self.input_embeddings[start_token * self.embedding_dim : end_token * self.embedding_dim].reshape(allocation.num_tokens, self.embedding_dim)
         fill_ids = self.fill_ids[start_token:end_token]
         mrope = self.mrope_positions[start_token * 3 : end_token * 3]
-        aux = self.aux_datas[allocation.block_indices[0]]
+        aux = self.aux_datas[allocation.start_block]
         
         return embeddings, fill_ids, mrope, aux
 
     def set_buf(self, req: Req, allocation: MetadataAllocation):
-        """Write request data to buffer."""
+        """Write request data to buffer (blocks are contiguous)."""
         embed_length = req.embedding.shape[0]
-        start_token = min(allocation.block_indices) * self.block_size
+        start_token = allocation.start_block * self.block_size
         end_token = start_token + embed_length
 
         self.fill_ids[start_token:end_token] = torch.tensor(req.fill_ids[:embed_length])
@@ -510,6 +537,6 @@ class MultimodalDataBuffers:
         if req.multimodal_inputs and req.multimodal_inputs.mrope_positions is not None:
             self.mrope_positions[start_token * 3 : end_token * 3] = req.multimodal_inputs.mrope_positions[:, :embed_length].flatten().detach().cpu()
         
-        self.aux_datas[allocation.block_indices[0]][0] = embed_length
+        self.aux_datas[allocation.start_block][0] = embed_length
         if req.multimodal_inputs and req.multimodal_inputs.mrope_position_delta is not None:
-            self.aux_datas[allocation.block_indices[0]][1] = req.multimodal_inputs.mrope_position_delta[0][0]
+            self.aux_datas[allocation.start_block][1] = req.multimodal_inputs.mrope_position_delta[0][0]
