@@ -316,7 +316,14 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
                     # Only sync status when all the dst ranks have received the embedding data
                     if len(polls) == req.required_dst_info_num:
-                        status = KVPoll.Success if all(polls) else KVPoll.Failed
+                        # Check if this is the final transfer
+                        if embedding_chunk.is_last:
+                            # Last chunk: mark as Success or Failed
+                            status = KVPoll.Success if all(polls) else KVPoll.Failed
+                        else:
+                            # Not last chunk: mark as Transferring (waiting for resume)
+                            status = KVPoll.Transferring if all(polls) else KVPoll.Failed
+                        
                         self.update_status(req.room, status)
                         for endpoint, dst_port, room in dst_ranks_infos:
                             self.sync_status_to_language_endpoint(
