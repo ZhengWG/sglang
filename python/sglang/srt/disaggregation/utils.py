@@ -60,44 +60,111 @@ def poll_and_all_reduce(pollers, gloo_group):
 
 
 class ReqToMetadataIdxAllocator:
-    """A memory pool that maps a request to its first output token location."""
+    """Block-based allocator for variable-length metadata buffers.
+    
+    Allocates blocks based on actual sequence length instead of fixed indices.
+    Supports scatter/gather operations for efficient memory usage.
+    """
 
     def __init__(
         self,
         size: int,
+        block_size: int = None,
     ):
-        self.size = size
-        self.free_slots = deque(list(range(size)))
+        """
+        Args:
+            size: Total number of blocks available
+            block_size: Number of tokens per block (get from env var if not provided)
+        """
+        self.total_blocks = size
+        self.block_size = block_size or int(
+            os.getenv("SGLANG_MULTIMODAL_BLOCK_SIZE", "256")
+        )
+        self.free_blocks = deque(list(range(size)))
+        self.req_to_blocks = {}  # req_id -> list of block indices
 
     def available_size(self):
-        return len(self.free_slots)
+        """Returns number of available blocks"""
+        return len(self.free_blocks)
 
-    def alloc(self, fake: bool = False) -> Optional[int]:
+    def alloc(
+        self, num_tokens: int = None, req_id: str = None, fake: bool = False
+    ) -> Optional[list]:
+        """Allocate blocks based on actual token length.
+        
+        Args:
+            num_tokens: Actual number of tokens needed (if None, allocate 1 block)
+            req_id: Request ID for tracking
+            fake: Whether this is a fake allocation for warmup
+            
+        Returns:
+            List of allocated block indices, or None if not enough blocks
+        """
         if fake:
-            return random.randint(0, self.size - 1)
+            # For fake requests, return a dummy block list
+            return [random.randint(0, self.total_blocks - 1)]
 
-        if len(self.free_slots) == 0:
+        # Calculate required blocks
+        if num_tokens is None:
+            num_blocks_needed = 1
+        else:
+            num_blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
+
+        if len(self.free_blocks) < num_blocks_needed:
             return None
 
-        return self.free_slots.popleft()
+        # Allocate consecutive blocks from free list
+        allocated_blocks = [
+            self.free_blocks.popleft() for _ in range(num_blocks_needed)
+        ]
 
-    def free(self, free_index: int, fake: bool = False):
+        if req_id is not None:
+            self.req_to_blocks[req_id] = allocated_blocks
+
+        return allocated_blocks
+
+    def free(self, block_indices: list = None, req_id: str = None, fake: bool = False):
+        """Free allocated blocks.
+        
+        Args:
+            block_indices: List of block indices to free (used for backward compatibility)
+            req_id: Request ID to free blocks for
+            fake: Whether this is a fake deallocation
+        """
         if fake:
             return
 
-        self.free_slots.append(free_index)
+        # Support both old interface (single index) and new interface (block list)
+        if block_indices is not None:
+            if isinstance(block_indices, int):
+                # Old interface compatibility
+                self.free_blocks.append(block_indices)
+            else:
+                # New interface: list of blocks
+                self.free_blocks.extend(block_indices)
+        elif req_id is not None and req_id in self.req_to_blocks:
+            blocks = self.req_to_blocks.pop(req_id)
+            self.free_blocks.extend(blocks)
 
     def free_with_req(self, req: Req):
+        """Free blocks associated with a request.
+        
+        This function is used to free blocks and reset the metadata buffer index of the request.
+        NOTE: Only used in the disaggregation language mode:
+              since transfer buffer need to be freed after the prefill is done.
         """
-        This function is used to free slot and reset the metadata buffer index of the request.
-        NOTE: Only used in the disaggregation language mode: \
-              since transfer buffer need to be freed after the prefill is done. \
-        TODO: Need to refactor the code to keep interface consistent.
-        """
-        free_index = req.metadata_buffer_index
         fake = req.bootstrap_host == FAKE_BOOTSTRAP_HOST
-        self.free(free_index, fake=fake)
-        req.metadata_buffer_index = -1
+        
+        # Support both old (metadata_buffer_index) and new (metadata_block_indices) interfaces
+        if hasattr(req, "metadata_block_indices") and req.metadata_block_indices:
+            self.free(block_indices=req.metadata_block_indices, fake=fake)
+            req.metadata_block_indices = None
+        elif hasattr(req, "metadata_buffer_index") and req.metadata_buffer_index != -1:
+            # Old interface compatibility
+            self.free(block_indices=req.metadata_buffer_index, fake=fake)
+            req.metadata_buffer_index = -1
+        elif hasattr(req, "rid"):
+            self.free(req_id=req.rid, fake=fake)
 
 
 class MetadataBuffers:
@@ -402,6 +469,19 @@ class MultimodalDataBuffers:
     def __init__(
         self, size: int, max_prefill_tokens: int, embedding_dim: int = 8192
     ) -> None:
+        """Initialize block-based multimodal data buffers.
+        
+        Args:
+            size: Total number of blocks
+            max_prefill_tokens: Block size (tokens per block)
+            embedding_dim: Embedding dimension
+        """
+        # Treat size as total_blocks and max_prefill_tokens as block_size
+        self.total_blocks = size
+        self.block_size = max_prefill_tokens
+        self.embedding_dim = embedding_dim
+        
+        # Block-based storage: each "row" is a block
         self.input_embeddings = torch.zeros(
             (size, max_prefill_tokens * embedding_dim),
             dtype=torch.bfloat16,
@@ -416,20 +496,48 @@ class MultimodalDataBuffers:
         )
         # aux_datas: embedding_length, mrope_position_delta, to speedup transfer
         self.aux_datas = torch.zeros((size, 16), dtype=torch.int32, device="cpu")
+        
+        # For backward compatibility
         self.max_prefill_tokens = max_prefill_tokens
-        self.embedding_dim = embedding_dim
 
     def get_buf_chunk_info(self, req: Req):
-        # (offset, size)
-        return [
-            (
-                0,
-                len(req.fill_ids) * self.embedding_dim * self.input_embeddings.itemsize,
-            ),
-            (0, len(req.fill_ids) * self.fill_ids.itemsize),
-            (0, len(req.fill_ids) * 3 * self.mrope_positions.itemsize),
-            (0, self.aux_datas.shape[1] * self.aux_datas.itemsize),
-        ]
+        """Get chunk info for block-based transfer.
+        
+        Returns a list of chunk_info for each block, where each chunk_info is a list of
+        (offset, size) tuples for each buffer type.
+        
+        Args:
+            req: Request with metadata_block_indices and fill_ids
+            
+        Returns:
+            List of chunk_info per block, where each chunk_info contains:
+            [(embedding_offset, embedding_size), (fill_ids_offset, fill_ids_size), 
+             (mrope_offset, mrope_size), (aux_offset, aux_size)]
+        """
+        block_indices = req.metadata_block_indices
+        total_tokens = len(req.fill_ids)
+        chunk_infos = []
+        
+        for block_idx, start_pos in enumerate(range(0, total_tokens, self.block_size)):
+            end_pos = min(start_pos + self.block_size, total_tokens)
+            block_len = end_pos - start_pos
+            
+            # For each block, return (offset_in_block, size_for_this_block)
+            chunk_info = [
+                # input_embeddings: offset=0, size=block_len*embedding_dim*itemsize
+                (0, block_len * self.embedding_dim * self.input_embeddings.itemsize),
+                # fill_ids: offset=0, size=block_len*itemsize
+                (0, block_len * self.fill_ids.itemsize),
+                # mrope_positions: offset=0, size=block_len*3*itemsize
+                (0, block_len * 3 * self.mrope_positions.itemsize),
+                # aux_datas: only transfer in first block
+                (0, self.aux_datas.shape[1] * self.aux_datas.itemsize)
+                if block_idx == 0
+                else (0, 0),
+            ]
+            chunk_infos.append(chunk_info)
+        
+        return chunk_infos
 
     def get_buf_infos(self):
         ptrs = [
@@ -452,36 +560,131 @@ class MultimodalDataBuffers:
         ]
         return ptrs, data_lens, item_lens
 
-    def get_buf(self, idx: int):
-        input_embeddings = self.input_embeddings[idx].reshape(
-            self.max_prefill_tokens, self.embedding_dim
-        )
-        fill_ids = self.fill_ids[idx]
-        mrope_positions = self.mrope_positions[idx]
-        aux_datas = self.aux_datas[idx]
+    def get_buf(self, idx: int = None, block_indices: list = None):
+        """Get buffer data using either single index (old) or block indices (new).
+        
+        Args:
+            idx: Single buffer index (for backward compatibility)
+            block_indices: List of block indices for block-based access
+            
+        Returns:
+            Tuple of (input_embeddings, fill_ids, mrope_positions, aux_datas)
+        """
+        # Backward compatibility: single index
+        if idx is not None:
+            input_embeddings = self.input_embeddings[idx].reshape(
+                self.max_prefill_tokens, self.embedding_dim
+            )
+            fill_ids = self.fill_ids[idx]
+            mrope_positions = self.mrope_positions[idx]
+            aux_datas = self.aux_datas[idx]
+            return input_embeddings, fill_ids, mrope_positions, aux_datas
+        
+        # New block-based access: gather from multiple blocks
+        if block_indices is None or len(block_indices) == 0:
+            raise ValueError("Either idx or block_indices must be provided")
+        
+        # Get total length from aux_datas in first block
+        aux_datas = self.aux_datas[block_indices[0]]
+        total_length = int(aux_datas[0])
+        
+        gathered_embeddings = []
+        gathered_fill_ids = []
+        gathered_mrope_positions = []
+        
+        tokens_gathered = 0
+        for block_idx in block_indices:
+            tokens_in_block = min(self.block_size, total_length - tokens_gathered)
+            
+            # Gather embeddings
+            block_embed = self.input_embeddings[block_idx, : tokens_in_block * self.embedding_dim]
+            gathered_embeddings.append(block_embed.reshape(tokens_in_block, self.embedding_dim))
+            
+            # Gather fill_ids
+            gathered_fill_ids.append(self.fill_ids[block_idx, :tokens_in_block])
+            
+            # Gather mrope_positions
+            gathered_mrope_positions.append(
+                self.mrope_positions[block_idx, : 3 * tokens_in_block]
+            )
+            
+            tokens_gathered += tokens_in_block
+            if tokens_gathered >= total_length:
+                break
+        
+        # Concatenate gathered data
+        input_embeddings = torch.cat(gathered_embeddings, dim=0)
+        fill_ids = torch.cat(gathered_fill_ids)
+        mrope_positions = torch.cat(gathered_mrope_positions)
+        
         return input_embeddings, fill_ids, mrope_positions, aux_datas
 
     def set_buf(self, req: Req):
+        """Set buffer data using block-based scatter operation.
+        
+        Args:
+            req: Request with metadata_block_indices, embedding, and fill_ids
+        """
         embed_length = req.embedding.shape[0]
-        self.fill_ids[req.metadata_buffer_index, : len(req.fill_ids)] = torch.tensor(
-            req.fill_ids
-        )
-        if (
-            req.multimodal_inputs is not None
-            and req.multimodal_inputs.mrope_positions is not None
-        ):
-            self.mrope_positions[req.metadata_buffer_index, : 3 * embed_length] = (
-                req.multimodal_inputs.mrope_positions.flatten().detach().cpu()
+        total_tokens = len(req.fill_ids)
+        
+        # Support both old (metadata_buffer_index) and new (metadata_block_indices) interfaces
+        if hasattr(req, "metadata_block_indices") and req.metadata_block_indices:
+            block_indices = req.metadata_block_indices
+        elif hasattr(req, "metadata_buffer_index") and req.metadata_buffer_index != -1:
+            # Backward compatibility: treat single index as single-block list
+            block_indices = [req.metadata_buffer_index]
+        else:
+            raise ValueError("Request must have metadata_block_indices or metadata_buffer_index")
+        
+        # Scatter data across allocated blocks
+        tokens_written = 0
+        for block_idx_pos, block_id in enumerate(block_indices):
+            start_pos = tokens_written
+            end_pos = min(start_pos + self.block_size, total_tokens)
+            block_len = end_pos - start_pos
+            
+            if block_len <= 0:
+                break
+            
+            # Scatter fill_ids
+            self.fill_ids[block_id, :block_len] = torch.tensor(
+                req.fill_ids[start_pos:end_pos]
             )
-        self.input_embeddings[
-            req.metadata_buffer_index, : embed_length * self.embedding_dim
-        ] = req.embedding.flatten()
-        self.aux_datas[req.metadata_buffer_index][0] = embed_length
-        if (
-            req.multimodal_inputs is not None
-            and req.multimodal_inputs.mrope_position_delta is not None
-        ):
-            assert req.multimodal_inputs.mrope_position_delta.numel() == 1
-            self.aux_datas[req.metadata_buffer_index][1] = (
-                req.multimodal_inputs.mrope_position_delta[0][0]
-            )
+            
+            # Scatter embeddings
+            embed_start = min(start_pos, embed_length)
+            embed_end = min(end_pos, embed_length)
+            if embed_end > embed_start:
+                self.input_embeddings[block_id, : (embed_end - embed_start) * self.embedding_dim] = (
+                    req.embedding[embed_start:embed_end].flatten()
+                )
+            
+            # Scatter mrope_positions
+            if (
+                req.multimodal_inputs is not None
+                and req.multimodal_inputs.mrope_positions is not None
+            ):
+                mrope_start = min(start_pos, embed_length)
+                mrope_end = min(end_pos, embed_length)
+                if mrope_end > mrope_start:
+                    self.mrope_positions[block_id, : 3 * (mrope_end - mrope_start)] = (
+                        req.multimodal_inputs.mrope_positions[:, mrope_start:mrope_end]
+                        .flatten()
+                        .detach()
+                        .cpu()
+                    )
+            
+            # Store metadata in first block
+            if block_idx_pos == 0:
+                self.aux_datas[block_id][0] = embed_length
+                if (
+                    req.multimodal_inputs is not None
+                    and req.multimodal_inputs.mrope_position_delta is not None
+                ):
+                    assert req.multimodal_inputs.mrope_position_delta.numel() == 1
+                    self.aux_datas[block_id][1] = (
+                        req.multimodal_inputs.mrope_position_delta[0][0]
+                    )
+            
+            tokens_written += block_len
