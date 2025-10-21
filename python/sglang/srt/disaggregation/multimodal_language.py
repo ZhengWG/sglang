@@ -66,11 +66,11 @@ class MultimodalLanguageRequest:
     # For block-based allocation
     current_allocation: Optional[MetadataAllocation] = None
     
-    # For continuation support
+    # For resumed transfer support
     total_embedding_length: int = -1  # Total length from aux_datas[0]
-    received_tokens: int = 0  # Number of tokens already received
-    partial_data: Optional[dict] = field(default=None)  # Saved first batch data
-    needs_continuation: bool = False  # Waiting for buffer to send continuation request
+    transferred_tokens: int = 0  # Number of tokens already transferred
+    buffered_chunks: Optional[dict] = field(default=None)  # Saved first batch data
+    needs_resume: bool = False  # Waiting for buffer to resume transfer
 
 
 class MultimodalLanguagePreallocQueue:
@@ -241,8 +241,8 @@ class MultimodalLanguageTransferQueue:
             error_message += f" with exception {e}"
         logger.error(error_message)
         
-        if language_req.partial_data:
-            del language_req.partial_data
+        if language_req.buffered_chunks:
+            del language_req.buffered_chunks
         
         prepare_abort(language_req.req, error_message, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
         self.scheduler.stream_output([language_req.req], language_req.req.return_logprob)
@@ -274,7 +274,7 @@ class MultimodalLanguageTransferQueue:
                 indices_to_remove.add(i)
                 continue
             elif poll == KVPoll.Transferring:
-                # Check if first batch complete and need continuation
+                # Check if first batch complete and needs resume
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
                     allocation = language_req.current_allocation
                     embedding_data, fill_ids, mrope_positions, aux_datas = self.metadata_buffers.get_buf(allocation)
@@ -286,53 +286,53 @@ class MultimodalLanguageTransferQueue:
                         # First batch data arrived
                         language_req.total_embedding_length = total_length
                         default_tokens = self.metadata_buffers.default_buffer_tokens
-                        received_length = min(total_length, default_tokens)
+                        transferred_length = min(total_length, default_tokens)
                         
                         if total_length > default_tokens:
-                            # Need continuation
+                            # Need to resume transfer for remaining data
                             mrope_position_delta = int(aux_datas[1])
                             
                             logger.debug(
                                 f"Request {language_req.req.rid} in Transferring state, "
-                                f"first batch received: {received_length}/{total_length}, "
-                                f"needs continuation"
+                                f"first batch received: {transferred_length}/{total_length}, "
+                                f"needs resume for remaining data"
                             )
                             
-                            # Save first batch data
-                            language_req.partial_data = {
-                                "embeddings": embedding_data[:received_length, :].clone(),
-                                "fill_ids": fill_ids[:received_length].clone(),
-                                "mrope_positions": mrope_positions[:3*received_length].clone(),
+                            # Buffer first batch data
+                            language_req.buffered_chunks = {
+                                "embeddings": embedding_data[:transferred_length, :].clone(),
+                                "fill_ids": fill_ids[:transferred_length].clone(),
+                                "mrope_positions": mrope_positions[:3*transferred_length].clone(),
                                 "mrope_position_delta": mrope_position_delta,
                             }
-                            language_req.received_tokens = received_length
+                            language_req.transferred_tokens = transferred_length
                             
                             # Free current allocation and request new one
                             self.req_to_metadata_buffer_idx_allocator.free(allocation, language_req.req.rid)
                             language_req.current_allocation = None
                             
-                            remaining_tokens = total_length - received_length
+                            remaining_tokens = total_length - transferred_length
                             new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(remaining_tokens, language_req.req.rid)
                             
                             if new_allocation is not None:
                                 language_req.current_allocation = new_allocation
-                                language_req.needs_continuation = False
+                                language_req.needs_resume = False
                                 
-                                # Send continuation request
-                                language_req.embedding_receiver.init_continuation(
+                                # Resume transfer for remaining data
+                                language_req.embedding_receiver.resume_transfer(
                                     allocation=new_allocation,
-                                    sent_tokens=received_length
+                                    sent_tokens=transferred_length
                                 )
                                 
                                 logger.debug(
                                     f"Allocated {len(new_allocation.block_indices)} blocks "
-                                    f"for continuation: {remaining_tokens} tokens"
+                                    f"to resume transfer: {remaining_tokens} tokens remaining"
                                 )
                             else:
                                 # Buffer not available, mark as waiting
-                                language_req.needs_continuation = True
+                                language_req.needs_resume = True
                                 logger.warning(
-                                    f"No buffer for continuation: {remaining_tokens} tokens needed"
+                                    f"No buffer available to resume transfer: {remaining_tokens} tokens needed"
                                 )
                 # Keep in queue
                 
@@ -341,7 +341,7 @@ class MultimodalLanguageTransferQueue:
                     allocation = language_req.current_allocation
                     embedding_data, fill_ids, mrope_positions, aux_datas = self.metadata_buffers.get_buf(allocation)
                     
-                    if language_req.received_tokens == 0:
+                    if language_req.transferred_tokens == 0:
                         # One-time transfer complete
                         embedding_length = int(aux_datas[0])
                         mrope_position_delta = int(aux_datas[1])
@@ -362,21 +362,21 @@ class MultimodalLanguageTransferQueue:
                             f"Request {language_req.req.rid} completed in one transfer: {embedding_length} tokens"
                         )
                     else:
-                        # Continuation complete, merge data
-                        remaining_length = language_req.total_embedding_length - language_req.received_tokens
+                        # Resumed transfer complete, merge data
+                        remaining_length = language_req.total_embedding_length - language_req.transferred_tokens
                         
                         full_embeddings = torch.cat([
-                            language_req.partial_data["embeddings"],
+                            language_req.buffered_chunks["embeddings"],
                             embedding_data[:remaining_length, :]
                         ], dim=0)
                         
                         full_fill_ids = torch.cat([
-                            language_req.partial_data["fill_ids"],
+                            language_req.buffered_chunks["fill_ids"],
                             fill_ids[:remaining_length]
                         ])
                         
                         full_mrope = torch.cat([
-                            language_req.partial_data["mrope_positions"],
+                            language_req.buffered_chunks["mrope_positions"],
                             mrope_positions[:3*remaining_length]
                         ])
                         
@@ -391,12 +391,12 @@ class MultimodalLanguageTransferQueue:
                         )
                         mm_inputs.mrope_positions = mrope_positions_reshaped
                         mm_inputs.mrope_position_delta = torch.tensor(
-                            [language_req.partial_data["mrope_position_delta"]]
+                            [language_req.buffered_chunks["mrope_position_delta"]]
                         ).unsqueeze(1)
                         language_req.req.multimodal_inputs = mm_inputs
                         
                         logger.debug(
-                            f"Request {language_req.req.rid} completed with continuation: "
+                            f"Request {language_req.req.rid} completed with resumed transfer: "
                             f"{total_length} tokens total"
                         )
                     
@@ -474,16 +474,16 @@ class SchedulerDisaggregationMultiModalLanguageMixin:
             self.last_batch = batch
 
     def process_multimodal_language_queue(self: Scheduler):
-        # Handle requests waiting for continuation buffer
+        # Handle requests waiting to resume transfer
         for language_req in self.disagg_language_transfer_queue.queue:
-            if language_req.needs_continuation and not language_req.current_allocation:
-                remaining = language_req.total_embedding_length - language_req.received_tokens
+            if language_req.needs_resume and not language_req.current_allocation:
+                remaining = language_req.total_embedding_length - language_req.transferred_tokens
                 new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(remaining, language_req.req.rid)
                 
                 if new_allocation:
                     language_req.current_allocation = new_allocation
-                    language_req.needs_continuation = False
-                    language_req.embedding_receiver.init_continuation(new_allocation, language_req.received_tokens)
+                    language_req.needs_resume = False
+                    language_req.embedding_receiver.resume_transfer(new_allocation, language_req.transferred_tokens)
         
         # Normal processing
         req_conns = self.disagg_language_prealloc_queue.pop_preallocated()

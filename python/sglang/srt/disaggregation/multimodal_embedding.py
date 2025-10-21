@@ -253,14 +253,14 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         # Check .poll() for the reqs in disagg_embedding_inflight_queue. If Success, respond to the client and remove it from the queue
         for req, poll in zip(self.disagg_embedding_inflight_queue, polls):
             if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
-                # Still transferring, or waiting for continuation request from Language side
+                # Still transferring, or waiting for resume request from Language side
                 undone_reqs.append(req)
                 
-                # Log for debugging continuation scenario
+                # Log for debugging resumed transfer scenario
                 if poll == KVPoll.Transferring:
                     logger.debug(
                         f"Request {req.rid} room={req.bootstrap_room} in Transferring state, "
-                        f"waiting for completion or continuation request"
+                        f"waiting for completion or resume request"
                     )
             elif poll == KVPoll.Success:  # transfer done
                 req.finished_reason = FINISH_LENGTH(length=0)
@@ -328,9 +328,11 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         
         # Calculate chunk_info and is_last
         if sent_tokens == 0:
+            # First transfer: limit to default_tokens
             is_last = actual_length <= default_tokens
             chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, 0, default_tokens)
         else:
+            # Resumed transfer: send all remaining data
             is_last = True
             chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, sent_tokens)
         

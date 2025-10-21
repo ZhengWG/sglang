@@ -66,7 +66,7 @@ class TransferEmbeddingInfo:
     mooncake_session_id: str
     dst_embedding_index: int
     required_dst_info_num: int
-    sent_tokens: int = 0  # Number of tokens already sent (0 = first transfer, >0 = continuation)
+    sent_tokens: int = 0  # Number of tokens already sent (0 = first transfer, >0 = resumed transfer)
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -77,7 +77,7 @@ class TransferEmbeddingInfo:
             mooncake_session_id=msg[3].decode("ascii"),
             dst_embedding_index=int(msg[4].decode("ascii")),
             required_dst_info_num=int(msg[5].decode("ascii")),
-            sent_tokens=int(msg[6].decode("ascii")) if len(msg) > 6 else 0,  # Backward compatible
+            sent_tokens=int(msg[6].decode("ascii")) if len(msg) > 6 else 0,  # 0=first transfer, >0=resume
         )
 
 
@@ -207,7 +207,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_embedding_ptrs: list[int],
         dst_embedding_index: int,
         chunk_info: List[Tuple[int, int]],
-        sent_tokens: int = 0,  # Number of tokens already sent (for continuation)
+        sent_tokens: int = 0,  # Number of tokens already sent (for resumed transfer)
     ):
 
         status_list = []
@@ -372,9 +372,9 @@ class MooncakeEmbeddingManager(BaseKVManager):
                     transfer_info = TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
                     
                     if sent_tokens > 0:
-                        # Continuation request
+                        # Resume transfer request
                         logger.debug(
-                            f"Received continuation request: room={room}, "
+                            f"Received resume transfer request: room={room}, "
                             f"session={mooncake_session_id}, sent_tokens={sent_tokens}, "
                             f"new_buffer_index={transfer_info.dst_embedding_index}"
                         )
@@ -387,16 +387,16 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             )
                             self.transfer_infos[room][mooncake_session_id].sent_tokens = sent_tokens
                             
-                            # Reset status to WaitingForInput, ready to send second batch
+                            # Reset status to WaitingForInput, ready to send remaining data
                             self.update_status(room, KVPoll.WaitingForInput)
                             
                             logger.debug(
-                                f"Updated transfer_info for continuation: room={room}, "
-                                f"new_sent_tokens={sent_tokens}"
+                                f"Updated transfer_info for resumed transfer: room={room}, "
+                                f"sent_tokens={sent_tokens}"
                             )
                         else:
                             logger.error(
-                                f"Received continuation for unknown room={room}, session={mooncake_session_id}"
+                                f"Received resume request for unknown room={room}, session={mooncake_session_id}"
                             )
                     else:
                         # First request
@@ -913,14 +913,14 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                     ]
                 )
     
-    def init_continuation(self, embedding_index: Optional[int] = None, allocation=None, sent_tokens: int = 0):
+    def resume_transfer(self, allocation=None, sent_tokens: int = 0, embedding_index: Optional[int] = None):
         """
-        Request continuation transfer.
+        Resume transfer for remaining data.
         
         Args:
-            embedding_index: Buffer index (for legacy index-based allocation)
             allocation: MetadataAllocation (for block-based allocation)
-            sent_tokens: Number of tokens already received
+            sent_tokens: Number of tokens already transferred
+            embedding_index: Buffer index (optional, derived from allocation)
         """
         # For block-based allocation, use first block index
         if allocation is not None:
@@ -941,12 +941,12 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
                         self.session_id.encode("ascii"),
                         str(embedding_index).encode("ascii"),  # new buffer index
                         str(self.required_dst_info_num).encode("ascii"),
-                        str(sent_tokens).encode("ascii"),  # sent_tokens > 0 indicates continuation
+                        str(sent_tokens).encode("ascii"),  # sent_tokens > 0 indicates resume
                     ]
                 )
         
         logger.debug(
-            f"Sent continuation request: room={self.bootstrap_room}, "
+            f"Sent resume transfer request: room={self.bootstrap_room}, "
             f"sent_tokens={sent_tokens}, new_buffer_index={embedding_index}"
         )
 
