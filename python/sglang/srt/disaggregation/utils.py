@@ -500,44 +500,18 @@ class MultimodalDataBuffers:
         # For backward compatibility
         self.max_prefill_tokens = max_prefill_tokens
 
-    def get_buf_chunk_info(self, req: Req):
-        """Get chunk info for block-based transfer.
+    def get_block_buffer_sizes(self):
+        """Get fixed buffer sizes for each buffer type in a full block.
         
-        Returns a list of chunk_info for each block, where each chunk_info is a list of
-        (offset, size) tuples for each buffer type.
-        
-        Args:
-            req: Request with metadata_block_indices and fill_ids
-            
         Returns:
-            List of chunk_info per block, where each chunk_info contains:
-            [(embedding_offset, embedding_size), (fill_ids_offset, fill_ids_size), 
-             (mrope_offset, mrope_size), (aux_offset, aux_size)]
+            Tuple of (embedding_size, fill_ids_size, mrope_size, aux_size) for one full block
         """
-        block_indices = req.metadata_block_indices
-        total_tokens = len(req.fill_ids)
-        chunk_infos = []
+        embedding_size = self.block_size * self.embedding_dim * self.input_embeddings.itemsize
+        fill_ids_size = self.block_size * self.fill_ids.itemsize
+        mrope_size = self.block_size * 3 * self.mrope_positions.itemsize
+        aux_size = self.aux_datas.shape[1] * self.aux_datas.itemsize
         
-        for block_idx, start_pos in enumerate(range(0, total_tokens, self.block_size)):
-            end_pos = min(start_pos + self.block_size, total_tokens)
-            block_len = end_pos - start_pos
-            
-            # For each block, return (offset_in_block, size_for_this_block)
-            chunk_info = [
-                # input_embeddings: offset=0, size=block_len*embedding_dim*itemsize
-                (0, block_len * self.embedding_dim * self.input_embeddings.itemsize),
-                # fill_ids: offset=0, size=block_len*itemsize
-                (0, block_len * self.fill_ids.itemsize),
-                # mrope_positions: offset=0, size=block_len*3*itemsize
-                (0, block_len * 3 * self.mrope_positions.itemsize),
-                # aux_datas: only transfer in first block
-                (0, self.aux_datas.shape[1] * self.aux_datas.itemsize)
-                if block_idx == 0
-                else (0, 0),
-            ]
-            chunk_infos.append(chunk_info)
-        
-        return chunk_infos
+        return embedding_size, fill_ids_size, mrope_size, aux_size
 
     def get_buf_infos(self):
         ptrs = [

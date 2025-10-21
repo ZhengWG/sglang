@@ -52,9 +52,9 @@ class EmbeddingTransferError(Exception):
 @dataclasses.dataclass
 class TransferEmbeddingChunk:
     room: int
-    block_indices: List[int]  # Changed from embedding_index to support multiple blocks
+    block_indices: List[int]  # Source block indices
     is_last: bool
-    chunk_infos: List[List[Tuple[int, int]]]  # List of chunk_info per block
+    total_tokens: int  # Total number of tokens to transfer
 
 
 @dataclasses.dataclass
@@ -211,7 +211,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
         block_indices: List[int],
         dst_embedding_ptrs: list[int],
         dst_block_indices: List[int],
-        chunk_infos: List[List[Tuple[int, int]]],
+        total_tokens: int,
+        block_size: int,
     ):
         """Send embedding data using block-based transfer.
         
@@ -220,39 +221,61 @@ class MooncakeEmbeddingManager(BaseKVManager):
             block_indices: Source block indices
             dst_embedding_ptrs: Destination buffer pointers
             dst_block_indices: Destination block indices
-            chunk_infos: List of chunk_info per block, where each chunk_info contains
-                        (offset, size) tuples for each buffer type
+            total_tokens: Total number of tokens to transfer
+            block_size: Number of tokens per block
         
         Returns:
             0 if all transfers succeed, 1 otherwise
         """
+        # Validate: source blocks must >= destination blocks
+        if len(block_indices) < len(dst_block_indices):
+            raise ValueError(
+                f"Source blocks ({len(block_indices)}) cannot be less than "
+                f"destination blocks ({len(dst_block_indices)}). "
+                f"Encode side allocated insufficient buffer."
+            )
+        
         status_list = []
         
         # Transfer each block
-        for src_block_idx, dst_block_idx, chunk_info in zip(
-            block_indices, dst_block_indices, chunk_infos
+        for block_idx, (src_block_idx, dst_block_idx) in enumerate(
+            zip(block_indices, dst_block_indices)
         ):
+            # Calculate how many tokens in this block
+            start_pos = block_idx * block_size
+            end_pos = min(start_pos + block_size, total_tokens)
+            tokens_in_block = end_pos - start_pos
+            
+            if tokens_in_block <= 0:
+                break
+            
             # Transfer each buffer type within the block
             for buffer_type_idx in range(len(self.data_args.aux_item_lens)):
-                chunk_offset, chunk_size = chunk_info[buffer_type_idx]
-                
-                if chunk_size == 0:  # Skip empty chunks
-                    continue
-                
                 embedding_item_len = self.data_args.aux_item_lens[buffer_type_idx]
                 
-                # Calculate source address: base_ptr + block_idx * item_len + offset
+                # Calculate chunk size based on buffer type and tokens_in_block
+                # For aux_datas, only transfer in first block
+                if buffer_type_idx == 3:  # aux_datas
+                    if block_idx == 0:
+                        chunk_size = embedding_item_len  # Transfer full aux_datas
+                    else:
+                        continue  # Skip aux_datas for other blocks
+                else:
+                    # For embeddings, fill_ids, mrope_positions: scale by tokens_in_block
+                    # embedding_item_len already contains the full block size
+                    # We need to transfer only tokens_in_block portion
+                    chunk_size = (embedding_item_len * tokens_in_block) // block_size
+                
+                # Calculate source address: base_ptr + block_idx * item_len
                 embedding_addr = (
                     self.data_args.aux_data_ptrs[buffer_type_idx]
                     + src_block_idx * embedding_item_len
-                    + chunk_offset
                 )
                 
-                # Calculate destination address: base_ptr + block_idx * item_len + offset
+                # Calculate destination address: base_ptr + block_idx * item_len
                 dst_embedding_addr = (
                     dst_embedding_ptrs[buffer_type_idx]
                     + dst_block_idx * embedding_item_len
-                    + chunk_offset
                 )
                 
                 status = self.engine.transfer_sync(
@@ -309,14 +332,22 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             break
 
                     # Block-based transfer
+                    # Calculate block_size from aux_item_lens
+                    # aux_item_lens[0] is for embeddings per block
+                    # aux_item_lens[1] is for fill_ids per block
+                    # block_size = aux_item_lens[1] / fill_ids.itemsize
+                    # Assuming fill_ids is int32 (4 bytes)
+                    block_size = self.data_args.aux_item_lens[1] // 4
+                    
                     ret = self.send_embedding(
                         req.mooncake_session_id,
-                        embedding_chunk.block_indices,  # Changed from embedding_index
+                        embedding_chunk.block_indices,
                         self.language_args_table[
                             req.mooncake_session_id
                         ].dst_embedding_ptrs,
-                        req.dst_block_indices,  # Changed from dst_embedding_index
-                        embedding_chunk.chunk_infos,  # Changed from chunk_info
+                        req.dst_block_indices,
+                        embedding_chunk.total_tokens,
+                        block_size,
                     )
                     if ret != 0:
                         with self.session_lock:
@@ -478,7 +509,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
         bootstrap_room: int,
         block_indices: List[int],
         is_last: bool,
-        chunk_infos: List[List[Tuple[int, int]]],
+        total_tokens: int,
+        block_size: int,
     ):
         """Add block-based transfer request to queue.
         
@@ -486,7 +518,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
             bootstrap_room: Room ID for the request
             block_indices: List of source block indices
             is_last: Whether this is the last chunk
-            chunk_infos: List of chunk_info per block
+            total_tokens: Total number of tokens to transfer
+            block_size: Number of tokens per block
         """
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
         assert is_last  # For embedding data, we only send once at the end
@@ -515,7 +548,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 room=bootstrap_room,
                 block_indices=block_indices,
                 is_last=is_last,
-                chunk_infos=chunk_infos,
+                total_tokens=total_tokens,
             )
         )
 
@@ -650,27 +683,30 @@ class MooncakeEmbeddingSender(BaseKVSender):
         self, 
         block_indices: List[int] = None,
         last_chunk: bool = True, 
-        chunk_infos: List[List[Tuple[int, int]]] = None,
+        total_tokens: int = None,
+        block_size: int = None,
         # Deprecated parameters for backward compatibility
         embedding_index: int = None,
         chunk_info: List[Tuple[int, int]] = None,
+        chunk_infos: List[List[Tuple[int, int]]] = None,
     ):
         """Send embedding data to language instances using block-based transfer.
         
         Args:
             block_indices: List of source block indices
             last_chunk: Whether this is the last chunk
-            chunk_infos: List of chunk_info per block
+            total_tokens: Total number of tokens to transfer
+            block_size: Number of tokens per block
             embedding_index: (Deprecated) Single embedding index
             chunk_info: (Deprecated) Single chunk info
+            chunk_infos: (Deprecated) List of chunk_info per block
         """
         # Support backward compatibility
         if block_indices is None and embedding_index is not None:
             block_indices = [embedding_index]
-            chunk_infos = [chunk_info] if chunk_info else None
         
         self.embedding_mgr.add_transfer_request(
-            self.bootstrap_room, block_indices, last_chunk, chunk_infos
+            self.bootstrap_room, block_indices, last_chunk, total_tokens, block_size
         )
 
     def poll(self) -> KVPoll:

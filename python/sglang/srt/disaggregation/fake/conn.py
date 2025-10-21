@@ -62,10 +62,12 @@ class FakeKVSender(BaseKVSender):
         chunk_info: List[Tuple[int, int]] = None,
         block_indices: List[int] = None,
         chunk_infos: List[List[Tuple[int, int]]] = None,
+        total_tokens: int = None,
+        block_size: int = None,
     ):
         self.has_sent = True
         logger.debug(
-            f"FakeKVSender send_embedding with embedding_index: {embedding_index}, block_indices: {block_indices}, last_chunk: {last_chunk}"
+            f"FakeKVSender send_embedding with embedding_index: {embedding_index}, block_indices: {block_indices}, total_tokens: {total_tokens}, last_chunk: {last_chunk}"
         )
 
     def failure_exception(self):

@@ -320,13 +320,13 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         assert last_chunk == True
         if last_chunk:
             self.disagg_metadata_buffers.set_buf(req)
-            chunk_infos = self.disagg_metadata_buffers.get_buf_chunk_info(req)
         
         # Send using block_indices
         req.disagg_embedding_sender.send_embedding(
             block_indices=req.metadata_block_indices,
             last_chunk=last_chunk,
-            chunk_infos=chunk_infos
+            total_tokens=len(req.fill_ids),
+            block_size=self.disagg_metadata_buffers.block_size,
         )
 
     def get_num_allocatable_reqs(self: Scheduler, running_bs: int):
