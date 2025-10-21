@@ -324,7 +324,7 @@ class MultimodalLanguageTransferQueue:
                                 )
                                 
                                 logger.debug(
-                                    f"Allocated {new_allocation.num_blocks} blocks "
+                                    f"Allocated {len(new_allocation.block_indices)} blocks "
                                     f"to resume transfer: {remaining_tokens} tokens remaining"
                                 )
                             else:

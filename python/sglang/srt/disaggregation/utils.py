@@ -66,9 +66,9 @@ def poll_and_all_reduce(pollers, gloo_group):
 @dataclass
 class MetadataAllocation:
     """Represents a metadata buffer allocation using blocks."""
-    start_block: int  # Starting block index (blocks are always contiguous)
-    num_blocks: int  # Number of blocks allocated
+    block_indices: List[int]  # Allocated block indices (may not be contiguous)
     num_tokens: int  # Actual number of tokens needed
+    start_offset: int  # Starting position in buffer (in tokens)
 
 
 class ReqToMetadataIdxAllocator:
@@ -128,26 +128,31 @@ class ReqToMetadataBlockAllocator:
 
     def alloc_blocks(self, num_blocks: int, num_tokens: int, req_id: int = None, fake: bool = False) -> Optional[MetadataAllocation]:
         """
-        Allocate specified number of contiguous blocks.
+        Allocate specified number of blocks.
         
         Args:
             num_blocks: Number of blocks to allocate
             num_tokens: Actual tokens needed (for validation)
             req_id: Request ID for tracking
             fake: Fake allocation for testing
+        
+        Note:
+            Blocks may not be contiguous due to fragmentation.
+            Data is stored starting from min(block_indices) * block_size.
         """
         if fake:
-            return MetadataAllocation(0, num_blocks, num_tokens)
+            return MetadataAllocation([0], num_tokens, 0)
         
         if len(self.free_blocks) < num_blocks:
             return None
 
-        # Allocate contiguous blocks
-        start_block = self.free_blocks.popleft()
-        for _ in range(num_blocks - 1):
-            self.free_blocks.popleft()
+        # Allocate blocks (may not be contiguous due to free order)
+        blocks = [self.free_blocks.popleft() for _ in range(num_blocks)]
         
-        allocation = MetadataAllocation(start_block, num_blocks, num_tokens)
+        # Use min block as start position for actual data storage
+        start_offset = min(blocks) * self.block_size
+        
+        allocation = MetadataAllocation(blocks, num_tokens, start_offset)
         
         if req_id is not None:
             self.allocations[req_id] = allocation
@@ -167,9 +172,9 @@ class ReqToMetadataBlockAllocator:
         """Free allocated blocks."""
         if fake:
             return
-        # Return contiguous blocks
-        for i in range(allocation.num_blocks):
-            self.free_blocks.append(allocation.start_block + i)
+        # Return blocks to free pool (may become non-contiguous)
+        for block_idx in allocation.block_indices:
+            self.free_blocks.append(block_idx)
         if req_id and req_id in self.allocations:
             del self.allocations[req_id]
 
@@ -487,19 +492,25 @@ class MultimodalDataBuffers:
         self.aux_datas = torch.zeros((self.num_blocks, 16), dtype=torch.int32, device="cpu")
 
     def get_buf_chunk_info(self, allocation: MetadataAllocation, offset_tokens: int = 0, max_tokens: int = None):
-        """Calculate chunk info for transfer."""
+        """
+        Calculate chunk info for transfer.
+        
+        Note:
+            Data is stored contiguously starting from allocation.start_offset,
+            even though allocated blocks may not be contiguous.
+        """
         actual_tokens = allocation.num_tokens - offset_tokens
         if max_tokens:
             actual_tokens = min(actual_tokens, max_tokens)
         
-        # start_token: blocks are contiguous starting from start_block
-        start_token = allocation.start_block * self.block_size + offset_tokens
+        # Use start_offset (data stored contiguously from this position)
+        start_token = allocation.start_offset + offset_tokens
         
         return [
             (start_token * self.embedding_dim * 2, actual_tokens * self.embedding_dim * 2),  # embeddings
             (start_token * 4, actual_tokens * 4),  # fill_ids
             (start_token * 3 * 4, actual_tokens * 3 * 4),  # mrope_positions
-            (allocation.start_block * 64, 64),  # aux_datas (use start_block)
+            (allocation.block_indices[0] * 64, 64),  # aux_datas (use first block)
         ]
 
     def get_buf_infos(self):
@@ -514,21 +525,21 @@ class MultimodalDataBuffers:
         )
 
     def get_buf(self, allocation: MetadataAllocation):
-        """Get buffer data for allocation (blocks are contiguous)."""
-        start_token = allocation.start_block * self.block_size
+        """Get buffer data for allocation."""
+        start_token = allocation.start_offset
         end_token = start_token + allocation.num_tokens
         
         embeddings = self.input_embeddings[start_token * self.embedding_dim : end_token * self.embedding_dim].reshape(allocation.num_tokens, self.embedding_dim)
         fill_ids = self.fill_ids[start_token:end_token]
         mrope = self.mrope_positions[start_token * 3 : end_token * 3]
-        aux = self.aux_datas[allocation.start_block]
+        aux = self.aux_datas[allocation.block_indices[0]]
         
         return embeddings, fill_ids, mrope, aux
 
     def set_buf(self, req: Req, allocation: MetadataAllocation):
-        """Write request data to buffer (blocks are contiguous)."""
+        """Write request data to buffer."""
         embed_length = req.embedding.shape[0]
-        start_token = allocation.start_block * self.block_size
+        start_token = allocation.start_offset
         end_token = start_token + embed_length
 
         self.fill_ids[start_token:end_token] = torch.tensor(req.fill_ids[:embed_length])
@@ -537,6 +548,6 @@ class MultimodalDataBuffers:
         if req.multimodal_inputs and req.multimodal_inputs.mrope_positions is not None:
             self.mrope_positions[start_token * 3 : end_token * 3] = req.multimodal_inputs.mrope_positions[:, :embed_length].flatten().detach().cpu()
         
-        self.aux_datas[allocation.start_block][0] = embed_length
+        self.aux_datas[allocation.block_indices[0]][0] = embed_length
         if req.multimodal_inputs and req.multimodal_inputs.mrope_position_delta is not None:
-            self.aux_datas[allocation.start_block][1] = req.multimodal_inputs.mrope_position_delta[0][0]
+            self.aux_datas[allocation.block_indices[0]][1] = req.multimodal_inputs.mrope_position_delta[0][0]

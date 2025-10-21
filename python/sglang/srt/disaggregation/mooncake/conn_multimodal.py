@@ -890,9 +890,9 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
             embedding_index: Buffer index
             allocation: MetadataAllocation (for block-based allocation)
         """
-        # For block-based allocation, use start_block
+        # For block-based allocation, use first block index
         if allocation is not None:
-            embedding_index = allocation.start_block
+            embedding_index = allocation.block_indices[0]
         
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (
@@ -922,9 +922,9 @@ class MooncakeEmbeddingReceiver(BaseKVReceiver):
             sent_tokens: Number of tokens already transferred
             embedding_index: Buffer index (optional, derived from allocation)
         """
-        # For block-based allocation, use start_block
+        # For block-based allocation, use first block index
         if allocation is not None:
-            embedding_index = allocation.start_block
+            embedding_index = allocation.block_indices[0]
         
         for bootstrap_info in self.bootstrap_infos:
             self.embedding_server_url = (

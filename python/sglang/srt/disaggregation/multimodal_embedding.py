@@ -336,7 +336,7 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
             is_last = True
             chunk_info = self.disagg_metadata_buffers.get_buf_chunk_info(allocation, sent_tokens)
         
-        req.disagg_embedding_sender.send_embedding(allocation.start_block, is_last, chunk_info)
+        req.disagg_embedding_sender.send_embedding(allocation.block_indices[0], is_last, chunk_info)
 
     def get_num_allocatable_reqs(self: Scheduler, running_bs: int):
         return get_global_server_args().max_micro_batch_size - running_bs
