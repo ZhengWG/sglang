@@ -68,43 +68,6 @@ class MetadataAllocation:
     """Represents a metadata buffer allocation using blocks."""
     block_indices: List[int]  # Allocated block indices (may not be contiguous)
     num_tokens: int  # Actual number of tokens needed
-    
-    def get_contiguous_ranges(self, block_size: int) -> List[Tuple[int, int]]:
-        """
-        Merge contiguous blocks into ranges.
-        
-        Returns:
-            List of (start_token, num_tokens) for each contiguous range.
-        
-        Example:
-            block_indices=[8,9,3,4,5], block_size=128
-            -> sorted: [3,4,5,8,9]
-            -> ranges: [(3*128, 3*128), (8*128, 2*128)]
-                      = [(384, 384), (1024, 256)]
-        """
-        if not self.block_indices:
-            return []
-        
-        sorted_blocks = sorted(self.block_indices)
-        ranges = []
-        
-        range_start = sorted_blocks[0]
-        range_len = 1
-        
-        for i in range(1, len(sorted_blocks)):
-            if sorted_blocks[i] == sorted_blocks[i-1] + 1:
-                # Contiguous, extend current range
-                range_len += 1
-            else:
-                # Gap found, save current range and start new one
-                ranges.append((range_start * block_size, range_len * block_size))
-                range_start = sorted_blocks[i]
-                range_len = 1
-        
-        # Don't forget the last range
-        ranges.append((range_start * block_size, range_len * block_size))
-        
-        return ranges
 
 
 class ReqToMetadataIdxAllocator:
@@ -528,72 +491,24 @@ class MultimodalDataBuffers:
         """
         Calculate chunk info for transfer.
         
-        Returns list of chunks for each buffer type, where each buffer type has
-        multiple chunks corresponding to contiguous block ranges.
-        
         Note:
-            Data is stored in blocks according to block_indices.
-            Contiguous blocks are merged into single chunks for efficiency.
+            For simplicity, we use the first block's position as base.
+            Data is gathered from sorted blocks in get_buf/set_buf.
         """
         actual_tokens = allocation.num_tokens - offset_tokens
         if max_tokens:
             actual_tokens = min(actual_tokens, max_tokens)
         
-        # Get contiguous ranges in (start_token, length_tokens) format
-        ranges = allocation.get_contiguous_ranges(self.block_size)
+        # Use first block (sorted) as the base position
+        sorted_blocks = sorted(allocation.block_indices)
+        start_token = sorted_blocks[0] * self.block_size + offset_tokens
         
-        # Apply offset and limit
-        chunks_embeddings = []
-        chunks_fill_ids = []
-        chunks_mrope = []
-        
-        tokens_consumed = 0
-        tokens_skipped = 0
-        
-        for start_token, range_tokens in ranges:
-            # Skip ranges before offset
-            if tokens_skipped + range_tokens <= offset_tokens:
-                tokens_skipped += range_tokens
-                continue
-            
-            # Adjust for offset within this range
-            range_offset = max(0, offset_tokens - tokens_skipped)
-            range_start = start_token + range_offset
-            range_len = range_tokens - range_offset
-            
-            # Limit by max_tokens
-            remaining = actual_tokens - tokens_consumed
-            range_len = min(range_len, remaining)
-            
-            if range_len > 0:
-                chunks_embeddings.append((range_start * self.embedding_dim * 2, range_len * self.embedding_dim * 2))
-                chunks_fill_ids.append((range_start * 4, range_len * 4))
-                chunks_mrope.append((range_start * 3 * 4, range_len * 3 * 4))
-                
-                tokens_consumed += range_len
-                if tokens_consumed >= actual_tokens:
-                    break
-            
-            tokens_skipped += range_tokens
-        
-        # For simplicity, return single chunk info (merge all ranges)
-        # TODO: Support multiple chunks in RDMA transfer
-        if chunks_embeddings:
-            # For now, return the first contiguous range
-            # In future, RDMA layer should support scatter-gather
-            return [
-                chunks_embeddings[0],
-                chunks_fill_ids[0],
-                chunks_mrope[0],
-                (allocation.block_indices[0] * 64, 64),  # aux_datas
-            ]
-        else:
-            return [
-                (0, 0),
-                (0, 0),
-                (0, 0),
-                (allocation.block_indices[0] * 64, 64),
-            ]
+        return [
+            (start_token * self.embedding_dim * 2, actual_tokens * self.embedding_dim * 2),  # embeddings
+            (start_token * 4, actual_tokens * 4),  # fill_ids
+            (start_token * 3 * 4, actual_tokens * 3 * 4),  # mrope_positions
+            (allocation.block_indices[0] * 64, 64),  # aux_datas (use first block)
+        ]
 
     def get_buf_infos(self):
         """Return buffer pointers, lengths, and item sizes for RDMA registration."""
@@ -610,9 +525,9 @@ class MultimodalDataBuffers:
         """
         Get buffer data for allocation.
         
-        Data is gathered from potentially non-contiguous blocks.
+        Data is gathered from blocks in sorted order.
         """
-        ranges = allocation.get_contiguous_ranges(self.block_size)
+        sorted_blocks = sorted(allocation.block_indices)
         
         embeddings_list = []
         fill_ids_list = []
@@ -620,13 +535,16 @@ class MultimodalDataBuffers:
         
         tokens_collected = 0
         
-        for start_token, range_tokens in ranges:
-            # Limit to actual num_tokens
-            range_tokens = min(range_tokens, allocation.num_tokens - tokens_collected)
-            if range_tokens <= 0:
+        for block_idx in sorted_blocks:
+            # Calculate how many tokens to read from this block
+            remaining = allocation.num_tokens - tokens_collected
+            if remaining <= 0:
                 break
             
-            end_token = start_token + range_tokens
+            tokens_in_block = min(self.block_size, remaining)
+            
+            start_token = block_idx * self.block_size
+            end_token = start_token + tokens_in_block
             
             embeddings_list.append(
                 self.input_embeddings[start_token * self.embedding_dim : end_token * self.embedding_dim]
@@ -638,9 +556,9 @@ class MultimodalDataBuffers:
                 self.mrope_positions[start_token * 3 : end_token * 3]
             )
             
-            tokens_collected += range_tokens
+            tokens_collected += tokens_in_block
         
-        # Concatenate all ranges
+        # Concatenate all blocks
         embeddings = torch.cat(embeddings_list).reshape(allocation.num_tokens, self.embedding_dim)
         fill_ids = torch.cat(fill_ids_list)
         mrope = torch.cat(mrope_list)
@@ -652,34 +570,37 @@ class MultimodalDataBuffers:
         """
         Write request data to buffer.
         
-        Data is scattered to potentially non-contiguous blocks.
+        Data is scattered to blocks in sorted order.
         """
         embed_length = req.embedding.shape[0]
-        ranges = allocation.get_contiguous_ranges(self.block_size)
+        sorted_blocks = sorted(allocation.block_indices)
         
         data_offset = 0
         
-        for start_token, range_tokens in ranges:
-            # Limit to actual embed_length
-            range_tokens = min(range_tokens, embed_length - data_offset)
-            if range_tokens <= 0:
+        for block_idx in sorted_blocks:
+            # Calculate how many tokens to write to this block
+            remaining = embed_length - data_offset
+            if remaining <= 0:
                 break
             
-            end_token = start_token + range_tokens
+            tokens_in_block = min(self.block_size, remaining)
             
-            # Write to this contiguous range
+            start_token = block_idx * self.block_size
+            end_token = start_token + tokens_in_block
+            
+            # Write to this block
             self.fill_ids[start_token:end_token] = torch.tensor(
-                req.fill_ids[data_offset : data_offset + range_tokens]
+                req.fill_ids[data_offset : data_offset + tokens_in_block]
             )
             
             self.input_embeddings[start_token * self.embedding_dim : end_token * self.embedding_dim] = \
-                req.embedding[data_offset : data_offset + range_tokens].flatten()
+                req.embedding[data_offset : data_offset + tokens_in_block].flatten()
             
             if req.multimodal_inputs and req.multimodal_inputs.mrope_positions is not None:
                 self.mrope_positions[start_token * 3 : end_token * 3] = \
-                    req.multimodal_inputs.mrope_positions[:, data_offset : data_offset + range_tokens].flatten().detach().cpu()
+                    req.multimodal_inputs.mrope_positions[:, data_offset : data_offset + tokens_in_block].flatten().detach().cpu()
             
-            data_offset += range_tokens
+            data_offset += tokens_in_block
         
         # aux_datas stored in first block
         self.aux_datas[allocation.block_indices[0]][0] = embed_length
