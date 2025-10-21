@@ -1,4 +1,3 @@
-import re
 from typing import List, Union
 
 from decord import VideoReader
@@ -9,10 +8,7 @@ from sglang.srt.models.glm4v_moe import Glm4vMoeForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
-from sglang.srt.multimodal.processors.base_processor import (
-    BaseMultiModalProcessorOutput,
-    MultimodalSpecialTokens,
-)
+from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 
 
 class Glm4vImageProcessor(SGLangBaseProcessor):
@@ -88,7 +84,7 @@ class Glm4vImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-        base_output = self.load_mm_data(
+        base_output = await self.load_mm_data_async(
             prompt=input_text,
             image_data=image_data,
             video_data=request_obj.video_data,

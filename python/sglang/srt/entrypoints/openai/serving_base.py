@@ -72,15 +72,19 @@ class OpenAIServingBase(ABC):
             logger.exception(f"ValueError in request: {e}")
             return self.create_error_response(
                 message=str(e),
-                err_type="BadRequest",
+                err_type="BadRequestError",
                 status_code=400,
             )
         except Exception as e:
             logger.exception(f"Error in request: {e}")
+            error_code = getattr(e, "error_code", 500)
+            error_msg = f"Internal server error: {str(e)}" if error_code >= 500 \
+                else f"Client error: {str(e)}"
+            error_type = "InternalServerError" if error_code >= 500 else "BadRequestError"
             return self.create_error_response(
-                message=f"Internal server error: {str(e)}",
-                err_type="InternalServerError",
-                status_code=getattr(e, "error_code", 500),
+                message=error_msg,
+                err_type=error_type,
+                status_code=error_code,
             )
 
     @abstractmethod

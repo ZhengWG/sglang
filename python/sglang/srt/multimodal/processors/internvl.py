@@ -4,10 +4,8 @@ from functools import lru_cache
 
 import numpy as np
 import torch
-import torchvision.transforms as T
 from decord import VideoReader, cpu, gpu
 from PIL import Image
-from torchvision.transforms import InterpolationMode
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.interns1 import InternS1ForConditionalGeneration
@@ -192,7 +190,7 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
     async def process_mm_data_async(
         self, image_data, input_text, request_obj, **kwargs
     ):
-        base_output = self.load_mm_data(
+        base_output = await self.load_mm_data_async(
             prompt=input_text,
             image_data=image_data,
             multimodal_tokens=self.mm_tokens,

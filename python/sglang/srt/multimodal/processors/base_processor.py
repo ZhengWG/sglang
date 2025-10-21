@@ -1,6 +1,8 @@
+import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
+import functools
 import multiprocessing as mp
 import os
 import re
@@ -156,7 +158,6 @@ class BaseMultimodalProcessor(ABC):
     ):
         self.hf_config = hf_config
         self._processor = _processor
-        self.arch = hf_config.architectures[0]
         self.server_args = server_args
         self.transport_mode = transport_mode
 
@@ -164,7 +165,7 @@ class BaseMultimodalProcessor(ABC):
         self.NUM_TOKEN_PER_FRAME = 330
 
         self.io_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=int(os.environ.get("SGLANG_IO_WORKERS", 4))
+            max_workers=int(os.environ.get("SGLANG_IO_WORKERS", 32))
         )
         self.cpu_executor = concurrent.futures.ProcessPoolExecutor(
             mp_context=mp.get_context("fork"),
@@ -192,6 +193,7 @@ class BaseMultimodalProcessor(ABC):
             "input_features": Modality.AUDIO,
             "input_features_mask": Modality.AUDIO,
             "audio_attention_mask": Modality.AUDIO,
+            "feature_attention_mask": Modality.AUDIO,
             # Video-related attributes
             "pixel_values_videos": Modality.VIDEO,
             "second_per_grid_ts": Modality.VIDEO,
@@ -223,6 +225,7 @@ class BaseMultimodalProcessor(ABC):
             if self._processor.__class__.__name__ in {
                 "Gemma3nProcessor",
                 "Qwen2AudioProcessor",
+                "Qwen3OmniMoeProcessor",
             }:
                 # Note(Xinyuan): for gemma3n, ref: https://github.com/huggingface/transformers/blob/ccf2ca162e33f381e454cdb74bf4b41a51ab976d/src/transformers/models/gemma3n/processing_gemma3n.py#L107
                 kwargs["audio"] = audios
@@ -314,7 +317,9 @@ class BaseMultimodalProcessor(ABC):
         try:
             if modality == Modality.IMAGE:
                 img, _ = load_image(data)
-                return img.convert("RGB") if discard_alpha_channel else img
+                if discard_alpha_channel and img.mode != "RGB":
+                    img = img.convert("RGB")
+                return img
             elif modality == Modality.VIDEO:
                 return load_video(data, frame_count_limit)
             elif modality == Modality.AUDIO:
@@ -519,6 +524,34 @@ class BaseMultimodalProcessor(ABC):
             videos=videos,
             input_text="".join(new_text_parts),
         )
+
+    async def load_mm_data_async(
+        self,
+        prompt: str,
+        multimodal_tokens: MultimodalSpecialTokens,
+        image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
+        audio_data: Optional[list] = None,
+        return_text: Optional[bool] = True,
+        discard_alpha_channel: bool = True,
+        audio_sample_rate: Optional[int] = None,
+    ) -> BaseMultiModalProcessorOutput:
+        """
+        Async wrapper to offload sync load_mm_data into the IO executor, so the
+        event loop thread is not blocked while waiting for network/file IO.
+        """
+        func = functools.partial(
+            self.load_mm_data,
+            prompt=prompt,
+            multimodal_tokens=multimodal_tokens,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            return_text=return_text,
+            discard_alpha_channel=discard_alpha_channel,
+            audio_sample_rate=audio_sample_rate,
+        )
+        return await asyncio.to_thread(func)
 
     @staticmethod
     def get_mm_items_offset(
