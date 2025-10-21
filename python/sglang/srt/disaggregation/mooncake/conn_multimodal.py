@@ -330,12 +330,22 @@ class MooncakeEmbeddingManager(BaseKVManager):
                                 endpoint, dst_port, room, status
                             )
 
+                # Clean up transfer_infos when transfer is complete (Success or Transferring with is_last=True)
+                current_status = self.check_status(embedding_chunk.room)
                 if (
                     embedding_chunk.room not in self.request_status
-                    or self.check_status(embedding_chunk.room) == KVPoll.Success
+                    or current_status == KVPoll.Success
                 ):
+                    # Transfer completed successfully, clean up
                     if embedding_chunk.room in self.transfer_infos:
                         self.transfer_infos.pop(embedding_chunk.room)
+                elif current_status == KVPoll.Transferring and not embedding_chunk.is_last:
+                    # First transfer complete but not last, keep transfer_infos for resume
+                    # Don't clean up - Language side will call resume_transfer
+                    logger.debug(
+                        f"First transfer complete for room={embedding_chunk.room}, "
+                        f"keeping transfer_infos for resume"
+                    )
 
             except Exception as e:
                 raise RuntimeError(
@@ -529,6 +539,17 @@ class MooncakeEmbeddingManager(BaseKVManager):
         for transfer_info in self.transfer_infos[bootstrap_room].values():
             sent_tokens = transfer_info.sent_tokens
             break  # All dst should have the same sent_tokens
+        
+        # Check if already in Transferring state (prevent duplicate transfers)
+        current_status = self.check_status(bootstrap_room)
+        if current_status == KVPoll.Transferring and sent_tokens == 0:
+            # Already transferring first batch, don't add duplicate request
+            # Resume requests (sent_tokens > 0) are allowed
+            logger.debug(
+                f"Skip duplicate transfer request for room={bootstrap_room} "
+                f"(already in Transferring state)"
+            )
+            return
 
         # NOTE(shangming): sharding according to the dst_infos to make sure
         # requests with the same dst_sessions will be added into the same
