@@ -875,9 +875,9 @@ def get_image_bytes(image_file: Union[str, bytes]):
             return f.read()
     elif image_file.startswith("data:"):
         image_file = image_file.split(",")[1]
-        return pybase64.b64decode(image_file)
+        return pybase64.b64decode(image_file, validate=True)
     elif isinstance(image_file, str):
-        return pybase64.b64decode(image_file)
+        return pybase64.b64decode(image_file, validate=True)
     else:
         raise NotImplementedError(f"Invalid image: {image_file}")
 
@@ -924,7 +924,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                     return np.stack(
                         [np.asarray(load_video_frame(frame_data)) for frame_data in encoded.split(",")]
                     )
-                video_bytes = pybase64.b64decode(encoded)
+                video_bytes = pybase64.b64decode(encoded, validate=True)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
                 tmp_file.close()
@@ -932,7 +932,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
             elif os.path.isfile(video_file):
                 vr = VideoReader(video_file, ctx=ctx)
             else:
-                video_bytes = pybase64.b64decode(video_file)
+                video_bytes = pybase64.b64decode(video_file, validate=True)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
                 tmp_file.close()
