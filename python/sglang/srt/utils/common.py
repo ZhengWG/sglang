@@ -3080,10 +3080,6 @@ def lru_cache_frozenset(maxsize=128):
     return decorator
 
 
-def get_origin_rid(rid):
-    return rid.split("#", 1)[1] if "#" in rid else rid
-
-
 def apply_module_patch(target_module, target_function, wrappers):
     original_module, original_function = parse_module_path(
         target_module, target_function, False

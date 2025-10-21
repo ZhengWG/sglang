@@ -199,6 +199,7 @@ class OpenAIServingChat(OpenAIServingBase):
             extra_key=self._compute_extra_key(request),
             priority=request.priority,
             custom_labels=custom_labels,
+            custom_logit_processor=request.custom_logit_processor,
             mm_sampling_kwargs=(request.mm_sampling_kwargs if is_multimodal else None),
         )
 
