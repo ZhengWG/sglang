@@ -204,9 +204,10 @@ class MultimodalLanguagePreallocQueue:
             if language_req.embedding_indices is None:
                 break
 
-            # Initialize receiver with block_indices
+            # Initialize receiver with block_indices and allocated_tokens
             language_req.embedding_receiver.init(
-                embedding_indices=language_req.embedding_indices
+                embedding_indices=language_req.embedding_indices,
+                allocated_tokens=self.default_allocate_tokens,
             )
             preallocated_reqs.append(language_req)
             indices_to_remove.add(i)
@@ -288,7 +289,43 @@ class MultimodalLanguageTransferQueue:
                     embedding_data, fill_ids, mrope_positions, aux_datas = (
                         self.metadata_buffers.get_buf(block_indices=block_indices)
                     )
-                    embedding_length = aux_datas[0]
+                    
+                    # Check if this is a resumed transfer (has partial data)
+                    if hasattr(language_req.req, 'partial_input_embeds'):
+                        # Merge partial data with new data
+                        logger.info(
+                            f"Merging resumed transfer data for rid={language_req.req.rid}"
+                        )
+                        
+                        # Concatenate embeddings
+                        embedding_data = torch.cat([
+                            language_req.req.partial_input_embeds,
+                            embedding_data
+                        ])
+                        
+                        # Concatenate fill_ids
+                        fill_ids = torch.cat([
+                            torch.tensor(language_req.req.partial_fill_ids),
+                            fill_ids
+                        ])
+                        
+                        # Concatenate mrope_positions
+                        mrope_positions = torch.cat([
+                            language_req.req.partial_mrope_positions,
+                            mrope_positions
+                        ])
+                        
+                        # Use aux_datas from first transfer (contains total length)
+                        aux_datas = language_req.req.partial_aux_datas
+                        
+                        # Clean up partial data
+                        del language_req.req.partial_input_embeds
+                        del language_req.req.partial_fill_ids
+                        del language_req.req.partial_mrope_positions
+                        del language_req.req.partial_aux_datas
+                        del language_req.req.partial_sent_tokens
+                    
+                    embedding_length = int(aux_datas[0])
                     mrope_position_delta = aux_datas[1]
                     language_req.req.input_embeds = embedding_data
                     language_req.req.origin_input_ids = fill_ids.tolist()
@@ -327,10 +364,88 @@ class MultimodalLanguageTransferQueue:
 
                 transferred_reqs.append(language_req.req)
                 indices_to_remove.add(i)
+            elif poll == KVPoll.Transferring:
+                # Partial transfer complete, need to resume with remaining data
+                block_indices = language_req.embedding_indices
+                if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
+                    # Get partial data and actual total length from aux_datas
+                    embedding_data, fill_ids, mrope_positions, aux_datas = (
+                        self.metadata_buffers.get_buf(block_indices=block_indices)
+                    )
+                    actual_total_length = int(aux_datas[0])  # Actual total length
+                    sent_tokens = len(fill_ids)  # Tokens already sent
+                    
+                    if actual_total_length > sent_tokens:
+                        # Need to resume transfer
+                        remaining_tokens = actual_total_length - sent_tokens
+                        
+                        logger.info(
+                            f"Partial transfer detected for rid={language_req.req.rid}: "
+                            f"received {sent_tokens}/{actual_total_length} tokens, "
+                            f"need to resume for {remaining_tokens} more tokens"
+                        )
+                        
+                        # Cache received partial data
+                        if not hasattr(language_req.req, 'partial_input_embeds'):
+                            language_req.req.partial_input_embeds = embedding_data
+                            language_req.req.partial_fill_ids = fill_ids.tolist()
+                            language_req.req.partial_mrope_positions = mrope_positions
+                            language_req.req.partial_aux_datas = aux_datas
+                            language_req.req.partial_sent_tokens = sent_tokens
+                        
+                        # Free old allocation
+                        self.req_to_metadata_buffer_idx_allocator.free(
+                            block_indices=block_indices,
+                            req_id=language_req.req.rid,
+                            fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
+                        )
+                        
+                        # Allocate new space for remaining tokens
+                        new_allocation = self.req_to_metadata_buffer_idx_allocator.alloc(
+                            num_tokens=remaining_tokens,
+                            req_id=language_req.req.rid,
+                            fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
+                        )
+                        
+                        if new_allocation is None:
+                            # Not enough memory to resume, mark as failed
+                            logger.error(
+                                f"Not enough memory to resume transfer for rid={language_req.req.rid}, "
+                                f"need {remaining_tokens} tokens"
+                            )
+                            self._handle_failed_request(language_req)
+                            indices_to_remove.add(i)
+                            continue
+                        
+                        # Update embedding_indices
+                        language_req.embedding_indices = new_allocation
+                        
+                        # Calculate allocated_tokens from new allocation
+                        block_size = self.metadata_buffers.block_size
+                        allocated_tokens = len(new_allocation) * block_size
+                        
+                        # Send resume request
+                        language_req.embedding_receiver.resume_transfer(
+                            embedding_indices=new_allocation,
+                            sent_tokens=sent_tokens,
+                            allocated_tokens=allocated_tokens,
+                        )
+                        
+                        logger.info(
+                            f"Resume transfer initiated for rid={language_req.req.rid}: "
+                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens)"
+                        )
+                    else:
+                        # This shouldn't happen - Transferring status but all data received
+                        logger.warning(
+                            f"Unexpected: Transferring status but sent_tokens={sent_tokens} >= "
+                            f"actual_total_length={actual_total_length}"
+                        )
+                # Continue waiting for transfer to complete
+                pass
             elif poll in [
                 KVPoll.Bootstrapping,
                 KVPoll.WaitingForInput,
-                KVPoll.Transferring,
             ]:
                 pass
             else:
