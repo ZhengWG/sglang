@@ -67,6 +67,9 @@ class TransferEmbeddingInfo:
     required_dst_info_num: int
     sent_tokens: int = 0           # Number of tokens already sent (for resume transfer)
     allocated_tokens: int = 0      # Number of tokens allocated by Language side
+    # For resume: need to store original embedding data to retrigger transfer
+    src_embedding_indices: List[int] = None  # Source embedding indices (from Embedding side)
+    total_tokens: int = 0          # Total tokens to transfer (from Embedding side)
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -401,6 +404,11 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             )
                             break
 
+                    # Save source embedding info for potential resume
+                    if req.src_embedding_indices is None:
+                        req.src_embedding_indices = embedding_chunk.embedding_indices
+                        req.total_tokens = embedding_chunk.total_tokens
+
                     # Block-based transfer
                     # Calculate block_size from aux_item_lens
                     # aux_item_lens[0] is for embeddings per block
@@ -509,19 +517,49 @@ class MooncakeEmbeddingManager(BaseKVManager):
                     is_resume = len(waiting_req_bytes) >= 8
                     
                     if is_resume:
-                        # Resume request: update existing transfer_info
+                        # Resume request: update existing transfer_info and trigger transfer
                         if room in self.transfer_infos and mooncake_session_id in self.transfer_infos[room]:
                             transfer_info = TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
+                            req = self.transfer_infos[room][mooncake_session_id]
+                            
                             # Update the existing transfer_info with resume data
-                            self.transfer_infos[room][mooncake_session_id].sent_tokens = transfer_info.sent_tokens
-                            self.transfer_infos[room][mooncake_session_id].allocated_tokens = transfer_info.allocated_tokens
-                            self.transfer_infos[room][mooncake_session_id].dst_embedding_indices = transfer_info.dst_embedding_indices
+                            req.sent_tokens = transfer_info.sent_tokens
+                            req.allocated_tokens = transfer_info.allocated_tokens
+                            req.dst_embedding_indices = transfer_info.dst_embedding_indices
                             
                             logger.info(
                                 f"Resume transfer for room={room}, sent_tokens={transfer_info.sent_tokens}, "
                                 f"allocated_tokens={transfer_info.allocated_tokens}"
                             )
+                            
                             # Don't reset status - it should remain in current state (Transferring)
+                            
+                            # Trigger resume transfer by adding to queue
+                            if req.src_embedding_indices is not None and req.total_tokens > 0:
+                                # Calculate which queue to use (same as add_transfer_request)
+                                dst_infos = self.transfer_infos[room].keys()
+                                session_port_sum = sum(int(session.split(":")[1]) for session in dst_infos)
+                                shard_idx = session_port_sum % len(self.transfer_queues)
+                                
+                                # Add resume transfer chunk to queue
+                                self.transfer_queues[shard_idx].put(
+                                    TransferEmbeddingChunk(
+                                        room=room,
+                                        embedding_indices=req.src_embedding_indices,
+                                        is_last=True,  # Resume is always the last part
+                                        total_tokens=req.total_tokens,
+                                    )
+                                )
+                                
+                                logger.info(
+                                    f"Resume transfer triggered: room={room}, "
+                                    f"queue_idx={shard_idx}, src_blocks={len(req.src_embedding_indices)}"
+                                )
+                            else:
+                                logger.error(
+                                    f"Cannot trigger resume: missing src_embedding_indices or total_tokens "
+                                    f"for room={room} session={mooncake_session_id}"
+                                )
                         else:
                             logger.error(
                                 f"Cannot resume: room={room} session={mooncake_session_id} not found in transfer_infos"

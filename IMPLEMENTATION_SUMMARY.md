@@ -28,20 +28,27 @@
 - ✅ 返回 `(ret, is_partial)` 元组
 - ✅ 支持部分传输逻辑
 
-#### 2.2 `embedding_thread()` 修改
+#### 2.2 `TransferEmbeddingInfo` 添加Resume支持字段
+- ✅ 添加 `src_embedding_indices: List[int]` - 保存原始源indices
+- ✅ 添加 `total_tokens: int` - 保存总token数
+- ✅ 用于Resume时重新触发传输
+
+#### 2.3 `embedding_thread()` 修改
 - ✅ 区分init和resume消息（基于消息长度）
 - ✅ Resume消息：更新现有 `transfer_info` 的 `sent_tokens` 和 `allocated_tokens`
+- ✅ **关键修复**：Resume时创建新的 `TransferEmbeddingChunk` 并放入队列
 - ✅ Init消息：创建新的 `transfer_info`
 - ✅ Resume时不重置status（保持Transferring）
 
-#### 2.3 `transfer_worker()` 修改
+#### 2.4 `transfer_worker()` 修改
+- ✅ 首次传输时保存 `src_embedding_indices` 和 `total_tokens` 到 `transfer_info`
 - ✅ 使用 `send_embedding()` 的新返回值 `(ret, is_partial)`
 - ✅ 根据 `is_partial` 设置正确的status：
   - `is_partial=True` → `KVPoll.Transferring`
   - `is_partial=False` → `KVPoll.Success`
 - ✅ 更新 `sent_tokens` 追踪进度
 
-#### 2.4 `add_transfer_request()` 修改
+#### 2.5 `add_transfer_request()` 修改
 - ✅ 添加防止重复传输的检查
 - ✅ 跳过 `Transferring` 和 `Success` 状态的重复请求
 
@@ -152,11 +159,24 @@ else:
 
 | 文件 | 修改内容 | 行数变化 |
 |------|---------|---------|
-| `conn_multimodal.py` | 核心传输逻辑 | ~+150行 |
+| `conn_multimodal.py` | 核心传输逻辑 + Resume触发修复 | ~+190行 |
 | `multimodal_language.py` | Resume触发和数据合并 | ~+80行 |
 | `multimodal_embedding.py` | 无修改 | 0 |
 
-**总计**: 约 +230 行代码
+**总计**: 约 +270 行代码
+
+### 🐛 关键Bug修复
+
+**问题**：Resume传输没有被触发（感谢用户发现！）
+
+**根本原因**：Resume消息到达后，只更新了`transfer_info`，但没有将新的传输任务加入`transfer_queues`，导致`transfer_worker()`永远不会被触发处理resume请求。
+
+**修复方案**：
+1. ✅ 在`TransferEmbeddingInfo`添加 `src_embedding_indices` 和 `total_tokens` 字段
+2. ✅ 首次传输时在`transfer_worker()`中保存这些信息
+3. ✅ Resume时在`embedding_thread()`中使用保存的信息创建新的`TransferEmbeddingChunk`并放入队列
+
+详见：`RESUME_TRIGGER_FIX.md`
 
 ---
 
