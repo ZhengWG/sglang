@@ -167,6 +167,8 @@ else:
 
 ### 🐛 关键Bug修复
 
+#### Bug #1: Resume传输没有被触发
+
 **问题**：Resume传输没有被触发（感谢用户发现！）
 
 **根本原因**：Resume消息到达后，只更新了`transfer_info`，但没有将新的传输任务加入`transfer_queues`，导致`transfer_worker()`永远不会被触发处理resume请求。
@@ -177,6 +179,19 @@ else:
 3. ✅ Resume时在`embedding_thread()`中使用保存的信息创建新的`TransferEmbeddingChunk`并放入队列
 
 详见：`RESUME_TRIGGER_FIX.md`
+
+#### Bug #2: Block对齐问题
+
+**问题**：Language侧传递的`allocated_tokens`与实际分配的blocks不对齐（感谢用户发现！）
+
+**根本原因**：Language侧传递的是配置的`default_allocate_tokens`（如8192），但allocator实际分配的是blocks（向上取整到block边界），实际token数 = `len(blocks) * block_size`，两者可能不相等。
+
+**修复方案**：
+1. ✅ Init时计算：`actual_allocated_tokens = len(embedding_indices) * block_size`
+2. ✅ 传递实际分配的token数量而非配置值
+3. ✅ Resume时已经是正确的（无需修改）
+
+详见：`BLOCK_ALIGNMENT_FIX.md`
 
 ---
 

@@ -204,10 +204,14 @@ class MultimodalLanguagePreallocQueue:
             if language_req.embedding_indices is None:
                 break
 
-            # Initialize receiver with block_indices and allocated_tokens
+            # Calculate actual allocated tokens from allocated blocks
+            # This ensures proper alignment with block_size
+            actual_allocated_tokens = len(language_req.embedding_indices) * self.metadata_buffers.block_size
+
+            # Initialize receiver with block_indices and actual allocated_tokens
             language_req.embedding_receiver.init(
                 embedding_indices=language_req.embedding_indices,
-                allocated_tokens=self.default_allocate_tokens,
+                allocated_tokens=actual_allocated_tokens,
             )
             preallocated_reqs.append(language_req)
             indices_to_remove.add(i)
