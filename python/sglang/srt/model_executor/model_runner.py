@@ -25,7 +25,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -52,6 +52,7 @@ from sglang.srt.distributed import (
     set_symm_mem_all_reduce,
 )
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
+from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
 from sglang.srt.eplb.eplb_manager import EPLBManager
 from sglang.srt.eplb.expert_distribution import (
     ExpertDistributionRecorder,
@@ -383,6 +384,11 @@ class ModelRunner:
         )
         self.expert_location_updater = ExpertLocationUpdater()
 
+        (
+            ElasticEPStateManager.init(self.server_args)
+            if self.server_args.elastic_ep_backend
+            else None
+        )
         # Load the model
         self.sampler = Sampler()
         self.load_model()
@@ -999,16 +1005,34 @@ class ModelRunner:
         new_expert_location_metadata: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
-        self.expert_location_updater.update(
-            self.model.routed_experts_weights_of_layer,
-            new_expert_location_metadata,
-            update_layer_ids=update_layer_ids,
-            nnodes=self.server_args.nnodes,
-            rank=self.tp_rank,
-        )
+        if ElasticEPStateManager.instance() is not None:
+            # TODO: refactor the weights update when elastic ep
+            old_expert_location_metadata = get_global_expert_location_metadata()
+            assert old_expert_location_metadata is not None
+            old_expert_location_metadata.update(
+                new_expert_location_metadata,
+                update_layer_ids=update_layer_ids,
+            )
+            self.update_weights_from_disk(
+                self.server_args.model_path,
+                self.server_args.load_format,
+                lambda name: "mlp.experts" in name and "mlp.shared_experts" not in name,
+            )
+        else:
+            self.expert_location_updater.update(
+                self.model.routed_experts_weights_of_layer,
+                new_expert_location_metadata,
+                update_layer_ids=update_layer_ids,
+                nnodes=self.server_args.nnodes,
+                rank=self.tp_rank,
+            )
 
     def update_weights_from_disk(
-        self, model_path: str, load_format: str, weights=None
+        self,
+        model_path: str,
+        load_format: str,
+        weight_name_filter: Optional[Callable[[str], bool]] = None,
+        weights=None,
     ) -> tuple[bool, str]:
         """Update engine weights in-place from the disk."""
         logger.info(
@@ -1030,6 +1054,11 @@ class ModelRunner:
             iter = loader._get_weights_iterator(
                 DefaultModelLoader.Source.init_new(config, self.model)
             )
+            if weight_name_filter is not None:
+                iter = (
+                    (name, weight) for name, weight in iter if weight_name_filter(name)
+                )
+
             return iter
 
         def model_load_weights(model, iter):
