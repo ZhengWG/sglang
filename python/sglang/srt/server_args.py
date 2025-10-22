@@ -462,6 +462,7 @@ class ServerArgs:
     enable_memory_saver: bool = False
     enable_weights_cpu_backup: bool = False
     allow_auto_truncate: bool = False
+    allow_auto_output_truncate: bool = False
     enable_custom_logit_processor: bool = False
     flashinfer_mla_disable_ragged: bool = False
     disable_shared_experts_fusion: bool = False
@@ -3042,6 +3043,11 @@ class ServerArgs:
             "--allow-auto-truncate",
             action="store_true",
             help="Allow automatically truncating requests that exceed the maximum input length instead of returning an error.",
+        )
+        parser.add_argument(
+            "--allow-auto-output-truncate",
+            action="store_true",
+            help="Allow automatically truncating max_completion_tokens that exceed the maximum context length instead of returning an error.",
         )
         parser.add_argument(
             "--enable-custom-logit-processor",

@@ -657,7 +657,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             max_new_tokens is not None
             and (max_new_tokens + input_token_num) >= _max_req_len
         ):
-            if self.server_args.allow_auto_truncate:
+            if self.server_args.allow_auto_truncate or self.server_args.allow_auto_output_truncate:
                 logger.warning(
                     f"Requested token count ({input_token_num} input + {max_new_tokens} new) "
                     f"exceeds the model's context length ({self.context_len} tokens). "
