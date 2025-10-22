@@ -86,17 +86,17 @@ class TransferEmbeddingInfo:
 
 ### 2. Language侧修改 (multimodal_language.py)
 
-#### 2.1 在`MultimodalLanguagePreallocQueue`中添加Resume逻辑
+#### 2.1 在`MultimodalLanguagePreallocQueue`中配置默认buffer大小
 
 ```python
 class MultimodalLanguagePreallocQueue:
     def __init__(self, ...):
         # 现有代码...
+        # 默认分配的token数（首次分配使用）
         self.default_allocate_tokens = int(
             os.getenv("SGLANG_EMBEDDING_DEFAULT_ALLOCATE_BUFFER_SIZE", "8192")
         )
-        # 新增：跟踪需要resume的请求
-        self.resume_queue: List[MultimodalLanguageRequest] = []
+        # 注意：resume逻辑在MultimodalLanguageTransferQueue中处理，不需要单独的队列
 ```
 
 #### 2.2 修改`MooncakeEmbeddingReceiver.init()`方法
@@ -263,70 +263,66 @@ def pop_transferred(self):
 
 ### 3. Embedding侧修改 (multimodal_embedding.py)
 
-#### 3.1 修改`send_embedding_chunk()`
+#### 3.1 保持`send_embedding_chunk()`不变
 
-添加`sent_tokens`参数支持resume：
+**重要说明**：`send_embedding_chunk()`中的`last_chunk`参数是为**chunk-prefill**设计的，不要与当前的**chunk-transfer（resume）**混用。
+
+Resume传输逻辑完全在Connection层处理，`send_embedding_chunk()`在首次调用后不需要再次调用。
+
 ```python
 def send_embedding_chunk(
     self: Scheduler,
     req: Req,
     last_chunk: bool = False,
-    sent_tokens: int = 0,  # 新增：已发送的token数
 ):
-    assert last_chunk == True or sent_tokens > 0  # 要么是最后一块，要么是resume
+    # 保持现有实现不变
+    # 这个方法只在首次传输时调用一次
+    assert last_chunk == True  # For embedding models, always send once
     
-    if last_chunk and sent_tokens == 0:
-        # 初次传输
+    if last_chunk:
         self.disagg_metadata_buffers.set_buf(req)
-    
-    # 计算要发送的indices（跳过已发送的部分）
-    total_tokens = len(req.fill_ids)
-    remaining_tokens = total_tokens - sent_tokens
     
     # Send using block_indices
     req.disagg_embedding_sender.send_embedding(
         embedding_indices=req.embedding_indices,
         last_chunk=last_chunk,
-        total_tokens=remaining_tokens,
-        sent_tokens=sent_tokens,
+        total_tokens=len(req.fill_ids),
         block_size=self.disagg_metadata_buffers.block_size,
     )
 ```
 
-#### 3.2 修改`MooncakeEmbeddingSender`
+#### 3.2 修改`MooncakeEmbeddingSender.send_embedding()`
 
-添加resume支持：
+只在首次调用时触发transfer，resume由Language侧主动发起：
 ```python
 class MooncakeEmbeddingSender(BaseKVSender):
-    def __init__(self, ...):
-        # ...现有代码...
-        self.sent_tokens = 0  # 新增：跟踪已发送的token数
-    
     def send_embedding(
         self,
         embedding_indices: List[int] = None,
         last_chunk: bool = True,
         total_tokens: int = None,
         block_size: int = None,
-        sent_tokens: int = 0,  # 新增
     ):
         """Send embedding data to language instances using block-based transfer.
         
+        Note: 
+            - 这个方法只在首次传输时调用一次
+            - Resume传输由Language侧通过resume_transfer()消息触发
+            - Connection层会根据allocated_tokens自动判断是否需要部分传输
+        
         Args:
             embedding_indices: List of source embedding indices
-            last_chunk: Whether this is the last chunk
-            total_tokens: Total number of tokens to transfer (excluding sent_tokens)
+            last_chunk: Whether this is the last chunk (always True for embeddings)
+            total_tokens: Total number of tokens to transfer
             block_size: Number of tokens per block
-            sent_tokens: Number of tokens already sent (for resume)
         """
-        self.sent_tokens = sent_tokens
+        # 首次传输，sent_tokens=0
         self.embedding_mgr.add_transfer_request(
             self.bootstrap_room,
             embedding_indices,
-            last_chunk,
-            total_tokens,
-            block_size,
-            sent_tokens,
+            is_last=last_chunk,
+            total_tokens=total_tokens,
+            block_size=block_size,
         )
 ```
 
@@ -336,7 +332,8 @@ class MooncakeEmbeddingSender(BaseKVSender):
 
 #### 4.1 修改`send_embedding()`方法
 
-支持部分传输：
+**关键修改**：基于`allocated_tokens`而非block数量来判断buffer是否足够
+
 ```python
 def send_embedding(
     self,
@@ -346,45 +343,76 @@ def send_embedding(
     dst_embedding_indices: List[int],
     total_tokens: int,
     block_size: int,
-    sent_tokens: int = 0,  # 新增：已发送的token数
+    sent_tokens: int = 0,         # 新增：已发送的token数
+    allocated_tokens: int = None,  # 新增：Language侧分配的token数
 ):
     """Send embedding data using block-based transfer.
     
     Args:
         sent_tokens: Number of tokens already sent (for resume transfer)
+        allocated_tokens: Number of tokens allocated by Language side
     """
-    # Validate: 移除严格的验证，允许部分传输
-    if sent_tokens == 0 and len(embedding_indices) > len(dst_embedding_indices):
-        # 初次传输且缓冲区不足：只发送部分
+    # 校验block_size一致性
+    if allocated_tokens is not None:
+        expected_block_size = allocated_tokens // len(dst_embedding_indices)
+        if expected_block_size != block_size:
+            raise ValueError(
+                f"Block size mismatch: Embedding side uses {block_size}, "
+                f"but Language side allocated {allocated_tokens} tokens "
+                f"for {len(dst_embedding_indices)} blocks "
+                f"(implies block_size={expected_block_size})"
+            )
+    else:
+        # 向后兼容：如果没有allocated_tokens，用block数量计算
+        allocated_tokens = len(dst_embedding_indices) * block_size
+    
+    # 基于allocated_tokens判断是否需要部分传输
+    remaining_tokens = total_tokens - sent_tokens
+    
+    if remaining_tokens > allocated_tokens:
+        # 需要部分传输
         logger.warning(
-            f"Partial transfer: Source blocks ({len(embedding_indices)}) > "
-            f"destination blocks ({len(dst_embedding_indices)}). "
-            f"Will transfer {len(dst_embedding_indices)} blocks first."
+            f"Partial transfer: remaining={remaining_tokens} > "
+            f"allocated={allocated_tokens}. Will transfer {allocated_tokens} tokens."
         )
-        # 只传输能容纳的部分
-        tokens_to_send = len(dst_embedding_indices) * block_size
-        total_tokens = min(total_tokens, tokens_to_send)
+        tokens_to_send = allocated_tokens
+        is_partial = True
+    else:
+        # 可以完整传输
+        tokens_to_send = remaining_tokens
+        is_partial = False
     
     # 计算要发送的block范围
     start_block = sent_tokens // block_size
     embedding_indices_to_send = embedding_indices[start_block:]
     
-    # 限制为dst容量
-    if len(embedding_indices_to_send) > len(dst_embedding_indices):
-        embedding_indices_to_send = embedding_indices_to_send[:len(dst_embedding_indices)]
+    # 计算需要的dst block数量
+    dst_blocks_needed = (tokens_to_send + block_size - 1) // block_size
+    
+    # 验证dst buffer是否足够
+    if dst_blocks_needed > len(dst_embedding_indices):
+        raise ValueError(
+            f"Insufficient dst blocks: need {dst_blocks_needed} blocks "
+            f"for {tokens_to_send} tokens, but only have {len(dst_embedding_indices)} blocks"
+        )
+    
+    # 限制为实际需要的dst blocks
+    dst_embedding_indices = dst_embedding_indices[:dst_blocks_needed]
+    embedding_indices_to_send = embedding_indices_to_send[:dst_blocks_needed]
     
     src_addrs = []
     dst_addrs = []
     lengths = []
     
+    # 记录实际传输的token数（用于返回）
+    tokens_transferred = 0
+    
     for block_idx, (src_block_idx, dst_block_idx) in enumerate(
         zip(embedding_indices_to_send, dst_embedding_indices)
     ):
         # Calculate tokens in this block
-        tokens_in_prev_blocks = start_block * block_size + block_idx * block_size
-        start_pos = tokens_in_prev_blocks - sent_tokens
-        end_pos = min(start_pos + block_size, total_tokens)
-        tokens_in_block = end_pos - start_pos
+        remaining_in_transfer = tokens_to_send - tokens_transferred
+        tokens_in_block = min(block_size, remaining_in_transfer)
         
         if tokens_in_block <= 0:
             break
@@ -414,10 +442,15 @@ def send_embedding(
             src_addrs.append(embedding_addr)
             dst_addrs.append(dst_embedding_addr)
             lengths.append(chunk_size)
+        
+        tokens_transferred += tokens_in_block
     
-    return self.engine.batch_transfer_sync(
+    ret = self.engine.batch_transfer_sync(
         mooncake_session_id, src_addrs, dst_addrs, lengths
     )
+    
+    # 返回传输结果和是否为部分传输
+    return ret, is_partial
 ```
 
 #### 4.2 修改`embedding_thread()`处理Resume消息
@@ -502,47 +535,52 @@ def transfer_worker(self, queue: FastQueue, executor: concurrent.futures.ThreadP
             # ...现有代码...
             
             for req in reqs_to_be_processed:
-                # 获取allocated_tokens
+                # 获取allocated_tokens和sent_tokens
                 allocated_tokens = req.allocated_tokens
                 sent_tokens = req.sent_tokens
                 
-                # 判断是否是最后一次传输
-                remaining_tokens = embedding_chunk.total_tokens - sent_tokens
-                is_last = (remaining_tokens <= allocated_tokens)
-                
-                # 计算实际要发送的token数
-                tokens_to_send = min(remaining_tokens, allocated_tokens)
-                
                 block_size = self.data_args.aux_item_lens[1] // 4
                 
-                ret = self.send_embedding(
+                # 调用send_embedding，返回(ret, is_partial)
+                ret, is_partial = self.send_embedding(
                     req.mooncake_session_id,
                     embedding_chunk.embedding_indices,
                     self.language_args_table[req.mooncake_session_id].dst_embedding_ptrs,
                     req.dst_embedding_indices,
-                    tokens_to_send,  # 使用计算的token数
+                    embedding_chunk.total_tokens,  # 传递总token数
                     block_size,
-                    sent_tokens,     # 传递已发送的token数
+                    sent_tokens,                   # 已发送的token数
+                    allocated_tokens,              # Language侧分配的token数
                 )
                 
                 if ret != 0:
                     # ...错误处理...
+                    self.record_failure(
+                        embedding_chunk.room,
+                        f"Failed to send embedding chunk of {embedding_chunk.room} to {req.endpoint}:{req.dst_port}",
+                    )
+                    self.update_status(embedding_chunk.room, KVPoll.Failed)
+                    self.sync_status_to_language_endpoint(
+                        req.endpoint, req.dst_port, req.room, KVPoll.Failed
+                    )
                     break
                 
                 # 更新sent_tokens
-                req.sent_tokens += tokens_to_send
+                tokens_sent = min(embedding_chunk.total_tokens - sent_tokens, allocated_tokens)
+                req.sent_tokens += tokens_sent
                 
                 polls.append(True)
                 dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
                 
-                # 根据is_last设置状态
+                # 根据is_partial设置状态
                 if len(polls) == req.required_dst_info_num:
-                    if is_last:
-                        # 完整传输完成
-                        status = KVPoll.Success if all(polls) else KVPoll.Failed
-                    else:
+                    if is_partial:
                         # 部分传输完成，等待resume
                         status = KVPoll.Transferring if all(polls) else KVPoll.Failed
+                        # 保留transfer_infos以支持resume
+                    else:
+                        # 完整传输完成
+                        status = KVPoll.Success if all(polls) else KVPoll.Failed
                     
                     self.update_status(req.room, status)
                     
@@ -573,10 +611,16 @@ def add_transfer_request(
     is_last: bool,
     total_tokens: int,
     block_size: int,
-    sent_tokens: int = 0,  # 新增
 ):
-    """Add block-based transfer request to queue."""
+    """Add block-based transfer request to queue.
+    
+    Note:
+        - 这个方法只在首次传输时调用（由send_embedding触发）
+        - Resume传输由Language侧发送resume消息触发，不经过这个方法
+        - sent_tokens信息在transfer_infos中维护
+    """
     assert self.disaggregation_mode == DisaggregationMode.ENCODE
+    assert is_last  # For embedding data, we only send once at the end
     
     if bootstrap_room not in self.request_status or self.check_status(bootstrap_room) == KVPoll.Failed:
         return
@@ -584,10 +628,10 @@ def add_transfer_request(
     if bootstrap_room not in self.transfer_infos:
         return
     
-    # 防止重复传输：如果status是Transferring且sent_tokens=0，说明已经在传输中
+    # 防止重复传输：检查是否已经开始传输
     current_status = self.check_status(bootstrap_room)
-    if current_status == KVPoll.Transferring and sent_tokens == 0:
-        logger.debug(f"Skip duplicate transfer for room={bootstrap_room}")
+    if current_status in [KVPoll.Transferring, KVPoll.Success]:
+        logger.debug(f"Skip duplicate transfer for room={bootstrap_room}, status={current_status}")
         return
     
     # ...现有代码...
@@ -597,7 +641,6 @@ def add_transfer_request(
             embedding_indices=embedding_indices,
             is_last=is_last,
             total_tokens=total_tokens,
-            sent_tokens=sent_tokens,  # 新增
         )
     )
 ```
@@ -736,59 +779,112 @@ if current_status == KVPoll.Transferring and sent_tokens == 0:
 
 ---
 
-## 📝 实现建议
+## 📝 实现计划
 
-### Phase 1: 核心Resume机制
-1. ✅ 添加`sent_tokens`和`allocated_tokens`字段
-2. ✅ 实现`resume_transfer()`方法
-3. ✅ 修改消息格式支持resume
-4. ✅ 修改status转换逻辑
+### Phase 1: 核心数据结构和消息协议
+1. ✅ `TransferEmbeddingInfo`添加`sent_tokens`和`allocated_tokens`字段
+2. ✅ 修改ZMQ消息格式支持resume（区分init和resume消息）
+3. ✅ 修改`TransferEmbeddingInfo.from_zmq()`解析新字段
 
-### Phase 2: 数据管理
-1. ✅ 实现部分数据缓存
-2. ✅ 实现数据合并逻辑
-3. ✅ 添加防止重复传输检查
+### Phase 2: Connection层实现
+1. ✅ 修改`send_embedding()`方法
+   - 添加`allocated_tokens`参数
+   - 基于tokens而非blocks判断
+   - 校验block_size一致性
+   - 返回`(ret, is_partial)`
+2. ✅ 修改`embedding_thread()`处理resume消息
+3. ✅ 修改`transfer_worker()`根据`is_partial`设置status
+4. ✅ 添加防止重复传输检查
 
-### Phase 3: 错误处理
-1. ✅ Resume时内存不足处理
-2. ✅ 传输失败清理
-3. ✅ Session管理
+### Phase 3: Language侧实现
+1. ✅ `MooncakeEmbeddingReceiver.init()`添加`allocated_tokens`参数
+2. ✅ 新增`MooncakeEmbeddingReceiver.resume_transfer()`方法
+3. ✅ 修改`MultimodalLanguageTransferQueue.pop_transferred()`
+   - 检测`KVPoll.Transferring`状态
+   - 实现部分数据缓存
+   - 触发resume传输
+   - 实现数据合并逻辑
 
-### Phase 4: 优化
-1. 🔄 考虑是否支持多次Resume
-2. 🔄 优化默认buffer大小策略
-3. 🔄 添加监控和日志
+### Phase 4: Embedding侧适配（最小修改）
+1. ✅ 确认`send_embedding_chunk()`保持不变
+2. ✅ 确认`MooncakeEmbeddingSender.send_embedding()`只在首次调用
+
+### Phase 5: 测试和文档
+1. 🔄 单元测试：小数据（无Resume）
+2. 🔄 单元测试：大数据（单次Resume）
+3. 🔄 集成测试：实际模型场景
+4. 🔄 错误场景测试：内存不足、传输失败
+5. 🔄 更新用户文档和配置说明
+
+---
+
+## ❓ 讨论问题与决策
+
+### ✅ 已确认的设计决策
+
+1. **支持单次Resume，接口预留多次Resume能力**
+   - 当前实现：单次Resume（两阶段传输）
+   - 接口设计：支持sent_tokens追踪，可扩展为多次Resume
+   - 理由：简化实现，满足大部分场景；为buffer不足情况预留扩展性
+
+2. **基于allocated_tokens判断，而非block数量**
+   - 使用`allocated_tokens`和`total_tokens`比较
+   - 校验block_size一致性（allocated_tokens / block_num == block_size）
+   - 支持未来不同block_size的扩展
+
+3. **last_chunk不混用**
+   - `last_chunk`仅用于chunk-prefill
+   - Resume传输由`is_partial`标志控制
+   - `send_embedding_chunk()`只在首次调用，不参与resume流程
+
+4. **移除未使用的resume_queue**
+   - Resume逻辑在`MultimodalLanguageTransferQueue.pop_transferred()`中处理
+   - 不需要单独的队列
+
+### 🔄 待讨论的问题
+
+1. **默认buffer大小策略**
+   - 当前：固定8192 tokens
+   - 考虑：是否需要根据模型或历史请求动态调整？
+
+2. **Resume时内存不足的处理**
+   - 方案A：等待释放后重试（需要重试队列）
+   - 方案B：立即失败（简单但可能影响成功率）
+   - 方案C：降级到更小的分配（复杂，支持多次Resume）
+   
+   **建议**：先实现方案B（立即失败），后续可升级到方案A
 
 ---
 
-## ❓ 讨论问题
+## 🔧 关键修正总结
 
-1. **是否支持多次Resume?**
-   - 当前设计支持单次Resume（两阶段传输）
-   - 是否需要支持多次Resume？（如10000 tokens的场景）
+根据反馈，已完成以下关键修正：
 
-2. **默认buffer大小策略**
-   - 当前使用固定的8192 tokens
-   - 是否需要根据历史请求动态调整？
+### 1. ✅ 移除未使用的resume_queue
+- Resume逻辑直接在`MultimodalLanguageTransferQueue.pop_transferred()`中处理
+- 不需要额外的队列
 
-3. **内存不足时的处理**
-   - Resume时如果内存不足，是否应该：
-     a) 等待释放后重试
-     b) 立即失败
-     c) 降级到更小的分配
+### 2. ✅ 澄清last_chunk的用途
+- `last_chunk`仅用于chunk-prefill，不与chunk-transfer混用
+- `send_embedding_chunk()`只在首次调用，不参与resume流程
+- Resume由Connection层的`is_partial`标志控制
 
-4. **性能优化**
-   - 是否需要预分配更大的buffer以减少Resume概率？
-   - 是否需要异步处理Resume请求？
+### 3. ✅ 基于allocated_tokens判断
+- 修改buffer验证逻辑：使用`allocated_tokens`而非`len(embedding_indices)`
+- 添加block_size一致性校验
+- 支持不同block_size的扩展（虽然当前默认一致）
 
----
+### 4. ✅ 单次Resume + 扩展接口
+- 当前实现：单次Resume（两阶段传输）
+- 接口设计：支持`sent_tokens`追踪，预留多次Resume能力
+- 为buffer不足场景预留扩展性
 
 ## 🎯 下一步
 
-请review这个设计方案，特别关注：
-1. Resume机制是否符合预期？
-2. 数据流程是否清晰？
-3. 是否有遗漏的场景？
-4. 实现优先级是否合理？
+设计方案已根据反馈完成修正，请确认：
+1. ✅ Resume机制是否符合预期？
+2. ✅ last_chunk和is_partial的区分是否清晰？
+3. ✅ 基于allocated_tokens的验证逻辑是否正确？
+4. ✅ 接口设计是否支持未来扩展？
 
-确认后我将开始实现代码。
+**确认后即可开始实现代码**。
