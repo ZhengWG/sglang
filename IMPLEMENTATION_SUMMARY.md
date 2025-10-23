@@ -160,10 +160,10 @@ else:
 | 文件 | 修改内容 | 行数变化 |
 |------|---------|---------|
 | `conn_multimodal.py` | 核心传输逻辑 + Resume触发修复 | ~+190行 |
-| `multimodal_language.py` | Resume触发和数据合并 + aux_datas修复 | ~+140行 |
+| `multimodal_language.py` | Resume触发和数据合并 + aux_datas修复 + 多TP同步 | ~+165行 |
 | `multimodal_embedding.py` | 无修改 | 0 |
 
-**总计**: 约 +330 行代码
+**总计**: 约 +355 行代码
 
 ### 🐛 关键Bug修复
 
@@ -206,6 +206,24 @@ else:
 4. ✅ 首次传输继续使用`get_buf()`（aux_datas是正确的）
 
 详见：`RESUME_AUXDATA_FIX.md`
+
+#### Bug #4: 多TP rank同步问题
+
+**问题**：多TP场景下，部分rank报告"Unexpected: sent_tokens=0 >= actual_total_length=0"，无法进入resume流程
+
+**根本原因**：
+1. Embedding侧的aux_datas只写入第一个block
+2. 不同TP rank分配不同的blocks，读取不同的aux_datas
+3. 某些rank读取到的aux_datas[0]=0（未初始化），导致判断错误
+4. 虽然status通过all_reduce同步，但aux_datas没有同步
+
+**修复方案**：
+1. ✅ 在Transferring状态下，使用all_reduce同步`actual_total_length`和`sent_tokens`
+2. ✅ 使用MAX操作，取所有rank中的最大值（有数据的rank会有非零值）
+3. ✅ 区分有数据的rank和dummy rank，分别处理partial数据
+4. ✅ 所有rank都执行resume流程，保持同步一致性
+
+详见：`MULTI_TP_SYNC_FIX.md`
 
 ---
 
