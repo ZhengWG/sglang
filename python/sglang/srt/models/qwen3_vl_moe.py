@@ -36,10 +36,10 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-from sglang.srt.layers.pooler import Pooler, PoolingType
+from sglang.srt.layers.pooler import EmbeddingPoolerOutput, Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.managers.mm_utils import general_mm_embed_routine
+from sglang.srt.managers.mm_utils import embed_mm_inputs, general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -200,6 +200,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         get_embedding: bool = False,
+        get_multimodal_embedding: bool = False,
+        **kwargs,
     ):
         """Run forward pass for Qwen3-VL.
 
@@ -226,6 +228,69 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
+        # Encode/Language disaggregation support for Qwen3-VL-MoE
+        # 1) Encode-side: return combined (text + deepstack) embeddings for transfer
+        if get_multimodal_embedding:
+            # Prepare multimodal inputs for current batch
+            mm_inputs_list = [
+                mm_input for mm_input in forward_batch.mm_inputs if mm_input is not None
+            ]
+            extend_prefix_lens = [
+                prefix_len
+                for i, prefix_len in enumerate(forward_batch.extend_prefix_lens_cpu)
+                if forward_batch.mm_inputs[i] is not None
+            ]
+            extend_seq_lens = [
+                seq_len
+                for i, seq_len in enumerate(forward_batch.extend_seq_lens_cpu)
+                if forward_batch.mm_inputs[i] is not None
+            ]
+
+            inputs_embeds, other_info = embed_mm_inputs(
+                mm_inputs_list=mm_inputs_list,
+                extend_prefix_lens=extend_prefix_lens,
+                extend_seq_lens=extend_seq_lens,
+                input_ids=input_ids,
+                input_embedding=self.model.get_input_embeddings(),
+                multimodal_model=self,
+                data_embedding_func_mapping=None,
+                placeholder_tokens=None,
+                use_deepstack=self.use_deepstack,
+            )
+
+            if self.use_deepstack and other_info is not None and (
+                "input_deepstack_embeds" in other_info
+            ):
+                combined_embeds = torch.cat(
+                    [inputs_embeds, other_info["input_deepstack_embeds"]], dim=-1
+                )
+            else:
+                combined_embeds = inputs_embeds
+
+            return EmbeddingPoolerOutput(embeddings=combined_embeds)
+
+        # 2) Language-side: if receiving combined embeds (text + deepstack), split them
+        input_embeds = kwargs.get("input_embeds", None)
+        if input_embeds is not None and input_embeds.shape[-1] != self.config.hidden_size:
+            # Expect shape: [*, hidden_size * (1 + num_deepstack_embeddings)]
+            total_dim = input_embeds.shape[-1]
+            base = self.config.hidden_size
+            num_ds = getattr(self, "num_deepstack_embeddings", 0)
+            expected = base * (1 + num_ds)
+            if num_ds > 0 and total_dim == expected:
+                base_embeds = input_embeds[:, :base]
+                deepstack_embeds = input_embeds[:, base:]
+                # Directly forward to language model to avoid re-embedding
+                return self.model(
+                    input_ids=None,
+                    positions=positions,
+                    forward_batch=forward_batch,
+                    input_embeds=base_embeds,
+                    pp_proxy_tensors=kwargs.get("pp_proxy_tensors"),
+                    input_deepstack_embeds=deepstack_embeds,
+                )
+            # else: fall through to normal path
+
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -233,6 +298,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             multimodal_model=self,
             positions=positions,
             use_deepstack=self.use_deepstack,
+            **kwargs,
         )
 
         if not get_embedding:
