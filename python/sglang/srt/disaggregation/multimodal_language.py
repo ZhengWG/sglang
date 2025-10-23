@@ -290,15 +290,80 @@ class MultimodalLanguageTransferQueue:
                 # Use block_indices instead of single index
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    embedding_data, fill_ids, mrope_positions, aux_datas = (
-                        self.metadata_buffers.get_buf(block_indices=block_indices)
-                    )
-                    
                     # Check if this is a resumed transfer (has partial data)
+                    if hasattr(language_req.req, 'partial_input_embeds'):
+                        # Resume transfer: need special handling for aux_datas
+                        # The new blocks' aux_datas[0] is not set by Embedding side,
+                        # so we can't use get_buf directly. Instead, we calculate
+                        # the expected tokens from allocation.
+                        
+                        # Calculate expected tokens in resume transfer
+                        block_size = self.metadata_buffers.block_size
+                        partial_sent = language_req.req.partial_sent_tokens
+                        total_expected = int(language_req.req.partial_aux_datas[0])
+                        remaining_expected = total_expected - partial_sent
+                        
+                        logger.info(
+                            f"Resume transfer for rid={language_req.req.rid}: "
+                            f"partial_sent={partial_sent}, total_expected={total_expected}, "
+                            f"remaining_expected={remaining_expected}, allocated_blocks={len(block_indices)}"
+                        )
+                        
+                        # Gather data from blocks manually with correct token count
+                        gathered_embeddings = []
+                        gathered_fill_ids = []
+                        gathered_mrope_positions = []
+                        
+                        tokens_gathered = 0
+                        for block_idx in block_indices:
+                            tokens_in_block = min(block_size, remaining_expected - tokens_gathered)
+                            if tokens_in_block <= 0:
+                                break
+                            
+                            # Gather embeddings
+                            block_embed = self.metadata_buffers.input_embeddings[
+                                block_idx, : tokens_in_block * self.metadata_buffers.embedding_dim
+                            ]
+                            gathered_embeddings.append(
+                                block_embed.reshape(tokens_in_block, self.metadata_buffers.embedding_dim)
+                            )
+                            
+                            # Gather fill_ids
+                            gathered_fill_ids.append(
+                                self.metadata_buffers.fill_ids[block_idx, :tokens_in_block]
+                            )
+                            
+                            # Gather mrope_positions
+                            gathered_mrope_positions.append(
+                                self.metadata_buffers.mrope_positions[block_idx, : 3 * tokens_in_block].reshape(3, -1)
+                            )
+                            
+                            tokens_gathered += tokens_in_block
+                        
+                        # Concatenate gathered data
+                        embedding_data = torch.cat(gathered_embeddings, dim=0) if gathered_embeddings else torch.empty(0, self.metadata_buffers.embedding_dim)
+                        fill_ids = torch.cat(gathered_fill_ids) if gathered_fill_ids else torch.empty(0, dtype=torch.int32)
+                        mrope_positions = torch.cat(gathered_mrope_positions, dim=-1) if gathered_mrope_positions else torch.empty(3, 0, dtype=torch.int32)
+                        
+                        # Use cached aux_datas
+                        aux_datas = language_req.req.partial_aux_datas
+                    else:
+                        # First time transfer: use normal get_buf
+                        embedding_data, fill_ids, mrope_positions, aux_datas = (
+                            self.metadata_buffers.get_buf(block_indices=block_indices)
+                        )
+                    
+                    # Merge resumed data if applicable
                     if hasattr(language_req.req, 'partial_input_embeds'):
                         # Merge partial data with new data
                         logger.info(
-                            f"Merging resumed transfer data for rid={language_req.req.rid}"
+                            f"Merging resumed transfer data for rid={language_req.req.rid}: "
+                            f"partial_embeds_shape={language_req.req.partial_input_embeds.shape}, "
+                            f"new_embeds_shape={embedding_data.shape}, "
+                            f"partial_fill_ids_len={len(language_req.req.partial_fill_ids)}, "
+                            f"new_fill_ids_len={len(fill_ids)}, "
+                            f"partial_mrope_shape={language_req.req.partial_mrope_positions.shape}, "
+                            f"new_mrope_shape={mrope_positions.shape}"
                         )
                         
                         # Concatenate embeddings
@@ -313,11 +378,27 @@ class MultimodalLanguageTransferQueue:
                             fill_ids
                         ])
                         
-                        # Concatenate mrope_positions
-                        mrope_positions = torch.cat([
-                            language_req.req.partial_mrope_positions,
-                            mrope_positions
-                        ])
+                        # Concatenate mrope_positions (handle empty tensors)
+                        # mrope_positions shape: (3, num_tokens) or could be empty
+                        partial_mrope = language_req.req.partial_mrope_positions
+                        if partial_mrope.numel() > 0 and mrope_positions.numel() > 0:
+                            # Both have data, concatenate along last dimension
+                            logger.info(
+                                f"Concatenating mrope_positions: partial shape={partial_mrope.shape}, "
+                                f"new shape={mrope_positions.shape}"
+                            )
+                            mrope_positions = torch.cat([partial_mrope, mrope_positions], dim=-1)
+                        elif partial_mrope.numel() > 0:
+                            # Only first part has data
+                            logger.info(
+                                f"Using only partial mrope_positions: shape={partial_mrope.shape}"
+                            )
+                            mrope_positions = partial_mrope
+                        else:
+                            # Use new mrope_positions (or empty)
+                            logger.info(
+                                f"Using only new mrope_positions: shape={mrope_positions.shape}"
+                            )
                         
                         # Use aux_datas from first transfer (contains total length)
                         aux_datas = language_req.req.partial_aux_datas

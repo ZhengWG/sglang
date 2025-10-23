@@ -160,10 +160,10 @@ else:
 | 文件 | 修改内容 | 行数变化 |
 |------|---------|---------|
 | `conn_multimodal.py` | 核心传输逻辑 + Resume触发修复 | ~+190行 |
-| `multimodal_language.py` | Resume触发和数据合并 | ~+80行 |
+| `multimodal_language.py` | Resume触发和数据合并 + aux_datas修复 | ~+140行 |
 | `multimodal_embedding.py` | 无修改 | 0 |
 
-**总计**: 约 +270 行代码
+**总计**: 约 +330 行代码
 
 ### 🐛 关键Bug修复
 
@@ -192,6 +192,20 @@ else:
 3. ✅ Resume时已经是正确的（无需修改）
 
 详见：`BLOCK_ALIGNMENT_FIX.md`
+
+#### Bug #3: Resume传输aux_datas问题
+
+**问题**：Resume传输时合并数据报错：`RuntimeError: Expected size 8192 but got size 0`
+
+**根本原因**：Resume传输时，新分配的blocks的`aux_datas[0]`未被Embedding侧设置（默认为0），导致`get_buf()`读取到`total_length=0`，返回空数据，合并时维度不匹配。
+
+**修复方案**：
+1. ✅ Resume传输时不使用`get_buf()`，因为新blocks的aux_datas不可靠
+2. ✅ 使用缓存的`partial_aux_datas`计算`remaining_expected`
+3. ✅ 手动gather数据，使用正确的token数量
+4. ✅ 首次传输继续使用`get_buf()`（aux_datas是正确的）
+
+详见：`RESUME_AUXDATA_FIX.md`
 
 ---
 
