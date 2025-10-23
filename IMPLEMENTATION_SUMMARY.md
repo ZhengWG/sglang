@@ -160,10 +160,10 @@ else:
 | 文件 | 修改内容 | 行数变化 |
 |------|---------|---------|
 | `conn_multimodal.py` | 核心传输逻辑 + Resume触发修复 | ~+190行 |
-| `multimodal_language.py` | Resume触发和数据合并 + aux_datas修复 + 多TP同步 | ~+165行 |
+| `multimodal_language.py` | Resume触发和数据合并 + aux_datas修复 + 多TP同步 + Event Loop修复 | ~+175行 |
 | `multimodal_embedding.py` | 无修改 | 0 |
 
-**总计**: 约 +355 行代码
+**总计**: 约 +365 行代码
 
 ### 🐛 关键Bug修复
 
@@ -212,18 +212,33 @@ else:
 **问题**：多TP场景下，部分rank报告"Unexpected: sent_tokens=0 >= actual_total_length=0"，无法进入resume流程
 
 **根本原因**：
-1. Embedding侧的aux_datas只写入第一个block
-2. 不同TP rank分配不同的blocks，读取不同的aux_datas
+1. Embedding侧的aux_datas只在第一次传输的第一个block中发送
+2. 不同TP rank分配不同的blocks，某些rank读取不到aux_datas
 3. 某些rank读取到的aux_datas[0]=0（未初始化），导致判断错误
-4. 虽然status通过all_reduce同步，但aux_datas没有同步
+4. Resume传输时Embedding不再发送aux_datas，应使用缓存值
 
 **修复方案**：
-1. ✅ 在Transferring状态下，使用all_reduce同步`actual_total_length`和`sent_tokens`
-2. ✅ 使用MAX操作，取所有rank中的最大值（有数据的rank会有非零值）
-3. ✅ 区分有数据的rank和dummy rank，分别处理partial数据
-4. ✅ 所有rank都执行resume流程，保持同步一致性
+1. ✅ 第一次Transferring：读取aux_datas，使用all_reduce同步所有rank
+2. ✅ 缓存aux_datas供resume使用
+3. ✅ 后续Transferring（如果发生）：使用缓存的aux_datas，不再读取
 
 详见：`MULTI_TP_SYNC_FIX.md`
+
+#### Bug #5: Event Loop重复处理问题
+
+**问题**：在event loop中，resume触发后poll()仍返回Transferring，导致重复执行get_buf/free/alloc/resume_transfer
+
+**根本原因**：
+1. Resume传输需要时间，期间poll()持续返回Transferring
+2. 没有标记机制区分"第一次Transferring"和"等待resume完成"
+3. 每次loop都重新执行resume逻辑，导致重复free/alloc和重复发送请求
+
+**修复方案**：
+1. ✅ 添加`resume_triggered`标记
+2. ✅ 第一次进入Transferring时执行resume逻辑并设置标记
+3. ✅ 后续loop检测到标记后跳过，避免重复处理
+
+详见：`EVENT_LOOP_FIX.md`
 
 ---
 

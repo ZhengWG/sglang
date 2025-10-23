@@ -451,50 +451,50 @@ class MultimodalLanguageTransferQueue:
                 indices_to_remove.add(i)
             elif poll == KVPoll.Transferring:
                 # Partial transfer complete, need to resume with remaining data
+                
+                # IMPORTANT: This is a loop, poll() may return Transferring multiple times
+                # while waiting for resume to complete. We should only process once.
+                if hasattr(language_req.req, 'resume_triggered'):
+                    # Resume already triggered, just wait for completion
+                    logger.debug(
+                        f"Resume already triggered for rid={language_req.req.rid}, "
+                        f"waiting for completion"
+                    )
+                    continue
+                
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
                     # IMPORTANT: In first transfer, aux_data is sent in the first block.
                     # In resume transfer, aux_data is NOT sent by Embedding side.
                     # So we should use cached partial_aux_datas, not read from new blocks.
                     
-                    # Check if we already have cached partial data
-                    if hasattr(language_req.req, 'partial_aux_datas'):
-                        # Resume already triggered before, use cached values
-                        # (Embedding side doesn't send aux_data in resume transfer)
-                        actual_total_length = int(language_req.req.partial_aux_datas[0])
-                        sent_tokens = language_req.req.partial_sent_tokens
+                    # This is the first time we see Transferring status
+                    # Read from buffer
+                    # Note: aux_data is only valid in the first block from Embedding side
+                    # In multi-TP scenario, some ranks may not have this block
+                    embedding_data, fill_ids, mrope_positions, aux_datas = (
+                        self.metadata_buffers.get_buf(block_indices=block_indices)
+                    )
+                    actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
+                    sent_tokens = len(fill_ids)  # May be 0 on some ranks
+                    
+                    # Sync aux_data across all ranks (use MAX to get the valid value)
+                    # The rank that has the first block will have non-zero actual_total_length
+                    import torch.distributed as dist
+                    if self.gloo_group is not None:
+                        actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
+                        sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
+                        
+                        dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                        dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                        
+                        actual_total_length = int(actual_total_length_tensor.item())
+                        sent_tokens = int(sent_tokens_tensor.item())
                         
                         logger.info(
-                            f"Using cached partial_aux_datas for rid={language_req.req.rid}: "
+                            f"Synced aux_datas across ranks for rid={language_req.req.rid}: "
                             f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
                         )
-                    else:
-                        # First time seeing Transferring status - read from buffer
-                        # Note: aux_data is only valid in the first block from Embedding side
-                        # In multi-TP scenario, some ranks may not have this block
-                        embedding_data, fill_ids, mrope_positions, aux_datas = (
-                            self.metadata_buffers.get_buf(block_indices=block_indices)
-                        )
-                        actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
-                        sent_tokens = len(fill_ids)  # May be 0 on some ranks
-                        
-                        # Sync aux_data across all ranks (use MAX to get the valid value)
-                        # The rank that has the first block will have non-zero actual_total_length
-                        import torch.distributed as dist
-                        if self.gloo_group is not None:
-                            actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
-                            sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
-                            
-                            dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                            dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                            
-                            actual_total_length = int(actual_total_length_tensor.item())
-                            sent_tokens = int(sent_tokens_tensor.item())
-                            
-                            logger.info(
-                                f"Synced aux_datas across ranks for rid={language_req.req.rid}: "
-                                f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
-                            )
                     
                     if actual_total_length > sent_tokens:
                         # Need to resume transfer
@@ -557,6 +557,9 @@ class MultimodalLanguageTransferQueue:
                             sent_tokens=sent_tokens,
                             allocated_tokens=allocated_tokens,
                         )
+                        
+                        # Mark resume as triggered to avoid processing again in next loop
+                        language_req.req.resume_triggered = True
                         
                         logger.info(
                             f"Resume transfer initiated for rid={language_req.req.rid}: "
