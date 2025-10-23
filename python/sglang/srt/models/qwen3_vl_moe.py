@@ -65,8 +65,15 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         prefix: str = "",
     ):
         super().__init__(config=config, quant_config=quant_config, prefix=prefix)
+        if not self.pp_group.is_first_rank:
+            assert self.start_layer >= len(
+                config.vision_config.deepstack_visual_indexes
+            ), "start_layer should be greater than or equal to len(deepstack_visual_indexes)"
 
         self.hidden_size = config.hidden_size
+        self.deepstack_embed_to_decoder_layer = range(
+            len(config.vision_config.deepstack_visual_indexes)
+        )
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
@@ -120,11 +127,12 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             )
 
             # process deepstack
-            if input_deepstack_embeds is not None and layer_idx in range(3):
+            if (
+                input_deepstack_embeds is not None
+                and layer_idx in self.deepstack_embed_to_decoder_layer
+            ):
                 sep = self.hidden_size * layer_idx
-                hidden_states.add_(
-                    input_deepstack_embeds[:, sep : sep + self.hidden_size]
-                )
+                hidden_states += input_deepstack_embeds[:, sep : sep + self.hidden_size]
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
