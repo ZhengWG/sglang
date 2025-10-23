@@ -280,11 +280,12 @@ Connection层: 接收resume消息，完成剩余传输
 ```
 
 ### 3. 扩展性强
-- ✅ **自然支持多次Resume**（基于allocation indices变化）
-  - 不使用永久boolean标记
-  - 通过比较`current_indices`和`last_resume_indices`判断
-  - 当indices变化时自动触发新的resume轮次
-  - 详见：`MULTIPLE_RESUME_SUPPORT.md`
+- ✅ **自然支持多次Resume**（基于sent_tokens追踪）
+  - 不使用永久boolean标记或复杂的generation counter
+  - 通过比较`sent_tokens`和`last_resume_at_sent_tokens`判断
+  - sent_tokens单调递增，准确反映进度
+  - 不受allocator重用blocks影响
+  - 详见：`SENT_TOKENS_TRACKING_FIX.md`, `MULTIPLE_RESUME_SUPPORT.md`
 - ✅ 支持不同block_size（通过一致性校验）
 - ✅ 向后兼容（`allocated_tokens`可选）
 

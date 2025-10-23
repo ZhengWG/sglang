@@ -52,8 +52,14 @@
 
 ### Bug #5: Event Loop重复处理 ✅
 **问题**：poll()持续返回Transferring，导致重复处理  
-**修复**：使用`last_resume_indices`标记已处理的allocation  
-**文档**：`EVENT_LOOP_FIX.md`
+**初始方案**：使用indices比较 ❌ (有重用问题)  
+**最终方案**：使用`sent_tokens`追踪，基于`last_resume_at_sent_tokens`判断  
+**文档**：`EVENT_LOOP_FIX.md`, `SENT_TOKENS_TRACKING_FIX.md`
+
+### Bug #6: Allocation重用问题 ✅
+**问题**：Allocator可能重用相同blocks，导致indices比较失效  
+**修复**：改用sent_tokens追踪，不受indices影响  
+**文档**：`ALLOCATION_REUSE_FIX.md`
 
 ---
 
@@ -93,17 +99,22 @@ Language侧:
 ### 2. 多次Resume自动支持
 
 ```python
-# 不使用永久标记，而是基于allocation变化
-if current_indices == last_resume_indices:
-    skip  # 已处理，等待完成
+# 基于sent_tokens追踪进度（最终方案）
+if sent_tokens == last_resume_at_sent_tokens:
+    skip  # 已触发resume，等待完成
 else:
-    process  # 新的allocation，执行resume
+    process  # sent_tokens增加了，可能需要新resume
+
+# sent_tokens累加逻辑：
+sent_tokens = previous_sent_tokens + len(new_fill_ids)
 
 # 支持场景：
-第一次: [0-63] → resume → [64-127]
-第二次: [64-127] → resume → [128-191]
-第三次: [128-191] → resume → [192-255]
+第一次: sent=8192 → resume → last_resume=8192
+第二次: sent=16384 → resume → last_resume=16384
+第三次: sent=24576 → resume → last_resume=24576
 ...
+
+# 即使allocator重用相同blocks，sent_tokens也不同 ✅
 ```
 
 ### 3. 多TP场景健壮

@@ -453,52 +453,55 @@ class MultimodalLanguageTransferQueue:
                 # Partial transfer complete, need to resume with remaining data
                 
                 # IMPORTANT: This is a loop, poll() may return Transferring multiple times
-                # while waiting for resume to complete. We should only process once per allocation.
-                # To support multiple resume (future), we check if embedding_indices changed.
-                current_indices = tuple(language_req.embedding_indices) if language_req.embedding_indices else None
-                last_processed_indices = getattr(language_req.req, 'last_resume_indices', None)
-                
-                if current_indices == last_processed_indices:
-                    # Already processed this allocation, waiting for completion
-                    logger.debug(
-                        f"Resume already triggered for current allocation, rid={language_req.req.rid}, "
-                        f"waiting for completion"
-                    )
-                    continue
+                # while waiting for resume to complete. We should only process once per resume round.
+                # 
+                # Strategy: Track which sent_tokens value we last triggered resume for.
+                # - If current sent_tokens == last_resume_at_sent_tokens: skip (waiting for completion)
+                # - If current sent_tokens > last_resume_at_sent_tokens: process (new resume round needed)
+                # This is robust even if allocator reuses the same blocks.
                 
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    # IMPORTANT: In first transfer, aux_data is sent in the first block.
-                    # In resume transfer, aux_data is NOT sent by Embedding side.
-                    # So we should use cached partial_aux_datas, not read from new blocks.
-                    
-                    # This is the first time we see Transferring status
-                    # Read from buffer
-                    # Note: aux_data is only valid in the first block from Embedding side
-                    # In multi-TP scenario, some ranks may not have this block
+                    # Read buffer to get aux_datas and determine sent_tokens
+                    # Note: aux_data is only sent in first transfer's first block
                     embedding_data, fill_ids, mrope_positions, aux_datas = (
                         self.metadata_buffers.get_buf(block_indices=block_indices)
                     )
-                    actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
-                    sent_tokens = len(fill_ids)  # May be 0 on some ranks
+                    actual_total_length = int(aux_datas[0])  # May be 0 on some ranks or resume blocks
+                    sent_tokens = len(fill_ids)  # Tokens in current buffer
                     
-                    # Sync aux_data across all ranks (use MAX to get the valid value)
-                    # The rank that has the first block will have non-zero actual_total_length
-                    import torch.distributed as dist
-                    if self.gloo_group is not None:
-                        actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
-                        sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
-                        
-                        dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                        dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                        
-                        actual_total_length = int(actual_total_length_tensor.item())
-                        sent_tokens = int(sent_tokens_tensor.item())
-                        
-                        logger.info(
-                            f"Synced aux_datas across ranks for rid={language_req.req.rid}: "
-                            f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
+                    # Use cached actual_total_length if available (more reliable)
+                    if hasattr(language_req.req, 'partial_aux_datas'):
+                        actual_total_length = int(language_req.req.partial_aux_datas[0])
+                        # Add current buffer's tokens to previous sent_tokens
+                        previous_sent = language_req.req.partial_sent_tokens
+                        sent_tokens = previous_sent + len(fill_ids) if len(fill_ids) > 0 else previous_sent
+                    else:
+                        # First Transferring: sync aux_data across all ranks
+                        import torch.distributed as dist
+                        if self.gloo_group is not None:
+                            actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
+                            sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
+                            
+                            dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                            dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                            
+                            actual_total_length = int(actual_total_length_tensor.item())
+                            sent_tokens = int(sent_tokens_tensor.item())
+                            
+                            logger.info(
+                                f"First Transferring, synced aux_datas: rid={language_req.req.rid}, "
+                                f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
+                            )
+                    
+                    # Check if we already triggered resume for this sent_tokens value
+                    last_resume_at = getattr(language_req.req, 'last_resume_at_sent_tokens', -1)
+                    if sent_tokens == last_resume_at and sent_tokens > 0:
+                        # Resume already triggered, waiting for completion
+                        logger.debug(
+                            f"Resume already triggered at sent_tokens={sent_tokens}, waiting"
                         )
+                        continue
                     
                     if actual_total_length > sent_tokens:
                         # Need to resume transfer
@@ -562,13 +565,18 @@ class MultimodalLanguageTransferQueue:
                             allocated_tokens=allocated_tokens,
                         )
                         
-                        # Mark this allocation as processed to avoid repeat in next loop
-                        # Use tuple of indices to support multiple resume (if indices change, we can process again)
-                        language_req.req.last_resume_indices = tuple(new_allocation)
+                        # Update partial_sent_tokens for next round
+                        # This ensures correct累calculation in future iterations
+                        language_req.req.partial_sent_tokens = sent_tokens
+                        
+                        # Record that we triggered resume at this sent_tokens value
+                        # This prevents re-processing even if allocator reuses same blocks
+                        language_req.req.last_resume_at_sent_tokens = sent_tokens
                         
                         logger.info(
                             f"Resume transfer initiated for rid={language_req.req.rid}: "
-                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens)"
+                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens), "
+                            f"sent_tokens={sent_tokens}"
                         )
                     else:
                         # This shouldn't happen - Transferring status but all data received
