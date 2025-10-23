@@ -77,6 +77,7 @@ from sglang.srt.model_loader.utils import (
 DEFAULT_GPU_MEMORY_FRACTION_FOR_CALIBRATION = (
     0.8  # Reserve 20% GPU memory headroom for ModelOpt calibration
 )
+from sglang.srt.environ import envs
 from sglang.srt.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -244,14 +245,24 @@ def _initialize_model(
     quant_config = _get_quantization_config(
         model_config, load_config, packed_modules_mapping
     )
+
+    # Build kwargs conditionally
+    kwargs = {
+        "config": model_config.hf_config,
+        "quant_config": quant_config,
+    }
+
+    # Only add sparse head kwargs if envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set()
+    if envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set():
+        kwargs["sparse_head"] = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.value
+        kwargs["model_path"] = model_config.model_path
+
     hf_to_sglang_mapper = getattr(model_class, "hf_to_sglang_mapper", None)
     # pass mappings by reference to quant_config
     if hf_to_sglang_mapper is not None and quant_config is not None:
         quant_config.apply_sglang_mapper(hf_to_sglang_mapper)
-    return model_class(
-        config=model_config.hf_config,
-        quant_config=quant_config,
-    )
+
+    return model_class(**kwargs)
 
 
 class BaseModelLoader(ABC):
