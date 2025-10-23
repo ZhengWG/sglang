@@ -453,11 +453,15 @@ class MultimodalLanguageTransferQueue:
                 # Partial transfer complete, need to resume with remaining data
                 
                 # IMPORTANT: This is a loop, poll() may return Transferring multiple times
-                # while waiting for resume to complete. We should only process once.
-                if hasattr(language_req.req, 'resume_triggered'):
-                    # Resume already triggered, just wait for completion
+                # while waiting for resume to complete. We should only process once per allocation.
+                # To support multiple resume (future), we check if embedding_indices changed.
+                current_indices = tuple(language_req.embedding_indices) if language_req.embedding_indices else None
+                last_processed_indices = getattr(language_req.req, 'last_resume_indices', None)
+                
+                if current_indices == last_processed_indices:
+                    # Already processed this allocation, waiting for completion
                     logger.debug(
-                        f"Resume already triggered for rid={language_req.req.rid}, "
+                        f"Resume already triggered for current allocation, rid={language_req.req.rid}, "
                         f"waiting for completion"
                     )
                     continue
@@ -558,8 +562,9 @@ class MultimodalLanguageTransferQueue:
                             allocated_tokens=allocated_tokens,
                         )
                         
-                        # Mark resume as triggered to avoid processing again in next loop
-                        language_req.req.resume_triggered = True
+                        # Mark this allocation as processed to avoid repeat in next loop
+                        # Use tuple of indices to support multiple resume (if indices change, we can process again)
+                        language_req.req.last_resume_indices = tuple(new_allocation)
                         
                         logger.info(
                             f"Resume transfer initiated for rid={language_req.req.rid}: "

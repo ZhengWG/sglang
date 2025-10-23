@@ -68,30 +68,34 @@ Loop Iteration 3, 4, 5, ...:
 
 ### 核心思路
 
-**添加标记，确保resume逻辑只执行一次**
+**使用allocation标记，确保同一个allocation的resume逻辑只执行一次，同时支持多次resume**
 
 ### 实现
 
-#### 1. 在进入Transferring分支时检查标记
+#### 1. 在进入Transferring分支时检查当前allocation
 
 ```python
 elif poll == KVPoll.Transferring:
     # IMPORTANT: This is a loop, poll() may return Transferring multiple times
-    # while waiting for resume to complete. We should only process once.
-    if hasattr(language_req.req, 'resume_triggered'):
-        # Resume already triggered, just wait for completion
+    # while waiting for resume to complete. We should only process once per allocation.
+    # To support multiple resume, we check if embedding_indices changed.
+    current_indices = tuple(language_req.embedding_indices)
+    last_processed_indices = getattr(language_req.req, 'last_resume_indices', None)
+    
+    if current_indices == last_processed_indices:
+        # Already processed this allocation, waiting for completion
         logger.debug(
-            f"Resume already triggered for rid={language_req.req.rid}, "
+            f"Resume already triggered for current allocation, "
             f"waiting for completion"
         )
         continue  # 跳过，不做任何处理
     
-    # 第一次进入，执行resume逻辑
+    # 第一次处理这个allocation，或者indices已变化（新的resume轮次）
     block_indices = language_req.embedding_indices
     # ... 正常的get_buf, free, alloc, resume_transfer
 ```
 
-#### 2. 在resume触发后设置标记
+#### 2. 在resume触发后记录当前allocation
 
 ```python
 # Send resume request
@@ -101,13 +105,34 @@ language_req.embedding_receiver.resume_transfer(
     allocated_tokens=allocated_tokens,
 )
 
-# Mark resume as triggered to avoid processing again in next loop
-language_req.req.resume_triggered = True  # ✅ 设置标记
+# Mark this allocation as processed to avoid repeat in next loop
+# Use tuple of indices to support multiple resume (if indices change, we can process again)
+language_req.req.last_resume_indices = tuple(new_allocation)  # ✅ 记录allocation
 
 logger.info(f"Resume transfer initiated for rid={language_req.req.rid}")
 ```
 
-#### 3. Resume完成后自动清理
+#### 3. 支持多次Resume
+
+```python
+# 场景：需要多次resume
+Loop 1: indices=[0-7]
+  → process → free → alloc → indices=[8-15]
+  → last_resume_indices = (8,9,10,...,15)
+
+Loop 2: indices=[8-15] (resume还在进行)
+  → current == last_processed → skip ✅
+
+Loop 3: poll() = Transferring (第一次resume完成，但还需要更多数据)
+  → free([8-15]) → alloc → indices=[16-23]
+  → current != last_processed → process ✅ (第二次resume)
+  → last_resume_indices = (16,17,18,...,23)
+
+Loop 4: indices=[16-23]
+  → current == last_processed → skip ✅
+```
+
+#### 4. 完成后自动清理
 
 ```python
 elif poll == KVPoll.Success:
@@ -143,25 +168,42 @@ Loop 4:
 
 ```
 Loop 1:
-  poll() = Transferring
-  → resume_triggered? No
-  → get_buf() → free() → alloc() → resume_transfer()
-  → 设置 resume_triggered = True ✅
+  poll() = Transferring, indices=[0-7]
+  → current_indices != last_processed_indices (None)
+  → get_buf() → free() → alloc → indices=[8-15]
+  → resume_transfer()
+  → last_resume_indices = (8,9,...,15) ✅
 
 Loop 2:
-  poll() = Transferring (resume还没完成)
-  → resume_triggered? Yes
+  poll() = Transferring, indices=[8-15] (resume还没完成)
+  → current_indices == last_processed_indices
   → continue (跳过) ✅
 
 Loop 3:
-  poll() = Transferring
-  → resume_triggered? Yes
+  poll() = Transferring, indices=[8-15]
+  → current_indices == last_processed_indices
   → continue (跳过) ✅
 
 Loop 4:
-  poll() = Success
+  poll() = Success, indices=[8-15]
   → Resume完成，处理结果 ✅
-  → 请求从queue移除，标记自动清理 ✅
+  → 请求从queue移除 ✅
+
+---
+
+**支持多次Resume场景**:
+
+Loop N:
+  poll() = Transferring, indices=[8-15] (第一次resume完成，但还需要更多)
+  → free([8-15]) → alloc → indices=[16-23]
+  → current_indices (16-23) != last_processed_indices (8-15)
+  → 执行第二次resume ✅
+  → last_resume_indices = (16,17,...,23)
+
+Loop N+1:
+  poll() = Transferring, indices=[16-23]
+  → current_indices == last_processed_indices
+  → continue (跳过) ✅
 ```
 
 ---
@@ -169,20 +211,25 @@ Loop 4:
 ## 🎯 关键改进
 
 1. **防止重复处理**：
-   - 只在第一次看到Transferring时处理
-   - 后续loop直接跳过
+   - 只在第一次看到当前allocation的Transferring时处理
+   - 后续loop（相同indices）直接跳过
 
-2. **保护内存操作**：
-   - 只free一次
-   - 只alloc一次
+2. **支持多次Resume**：
+   - 不使用永久boolean标记
+   - 使用allocation indices作为标记
+   - 当indices变化时（新的resume轮次），可以再次处理
+
+3. **保护内存操作**：
+   - 每个allocation只free一次
+   - 每个allocation只alloc一次
    - 避免内存泄漏和状态混乱
 
-3. **避免重复请求**：
-   - 只发送一次resume_transfer
+4. **避免重复请求**：
+   - 每个allocation只发送一次resume_transfer
    - 避免Embedding侧收到重复请求
 
-4. **简单明确**：
-   - 使用简单的boolean标记
+5. **扩展性强**：
+   - 自然支持多次resume场景
    - 逻辑清晰，易于理解和维护
 
 ---

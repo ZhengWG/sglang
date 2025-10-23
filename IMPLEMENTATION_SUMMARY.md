@@ -234,11 +234,12 @@ else:
 3. 每次loop都重新执行resume逻辑，导致重复free/alloc和重复发送请求
 
 **修复方案**：
-1. ✅ 添加`resume_triggered`标记
-2. ✅ 第一次进入Transferring时执行resume逻辑并设置标记
-3. ✅ 后续loop检测到标记后跳过，避免重复处理
+1. ✅ 使用`last_resume_indices`记录上次处理的allocation
+2. ✅ 比较当前indices和上次处理的indices
+3. ✅ 相同则跳过，不同则处理（支持多次resume）
+4. ✅ 自然支持任意次数的resume，无需额外逻辑
 
-详见：`EVENT_LOOP_FIX.md`
+详见：`EVENT_LOOP_FIX.md`, `MULTIPLE_RESUME_SUPPORT.md`
 
 ---
 
@@ -279,7 +280,11 @@ Connection层: 接收resume消息，完成剩余传输
 ```
 
 ### 3. 扩展性强
-- ✅ 接口设计支持多次Resume（通过`sent_tokens`追踪）
+- ✅ **自然支持多次Resume**（基于allocation indices变化）
+  - 不使用永久boolean标记
+  - 通过比较`current_indices`和`last_resume_indices`判断
+  - 当indices变化时自动触发新的resume轮次
+  - 详见：`MULTIPLE_RESUME_SUPPORT.md`
 - ✅ 支持不同block_size（通过一致性校验）
 - ✅ 向后兼容（`allocated_tokens`可选）
 
@@ -360,19 +365,26 @@ export SGLANG_EMBEDDING_CACHE_BUFFER_SIZE=64
    - 吞吐量影响
    - 延迟分析
 
+### 已实现的特性
+
+1. **✅ 多次Resume支持**
+   - 基于allocation indices自动支持
+   - 无需额外逻辑，自然扩展
+   - 适用于极大数据场景
+
 ### 潜在优化
 
 1. **动态Buffer策略**
    - 根据历史请求调整默认大小
    - 减少Resume概率
 
-2. **多次Resume支持**
-   - 当前支持单次Resume
-   - 可扩展为多次Resume（接口已预留）
+2. **自适应分配**
+   - 第一次resume后，预估剩余大小
+   - 一次性分配足够的buffer，减少多次resume
 
 3. **预分配优化**
-   - 考虑预估embedding长度
-   - 减少不必要的Resume
+   - 考虑从Embedding侧预先获取长度信息
+   - 第一次就分配足够的空间
 
 ---
 
