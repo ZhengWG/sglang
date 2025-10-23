@@ -709,6 +709,7 @@ class Qwen3MoeForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,

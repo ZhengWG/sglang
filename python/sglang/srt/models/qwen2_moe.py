@@ -562,6 +562,7 @@ class Qwen2MoeModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
