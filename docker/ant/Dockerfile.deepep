@@ -78,7 +78,7 @@ ARG KVPOOL_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simp
 RUN pip3 uninstall -y ant-kvpool ant-kvpool-store-only; pip3 install --no-cache-dir ${KVPOOL_WHL_URL}
 
 # 编译安装FlashMLA
-ARG FLASHMLA_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+9edee0c-cp310-cp310-linux_x86_64.whl'
+ARG FLASHMLA_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+de6beec-cp310-cp310-linux_x86_64.whl'
 RUN pip3 install --force-reinstall --no-cache-dir ${FLASHMLA_WHL_URL}
 
 # 安装deepep https://yuque.antfin.com/xccl/vzhd9o/mii8pkz6qeqwdf2x
