@@ -253,6 +253,7 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             placeholder_tokens_val=None,
             token_steps=recv_obj.token_steps,
             first_scheduled_times=recv_obj.first_scheduled_times,
+            req_metrics=recv_obj.req_metrics,
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):

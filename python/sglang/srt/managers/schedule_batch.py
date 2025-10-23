@@ -38,6 +38,7 @@ import dataclasses
 import logging
 import re
 import time
+from dataclasses import field
 from enum import Enum, auto
 from http import HTTPStatus
 from itertools import chain
@@ -917,6 +918,41 @@ class Req:
         logger.info(f"{prefix}: {self.time_stats.convert_to_duration()}")
         self.has_log_time_stats = True
 
+    def log_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0, batch_create_time: float = 0.0, waiting_size: int = 0):
+        if batch_create_time <= 0.0:
+            return
+        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
+        if num_new_tokens <= 0:
+            return
+        
+        reqTimeStats = self.time_stats
+        log_time = time.time()
+        for _ in range(num_new_tokens):
+            reqTimeStats.tokens_generation_time.append(log_time)
+            reqTimeStats.tokens_scheduled_time.append(batch_create_time)
+            reqTimeStats.tokens_iter_batch_size.append(batch_size)
+            reqTimeStats.tokens_iter_total_token.append(total_tokens)
+            reqTimeStats.tokens_iter_waiting_size.append(waiting_size)
+
+    def log_disaggregation_decode_first_token_time_stats(self):
+        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
+        if num_new_tokens <= 0 or self.time_stats.decode_prealloc_queue_entry_time <= 0.0:
+            return
+        self.time_stats.tokens_generation_time.append(time.time())
+        self.time_stats.tokens_scheduled_time.append(self.time_stats.arrive_time_ts)
+        self.time_stats.tokens_iter_batch_size.append(0)
+        self.time_stats.tokens_iter_total_token.append(0)
+        self.time_stats.tokens_iter_waiting_size.append(self.time_stats.wait_queue_size)
+    
+    def log_disaggregation_prefill_first_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0):
+        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
+        if num_new_tokens <= 0 or self.time_stats.prefill_bootstrap_queue_entry_time <= 0.0:
+            return
+        self.time_stats.tokens_generation_time.append(time.time())
+        self.time_stats.tokens_scheduled_time.append(self.time_stats.arrive_time_ts - self.time_stats.arrive_time + self.time_stats.wait_queue_entry_time)
+        self.time_stats.tokens_iter_batch_size.append(batch_size)
+        self.time_stats.tokens_iter_total_token.append(total_tokens)
+
     def set_finish_with_abort(self, error_msg: str):
         if get_tensor_model_parallel_rank() == 0:
             logger.error(f"{error_msg}, {self.rid=}")
@@ -1049,6 +1085,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # hicache pointer for synchronizing data loading from CPU to GPU
     hicache_consumer_index: int = -1
 
+    # batch creation time
+    create_time : float = field(default_factory=time.time)
+    # batch end time
+    end_time : float = 0.0
+    # num of waiting requests
+    waiting_size : int = 0
+
     @classmethod
     def init_new(
         cls,
@@ -1095,6 +1138,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def is_empty(self):
         return len(self.reqs) == 0
+    
+    def mark_end_time(self):
+        self.end_time = time.time()
+    
+    def mark_start_time(self):
+        self.create_time = time.time()
 
     def alloc_req_slots(self, num_reqs: int, reqs: Optional[List[Req]] = None):
         if isinstance(self.req_to_token_pool, HybridReqToTokenPool):
@@ -1811,6 +1860,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             is_prefill_only=self.is_prefill_only,
             seq_lens_cpu=self.seq_lens_cpu,
             enable_overlap=self.enable_overlap,
+            waiting_size = self.waiting_size,
         )
 
     def _is_available_size_sufficient(self, num_tokens: int) -> bool:

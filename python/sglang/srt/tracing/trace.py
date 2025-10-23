@@ -22,21 +22,32 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import Req
 
+from sglang.utils import run_once
+
 logger = logging.getLogger(__name__)
 opentelemetry_imported = False
 tracing_enabled = False
+tracing_multispan_enabled = False
+
+NORMAL_TRACE_LEVEL = 1
+ENHANCED_TRACE_LEVEL = 2
+APP_NAME = 'sglang'
+TRACE_HEADERS = ["traceparent", "tracestate", "SOFA-TraceId", "SOFA-RpcId", "X-Request-ID", "X-AIGW-APP-KeyId"]
 
 try:
     from opentelemetry import context, propagate, trace
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.context.context import Context
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider, id_generator
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator)
 
     opentelemetry_imported = True
 except ImportError:
@@ -47,6 +58,19 @@ except ImportError:
 
     logger.info("opentelemetry package is not installed, tracing disabled")
 
+def is_tracing_enabled() -> bool:
+    return tracing_enabled
+
+def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
+    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
+
+def contains_trace_headers(headers: Mapping[str, str]) -> bool:
+    return any(h in headers for h in TRACE_HEADERS)
+
+@run_once
+def log_tracing_disabled_warning() -> None:
+    logger.warning(
+        "Received a request with trace context but tracing is disabled")
 
 @dataclass
 class SglangTraceThreadInfo:
@@ -194,7 +218,7 @@ def process_tracing_init(otlp_endpoint, server_name):
         )
 
         processor = BatchSpanProcessor(
-            OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
+            OTLPSpanExporter(endpoint=otlp_endpoint)
         )
         tracer_provider.add_span_processor(processor)
         trace.set_tracer_provider(tracer_provider)
@@ -270,6 +294,9 @@ def trace_get_proc_propagate_context(rid) -> Optional[Dict[str, Any]]:
     if not tracing_enabled:
         return None
 
+    if not tracing_multispan_enabled:
+        return None
+
     rid = str(rid)
     if rid not in reqs_context or not reqs_context[rid].root_span_context:
         return None
@@ -294,6 +321,9 @@ def trace_set_proc_propagate_context(rid, trace_context: Optional[Dict[str, Any]
         return
     if not trace_context:
         return
+    
+    if not tracing_multispan_enabled:
+        return None
 
     trace_context = SglangTracePropagateContext.instance_from_dict(trace_context)
     if not trace_context:
@@ -331,6 +361,7 @@ def trace_req_start(
     rid: str,
     bootstrap_room: Optional[int] = None,
     ts: Optional[int] = None,
+    trace_headers: Optional[Dict[str, str]] = None,
 ):
     if not tracing_enabled:
         return
@@ -352,12 +383,16 @@ def trace_req_start(
         is_copy=False,
     )
 
+    trace_context = extract_trace_context(trace_headers)
+
     # Drop the worker_id added by MultiTokenizer
     orig_rid = rid.split("_")[-1]
     tracer = threads_info[pid].tracer
     root_span = tracer.start_span(
-        name=f"Req {orig_rid[:8]}",
+        name=f"llm_request",
         start_time=ts,
+        context=trace_context,
+        kind=trace.SpanKind.SERVER,
     )
 
     root_span.set_attributes(
@@ -371,11 +406,12 @@ def trace_req_start(
     reqs_context[rid].root_span_context = trace.set_span_in_context(root_span)
 
     # create thread context and thread span
-    reqs_context[rid].threads_context[pid] = __create_thread_context(
-        pid,
-        reqs_context[rid].root_span_context,
-        ts,
-    )
+    if tracing_multispan_enabled:
+        reqs_context[rid].threads_context[pid] = __create_thread_context(
+            pid,
+            reqs_context[rid].root_span_context,
+            ts,
+        )
 
 
 def trace_req_finish(
@@ -398,10 +434,136 @@ def trace_req_finish(
     if attrs:
         req_context.root_span.set_attributes(attrs)
 
+    req_context.root_span.set_status(trace.Status(trace.StatusCode.OK))
     req_context.root_span.end(end_time=ts)
 
     del reqs_context[rid]
 
+
+class SpanAttributes:
+    # Attribute names copied from here to avoid version conflicts:
+    # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
+    GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+    # GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    GEN_AI_REQUEST_TOP_K = "gen_ai.request.top_k"
+    GEN_AI_REQUEST_MIN_P = "gen_ai.request.min_p"
+    GEN_AI_REQUEST_REPETITION_PENALTY = "gen_ai.request.repetition_penalty"
+    GEN_AI_REQUEST_FREQUENCY_PENALTY = "gen_ai.request.frequency_penalty"
+    GEN_AI_REQUEST_PRESENCE_PENALTY = "gen_ai.request.presence_penalty"
+    # Attribute names added until they are added to the semantic conventions:
+    GEN_AI_REQUEST_ID = "gen_ai.request.id"
+    GEN_AI_REQUEST_N = "gen_ai.request.n"
+    GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reasons"
+    # GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
+    GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
+    GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
+    GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
+    # GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+    # Time taken in the forward pass for this across all workers
+    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = (
+         "gen_ai.latency.time_in_model_forward")
+    # Time taken in the model execute function. This will include model
+    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
+    # GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
+    #    "gen_ai.latency.time_in_model_execute")
+    GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = \
+        "gen_ai.latency.time_in_model_prefill"
+    GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
+    GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = \
+        "gen_ai.latency.time_in_model_inference"
+    GEN_AI_REQUEST_TRACE_LEVEL = "gen_ai.request.trace_level"
+    
+    # trace_level_2
+    GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME = "gen_ai.latency.per_token_generation_time"
+    GEN_AI_LATENCY_PER_TOKEN_SCHEDULED_TIME = "gen_ai.latency.per_token_scheduled_time"
+    GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE = "gen_ai.iteration.per_token_batch_size"
+    GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE = "gen_ai.iteration.per_token_waiting_size"
+    GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS = "gen_ai.iteration.per_token_total_tokens"
+    GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS = "gen_ai.iteration.per_token_cached_tokens"
+    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS = "gen_ai.response.per_token_candidate_decoded_tokens"
+    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS = "gen_ai.response.per_token_candidate_token_ids"
+    GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKENS_LOGPROBS = "gen_ai.response.per_token_candidate_tokens_logprobs"
+
+    SOFA_TRACE_ID = "Parent-TraceId"
+    SOFA_RPC_ID = "Parent-RpcId"
+    REQUEST_ID = "alipay.aicloud.request_id"
+    API_KEY_ID = "alipay.aicloud.api_key_id"
+    POD_IP = "alipay.base.ip"
+    POD_NAME = "alipay.base.pod_name"
+    HOSTNAME = "alipay.base.host"
+    IDC = "alipay.base.idc"
+    MODEL_SERVICE_ID = "alipay.aicloud.model_service_id"
+    MODEL_INSTANCE_ID = "alipay.aicloud.model_instance_id"
+    MODEL_INSTANCE_NAME = "alipay.aicloud.model_instance_name"
+    APP_NAME = "alipay.aicloud.app_name"
+    ALIPAY_LATENCY_TIME_IN_API_SERVER = "alipay.aicloud.time_in_api_server"
+    ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING = "alipay.aicloud.time_in_input_processing"
+    ALIPAY_LATENCY_TIME_IN_OUTPUT_QUEUE = "alipay.aicloud.time_in_output_queue"
+    ALIPAY_LATENCY_TIME_IN_OUTPUT_PROCESSING = "alipay.aicloud.time_in_output_processing"
+    ALIPAY_REQUEST_PARAMS = "alipay.aicloud.request_params"
+    ALIPAY_REQ_METRIC = "alipay.aicloud.req_metric"
+
+class SofaTraceInfo:
+    def __init__(self,
+                 sofa_trace_id: Optional[str] = None,
+                 sofa_rpc_id: Optional[str] = None,
+                 request_id: Optional[str] = None,
+                 aigw_app_key_id: Optional[str] = None):
+        self.sofa_trace_id = sofa_trace_id
+        self.sofa_rpc_id = sofa_rpc_id
+        self.request_id = request_id
+        self.aigw_app_key_id = aigw_app_key_id
+
+@dataclass
+class EnvInfo:
+    pod_ip: Optional[str] = None
+    idc: Optional[str] = None
+    model_service_id: Optional[str] = None
+    model_instance_id: Optional[str] = None
+    pod_name: Optional[str] = None
+    hostname: Optional[str] = None
+    model_instance_name: Optional[str] = None
+
+def get_env_info() -> EnvInfo:
+    """
+    Extract metadata from environment
+    """
+    env_info = EnvInfo()
+    if ip := os.getenv("POD_IP"):
+        env_info.pod_ip = ip
+    if idc := os.getenv("ALIPAY_APP_IDC"):
+        env_info.idc = idc
+    if model_service_id := os.getenv("MODEL_SERVICE_ID"):
+        env_info.model_service_id = model_service_id
+    if model_instance_id := os.getenv("MODEL_INSTANCE_NAME"):
+        env_info.model_instance_id = model_instance_id
+    if pod_name := os.getenv("ALIPAY_POD_NAME"):
+        env_info.pod_name = pod_name
+    if hostname := os.getenv("HOSTNAME"):
+        env_info.hostname = hostname
+    if model_instance_name := os.getenv("MODEL_INSTANCE_NAME"):
+        env_info.model_instance_name = model_instance_name
+    return env_info
+
+def get_sofa_trace_info(parent_trace_headers: Mapping[str, str]) -> Optional[SofaTraceInfo]:
+    """
+    Get SOFA trace id and RPC id from headers
+    """
+    sofa_trace_info = SofaTraceInfo()
+    for (k, v) in parent_trace_headers.items():
+        if k == "SOFA-TraceId":
+            sofa_trace_info.sofa_trace_id = v
+        if k == "SOFA-RpcId":
+            sofa_trace_info.sofa_rpc_id = v
+        if k == "X-Request-ID":
+            sofa_trace_info.request_id = v
+        if k == "X-AIGW-APP-KeyId":
+            sofa_trace_info.aigw_app_key_id = v
+    return sofa_trace_info
 
 def trace_slice_start(
     name: str,
@@ -409,9 +571,9 @@ def trace_slice_start(
     ts: Optional[int] = None,
     anonymous: bool = False,
 ):
-    if not tracing_enabled:
+    if not tracing_enabled or not tracing_multispan_enabled:
         return
-
+    
     rid = str(rid)
     if rid not in reqs_context:
         return
@@ -462,7 +624,7 @@ def trace_slice_end(
     auto_next_anon: bool = False,
     thread_finish_flag: bool = False,
 ):
-    if not tracing_enabled:
+    if not tracing_enabled or not tracing_multispan_enabled:
         return
 
     rid = str(rid)
@@ -519,7 +681,7 @@ trace_slice = trace_slice_end
 
 # Add event to the current slice on the same thread with the same rid.
 def trace_event(name: str, rid: str, ts: Optional[int] = None):
-    if not tracing_enabled:
+    if not tracing_enabled or not tracing_multispan_enabled:
         return
 
     rid = str(rid)
@@ -576,3 +738,10 @@ def trace_slice_batch(
             auto_next_anon=not req.finished(),
             thread_finish_flag=req.finished(),
         )
+def extract_trace_context(
+        headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+    if tracing_enabled:
+        headers = headers or {}
+        return TraceContextTextMapPropagator().extract(headers)
+    else:
+        return None

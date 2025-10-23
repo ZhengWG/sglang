@@ -4,15 +4,18 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Union
 
 import orjson
 from fastapi import HTTPException, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
+from starlette.datastructures import Headers
 
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
 from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.tracing.trace import contains_trace_headers, extract_trace_headers, is_tracing_enabled, log_tracing_disabled_warning
+
 
 if TYPE_CHECKING:
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
@@ -53,6 +56,12 @@ class OpenAIServingBase(ABC):
             # Convert to internal format
             adapted_request, processed_request = self._convert_to_internal_request(
                 request, raw_request
+            )
+
+            adapted_request.trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
             )
 
             # Note(Xinyuan): raw_request below is only used for detecting the connection of the client
@@ -238,3 +247,16 @@ class OpenAIServingBase(ABC):
         if trace_id:
             rid = trace_id + '_' + str(uuid.uuid4().hex)[:8]
             setattr(request, 'rid', rid)
+
+    async def _get_trace_headers(
+        self,
+        headers: Headers,
+    ) -> Optional[Mapping[str, str]]:
+
+        if is_tracing_enabled():
+            return extract_trace_headers(headers)
+
+        if contains_trace_headers(headers):
+            log_tracing_disabled_warning()
+
+        return None

@@ -61,6 +61,7 @@ from sglang.srt.mem_cache.memory_pool import (
 from sglang.srt.utils import get_int_env_var, require_mlp_sync
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -735,6 +736,11 @@ class DecodeTransferQueue:
 
                 decode_req.req.output_ids.append(output_id[0].item())
                 decode_req.req.cached_tokens = cached_tokens[0].item()
+
+                # req trace metric stats
+                if self.scheduler.enable_trace:
+                    decode_req.req.log_disaggregation_decode_first_token_time_stats()
+
                 if not self.spec_algorithm.is_none():
                     decode_req.req.output_topk_p = output_topk_p
                     decode_req.req.output_topk_index = output_topk_index
@@ -953,7 +959,6 @@ class SchedulerDisaggregationDecodeMixin:
             else:
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
-
         return ret
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
@@ -1001,6 +1006,7 @@ class SchedulerDisaggregationDecodeMixin:
             self.enable_overlap,
             self.spec_algorithm,
         )
+        new_batch.waiting_size = len(self.waiting_queue)
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt_extend()

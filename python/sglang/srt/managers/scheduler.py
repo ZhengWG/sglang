@@ -1348,19 +1348,28 @@ class Scheduler(
             if self._abort_on_queued_limit(req):
                 return
             self._prefetch_kvcache(req)
-            self.waiting_queue.append(req)
+            req.time_stats.wait_queue_size = len(self.waiting_queue)
             req.time_stats.wait_queue_entry_time = time.perf_counter()
+            req.time_stats.arrive_time_ts = time.time()
+            req.time_stats.arrive_time = time.perf_counter()
+            self.waiting_queue.append(req)
             trace_slice_end("process req", req.rid, auto_next_anon=True)
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
+            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(self.disagg_prefill_bootstrap_queue.queue)
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
             )
             req.time_stats.prefill_bootstrap_queue_entry_time = time.perf_counter()
+            req.time_stats.arrive_time_ts = time.time()
+            req.time_stats.arrive_time = time.perf_counter()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(self.disagg_decode_prealloc_queue.queue)
             self.disagg_decode_prealloc_queue.add(req, is_retracted=is_retracted)
             if not is_retracted:
                 req.time_stats.decode_prealloc_queue_entry_time = time.perf_counter()
+                req.time_stats.arrive_time_ts = time.time()
+                req.time_stats.arrive_time = time.perf_counter()
         else:
             raise ValueError(f"Invalid {self.disaggregation_mode=}")
 
@@ -1907,6 +1916,9 @@ class Scheduler(
             self.spec_algorithm,
             chunked_req=self.chunked_req,
         )
+
+        new_batch.waiting_size = len(self.waiting_queue)
+        
         if self.enable_hierarchical_cache:
             # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
             new_batch.hicache_consumer_index = (
@@ -1979,6 +1991,7 @@ class Scheduler(
 
         # Update batch tensors
         batch.prepare_for_decode()
+        batch.waiting_size = len(self.waiting_queue)
         return batch
 
     # placeholder for override
@@ -1992,6 +2005,9 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        
+        if batch:
+            batch.mark_start_time()
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
@@ -2117,6 +2133,8 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        batch.mark_end_time()
+        
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
             if self.enable_trace:
@@ -2848,9 +2866,15 @@ def run_scheduler_process(
 
     # Set up tracing
     if server_args.enable_trace:
-        process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+        process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
         if server_args.disaggregation_mode == "null":
             thread_label = "Scheduler"
+            trace_set_thread_info(thread_label, tp_rank, dp_rank)
+        elif server_args.disaggregation_mode == "prefill":
+            thread_label = "Prefill Scheduler"
+            trace_set_thread_info(thread_label, tp_rank, dp_rank)
+        elif server_args.disaggregation_mode == "decode":
+            thread_label = "Decode Scheduler"
             trace_set_thread_info(thread_label, tp_rank, dp_rank)
 
     # Create a scheduler and run the event loop

@@ -17,6 +17,7 @@ processes (TokenizerManager, DetokenizerManager, Scheduler).
 """
 
 import copy
+import json
 import uuid
 from abc import ABC
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from sglang.srt.managers.schedule_batch import BaseFinishReason
 from sglang.srt.multimodal.mm_utils import has_valid_data
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.utils import ImageData
+from orjson import dumps as orjson_dumps
 
 # Handle serialization of Image for pydantic
 if TYPE_CHECKING:
@@ -175,6 +177,9 @@ class GenerateReqInput(BaseReq):
 
     # Multimodal sampling kwargs
     mm_sampling_kwargs: Optional[Dict] = None
+
+    # Opentelemetry trace headers
+    trace_headers: Optional[Dict[str, str]] = None
 
     def contains_mm_input(self) -> bool:
         return (
@@ -806,6 +811,49 @@ class BatchTokenizedEmbeddingReqInput(BaseBatchReq):
     def __iter__(self):
         return iter(self.batch)
 
+@dataclass
+class ReqMetric:
+    # token level stats
+    tokens_scheduled_time: List[float] = field(default_factory=list)
+    tokens_generation_time: List[float] = field(default_factory=list)
+    tokens_iter_batch_size: List[int] = field(default_factory=list)
+    tokens_iter_total_token: List[int] = field(default_factory=list)
+    tokens_iter_waiting_size: List[int] = field(default_factory=list)
+
+    # request level stats
+    wait_queue_size: int = 0
+    wait_queue_entry_time: float = 0.0
+    forward_entry_time: float = 0.0
+    completion_time: float = 0.0
+    prefill_bootstrap_queue_entry_time: float = 0.0
+    prefill_transfer_queue_entry_time: float = 0.0
+    decode_prealloc_queue_entry_time: float = 0.0
+    decode_transfer_queue_entry_time: float = 0.0
+    arrive_time: float = 0.0
+    arrive_time_ts: float = 0.0
+
+    def get_queueing_time(self) -> float:
+        return self.forward_entry_time - self.wait_queue_entry_time
+
+    def get_forward_time(self) -> float:
+        return self.completion_time - self.forward_entry_time
+
+    def to_selected_json(self) -> str:
+        return orjson_dumps(
+            {
+                "wait_queue_size": self.wait_queue_size,
+                "wait_queue_entry_time": self.wait_queue_entry_time,
+                "forward_entry_time": self.forward_entry_time,
+                "completion_time": self.completion_time,
+                "arrive_time": self.arrive_time,
+                "arrive_time_ts": self.arrive_time_ts,
+                "prefill_bootstrap_queue_entry_time": self.prefill_bootstrap_queue_entry_time,
+                "prefill_transfer_queue_entry_time": self.prefill_transfer_queue_entry_time,
+                "decode_prealloc_queue_entry_time": self.decode_prealloc_queue_entry_time,
+                "decode_transfer_queue_entry_time": self.decode_transfer_queue_entry_time,
+            }
+        )
+
 
 @dataclass
 class BatchTokenIDOutput(BaseBatchReq):
@@ -858,7 +906,8 @@ class BatchTokenIDOutput(BaseBatchReq):
 
     # perf stats
     first_scheduled_times: List[float] = None
-
+    # rid->req metrics mapping
+    req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
 @dataclass
 class BatchMultimodalDecodeReq(BaseBatchReq):
@@ -937,7 +986,8 @@ class BatchStrOutput(BaseBatchReq):
 
     # perf stats
     first_scheduled_times: List[float] = None
-
+    # rid->req metrics mapping
+    req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
 @dataclass
 class BatchMultimodalOutput(BaseBatchReq):
