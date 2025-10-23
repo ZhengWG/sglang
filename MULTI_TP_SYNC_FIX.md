@@ -16,39 +16,51 @@
 
 ## 🔍 根本原因分析
 
+### 核心问题
+
+**用户指出**：Embedding侧的aux_data只有第一个block才是有效数据，后续resume收到的aux_data要从第一次传输得到的数据获取。
+
 ### 问题链条
 
-#### 1. aux_datas只写入Embedding侧的第一个block
+#### 1. aux_datas只在第一次传输时发送
 
-Embedding侧在`set_buf()`中：
+Connection层的`send_embedding()`中：
+```python
+if buffer_type_idx == 3:  # aux_datas
+    if sent_tokens == 0 and block_idx == 0:  # 只在第一次传输的第一个block
+        chunk_size = embedding_item_len
+    else:
+        continue  # Resume传输跳过aux_datas ✅ 这是对的
+```
+
+Embedding侧的`set_buf()`中：
 ```python
 # Store metadata in first block
 if block_idx_pos == 0:
     self.aux_datas[block_id][0] = embed_length  # 只写入embedding_indices[0]
 ```
 
-#### 2. 不同TP rank分配不同的blocks
+#### 2. 多TP场景下的block分配
 
 ```
-多TP场景下的block分配：
-TP0: embedding_indices = [0, 1, 2, ..., 7]   → 第一个block = 0
-TP1: embedding_indices = [8, 9, 10, ..., 15] → 第一个block = 8
-TP2: embedding_indices = [16, 17, 18, ..., 23] → 第一个block = 16
-TP3: embedding_indices = [24, 25, 26, ..., 31] → 第一个block = 24
+不同TP rank分配不同的blocks：
+TP0: embedding_indices = [0, 1, 2, ..., 7]
+TP1: embedding_indices = [8, 9, 10, ..., 15]
+TP2: embedding_indices = [16, 17, 18, ..., 23]
+TP3: embedding_indices = [24, 25, 26, ..., 31]
 ```
 
-#### 3. Embedding侧只在block 0写入aux_datas
+#### 3. 第一次传输时aux_datas的分发
 
 ```
-Embedding侧调用 set_buf(req):
-    req.embedding_indices = [0, 1, 2, ...]  # Embedding侧的分配
-    aux_datas[0][0] = 2000  # 只写入block 0
-    
-结果：
-    aux_datas[0] = [2000, ...]  ✅ TP0能读到
-    aux_datas[8] = [0, ...]     ❌ TP1读到0
-    aux_datas[16] = [0, ...]    ❌ TP2读到0
-    aux_datas[24] = [0, ...]    ❌ TP3读到0
+Embedding侧传输到Language侧时：
+- aux_datas只在第一次传输的第一个block中发送
+- 但不同TP rank接收不同的blocks
+- 只有接收到包含aux_datas的block的rank才能读到有效值
+
+可能的情况：
+- 如果aux_datas在全局block 0，只有TP0能读到
+- 其他TP rank读到的aux_datas[block_indices[0]]是0（未初始化）
 ```
 
 #### 4. Status通过all_reduce同步，所有rank都收到Transferring
@@ -88,69 +100,97 @@ else:
 
 **使用all_reduce同步aux_datas信息，确保所有rank获得一致的actual_total_length和sent_tokens**
 
+### 关键理解
+
+1. **第一次传输**：
+   - Embedding侧在第一个block发送aux_datas
+   - 但只有某些rank能读到（取决于block分配）
+   - 需要同步确保所有rank都获得这个值
+
+2. **Resume传输**：
+   - Embedding侧**不再发送**aux_datas（已经在第一次发送了）
+   - Language侧应该使用**缓存的partial_aux_datas**
+   - 不能从新分配的blocks读取（那些blocks的aux_datas是0）
+
 ### 实现
 
-#### 1. 同步actual_total_length和sent_tokens
+#### 1. 区分第一次和Resume的Transferring
 
 ```python
 elif poll == KVPoll.Transferring:
-    # Get data from local buffer
+    # Check if we already have cached partial data
+    if hasattr(language_req.req, 'partial_aux_datas'):
+        # Resume already triggered before, use cached values
+        # (Embedding side doesn't send aux_data in resume transfer)
+        actual_total_length = int(language_req.req.partial_aux_datas[0])
+        sent_tokens = language_req.req.partial_sent_tokens
+    else:
+        # First time seeing Transferring status - read from buffer
+        # Note: aux_data is only valid in the first block from Embedding side
+        # In multi-TP scenario, some ranks may not have this block
+        embedding_data, fill_ids, mrope_positions, aux_datas = (
+            self.metadata_buffers.get_buf(block_indices=block_indices)
+        )
+        actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
+        sent_tokens = len(fill_ids)  # May be 0 on some ranks
+        
+        # Sync aux_data across all ranks (use MAX to get the valid value)
+        import torch.distributed as dist
+        if self.gloo_group is not None:
+            actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
+            sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
+            
+            dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+            dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+            
+            actual_total_length = int(actual_total_length_tensor.item())
+            sent_tokens = int(sent_tokens_tensor.item())
+    
+    # Now all ranks have the same values ✅
+    if actual_total_length > sent_tokens:
+        # Cache partial data (first time only)
+        if not hasattr(language_req.req, 'partial_input_embeds'):
+            # Get data from buffer
+            embedding_data, fill_ids, mrope_positions, aux_datas = (
+                self.metadata_buffers.get_buf(block_indices=block_indices)
+            )
+            # Cache for resume (Embedding won't send aux_data again)
+            language_req.req.partial_aux_datas = torch.tensor([actual_total_length, ...])
+            # ... cache other data
+        
+        # Resume...
+```
+
+#### 2. 缓存第一次传输的aux_datas
+
+```python
+# Cache partial data (first time only)
+if not hasattr(language_req.req, 'partial_input_embeds'):
+    # Get data from buffer
     embedding_data, fill_ids, mrope_positions, aux_datas = (
         self.metadata_buffers.get_buf(block_indices=block_indices)
     )
     
-    # Local values (may be 0 on some ranks)
-    actual_total_length = int(aux_datas[0])
-    sent_tokens = len(fill_ids)
-    
-    # Sync across all ranks using MAX (the rank with data has non-zero values)
-    import torch.distributed as dist
-    if self.gloo_group is not None:
-        actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
-        sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
-        
-        dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-        dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-        
-        actual_total_length = int(actual_total_length_tensor.item())
-        sent_tokens = int(sent_tokens_tensor.item())
-    
-    # Now all ranks have the same values ✅
-    if actual_total_length > sent_tokens:
-        # Resume...
+    # Cache for resume (use synced actual_total_length, not local aux_datas)
+    language_req.req.partial_input_embeds = embedding_data
+    language_req.req.partial_fill_ids = fill_ids.tolist()
+    language_req.req.partial_mrope_positions = mrope_positions
+    language_req.req.partial_aux_datas = torch.tensor([actual_total_length, aux_datas[1]])
+    language_req.req.partial_sent_tokens = sent_tokens
 ```
 
-#### 2. 区分有数据的rank和dummy rank
+**关键**：缓存的`partial_aux_datas[0]`使用同步后的`actual_total_length`，而不是本地读取的值。
 
+#### 3. Resume时使用缓存的aux_datas
+
+在后续的Transferring状态（如果发生），直接使用缓存：
 ```python
-# Cache partial data
-if not hasattr(language_req.req, 'partial_input_embeds'):
-    has_data = (len(fill_ids) > 0)
-    
-    if has_data:
-        # Real rank with data
-        language_req.req.partial_input_embeds = embedding_data
-        language_req.req.partial_fill_ids = fill_ids.tolist()
-        language_req.req.partial_mrope_positions = mrope_positions
-        language_req.req.partial_aux_datas = torch.tensor([actual_total_length, aux_datas[1]])
-        language_req.req.partial_sent_tokens = sent_tokens
-    else:
-        # Dummy rank: create placeholder
-        language_req.req.partial_input_embeds = torch.empty(0, embedding_dim)
-        language_req.req.partial_fill_ids = []
-        language_req.req.partial_mrope_positions = torch.empty(3, 0, dtype=torch.int32)
-        language_req.req.partial_aux_datas = torch.tensor([actual_total_length, 0])
-        language_req.req.partial_sent_tokens = sent_tokens
+if hasattr(language_req.req, 'partial_aux_datas'):
+    actual_total_length = int(language_req.req.partial_aux_datas[0])  # 使用缓存
+    sent_tokens = language_req.req.partial_sent_tokens
 ```
 
-#### 3. 所有rank都执行resume流程
-
-所有rank（包括dummy rank）都需要：
-- 分配新的blocks
-- 发送resume消息
-- 等待传输完成
-
-这确保了status同步时的一致性。
+不再从新blocks读取（那些blocks没有aux_data）。
 
 ---
 

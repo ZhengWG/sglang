@@ -453,33 +453,48 @@ class MultimodalLanguageTransferQueue:
                 # Partial transfer complete, need to resume with remaining data
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    # Get partial data and actual total length from aux_datas
-                    embedding_data, fill_ids, mrope_positions, aux_datas = (
-                        self.metadata_buffers.get_buf(block_indices=block_indices)
-                    )
+                    # IMPORTANT: In first transfer, aux_data is sent in the first block.
+                    # In resume transfer, aux_data is NOT sent by Embedding side.
+                    # So we should use cached partial_aux_datas, not read from new blocks.
                     
-                    # In multi-TP scenario, some ranks may not have received data yet
-                    # or may be dummy ranks. We need to sync aux_datas across all ranks.
-                    actual_total_length = int(aux_datas[0])  # Actual total length (may be 0 on some ranks)
-                    sent_tokens = len(fill_ids)  # Tokens already sent (may be 0 on some ranks)
-                    
-                    # Sync actual_total_length and sent_tokens across all ranks using max
-                    # (the rank that has data will have non-zero values)
-                    import torch.distributed as dist
-                    if self.gloo_group is not None:
-                        actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
-                        sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
-                        
-                        dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                        dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
-                        
-                        actual_total_length = int(actual_total_length_tensor.item())
-                        sent_tokens = int(sent_tokens_tensor.item())
+                    # Check if we already have cached partial data
+                    if hasattr(language_req.req, 'partial_aux_datas'):
+                        # Resume already triggered before, use cached values
+                        # (Embedding side doesn't send aux_data in resume transfer)
+                        actual_total_length = int(language_req.req.partial_aux_datas[0])
+                        sent_tokens = language_req.req.partial_sent_tokens
                         
                         logger.info(
-                            f"Synced aux_datas for rid={language_req.req.rid}: "
+                            f"Using cached partial_aux_datas for rid={language_req.req.rid}: "
                             f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
                         )
+                    else:
+                        # First time seeing Transferring status - read from buffer
+                        # Note: aux_data is only valid in the first block from Embedding side
+                        # In multi-TP scenario, some ranks may not have this block
+                        embedding_data, fill_ids, mrope_positions, aux_datas = (
+                            self.metadata_buffers.get_buf(block_indices=block_indices)
+                        )
+                        actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
+                        sent_tokens = len(fill_ids)  # May be 0 on some ranks
+                        
+                        # Sync aux_data across all ranks (use MAX to get the valid value)
+                        # The rank that has the first block will have non-zero actual_total_length
+                        import torch.distributed as dist
+                        if self.gloo_group is not None:
+                            actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
+                            sent_tokens_tensor = torch.tensor([sent_tokens], dtype=torch.int64)
+                            
+                            dist.all_reduce(actual_total_length_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                            dist.all_reduce(sent_tokens_tensor, op=dist.ReduceOp.MAX, group=self.gloo_group)
+                            
+                            actual_total_length = int(actual_total_length_tensor.item())
+                            sent_tokens = int(sent_tokens_tensor.item())
+                            
+                            logger.info(
+                                f"Synced aux_datas across ranks for rid={language_req.req.rid}: "
+                                f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
+                            )
                     
                     if actual_total_length > sent_tokens:
                         # Need to resume transfer
@@ -491,25 +506,19 @@ class MultimodalLanguageTransferQueue:
                             f"need to resume for {remaining_tokens} more tokens"
                         )
                         
-                        # Cache received partial data (only if this rank has data)
-                        # Some ranks may be dummy ranks and don't have data
+                        # Cache received partial data (first time only)
                         if not hasattr(language_req.req, 'partial_input_embeds'):
-                            # Only cache if we actually have data on this rank
-                            has_data = (len(fill_ids) > 0)
+                            # Get the actual data from buffer (this is the first transfer)
+                            embedding_data, fill_ids, mrope_positions, aux_datas = (
+                                self.metadata_buffers.get_buf(block_indices=block_indices)
+                            )
                             
-                            if has_data:
-                                language_req.req.partial_input_embeds = embedding_data
-                                language_req.req.partial_fill_ids = fill_ids.tolist()
-                                language_req.req.partial_mrope_positions = mrope_positions
-                                language_req.req.partial_aux_datas = torch.tensor([actual_total_length, aux_datas[1]])  # Use synced value
-                                language_req.req.partial_sent_tokens = sent_tokens
-                            else:
-                                # Dummy rank: create placeholder partial data using synced values
-                                language_req.req.partial_input_embeds = torch.empty(0, self.metadata_buffers.embedding_dim)
-                                language_req.req.partial_fill_ids = []
-                                language_req.req.partial_mrope_positions = torch.empty(3, 0, dtype=torch.int32)
-                                language_req.req.partial_aux_datas = torch.tensor([actual_total_length, 0])  # Use synced value
-                                language_req.req.partial_sent_tokens = sent_tokens
+                            language_req.req.partial_input_embeds = embedding_data
+                            language_req.req.partial_fill_ids = fill_ids.tolist()
+                            language_req.req.partial_mrope_positions = mrope_positions
+                            # Cache aux_datas for resume (Embedding won't send it again)
+                            language_req.req.partial_aux_datas = torch.tensor([actual_total_length, aux_datas[1] if len(aux_datas) > 1 else 0])
+                            language_req.req.partial_sent_tokens = sent_tokens
                         
                         # Free old allocation
                         self.req_to_metadata_buffer_idx_allocator.free(
