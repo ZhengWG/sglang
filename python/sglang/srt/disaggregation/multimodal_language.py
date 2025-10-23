@@ -462,22 +462,19 @@ class MultimodalLanguageTransferQueue:
                 
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    # Read buffer to get aux_datas and determine sent_tokens
-                    # Note: aux_data is only sent in first transfer's first block
-                    embedding_data, fill_ids, mrope_positions, aux_datas = (
-                        self.metadata_buffers.get_buf(block_indices=block_indices)
-                    )
-                    actual_total_length = int(aux_datas[0])  # May be 0 on some ranks or resume blocks
-                    sent_tokens = len(fill_ids)  # Tokens in current buffer
+                    # CRITICAL: Only read buffer on FIRST Transferring!
+                    # Resume blocks don't have valid aux_data, get_buf() will fail!
                     
-                    # Use cached actual_total_length if available (more reliable)
-                    if hasattr(language_req.req, 'partial_aux_datas'):
-                        actual_total_length = int(language_req.req.partial_aux_datas[0])
-                        # Add current buffer's tokens to previous sent_tokens
-                        previous_sent = language_req.req.partial_sent_tokens
-                        sent_tokens = previous_sent + len(fill_ids) if len(fill_ids) > 0 else previous_sent
-                    else:
-                        # First Transferring: sync aux_data across all ranks
+                    if not hasattr(language_req.req, 'partial_aux_datas'):
+                        # First Transferring: read buffer and sync
+                        # Note: aux_data is only sent in first transfer's first block
+                        embedding_data, fill_ids, mrope_positions, aux_datas = (
+                            self.metadata_buffers.get_buf(block_indices=block_indices)
+                        )
+                        actual_total_length = int(aux_datas[0])  # May be 0 on some ranks
+                        sent_tokens = len(fill_ids)  # Tokens in current buffer
+                        
+                        # Sync aux_data across all ranks
                         import torch.distributed as dist
                         if self.gloo_group is not None:
                             actual_total_length_tensor = torch.tensor([actual_total_length], dtype=torch.int64)
@@ -493,6 +490,16 @@ class MultimodalLanguageTransferQueue:
                                 f"First Transferring, synced aux_datas: rid={language_req.req.rid}, "
                                 f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
                             )
+                    else:
+                        # Subsequent Transferring: use cached values
+                        # DO NOT call get_buf() on resume blocks - aux_data is invalid!
+                        actual_total_length = int(language_req.req.partial_aux_datas[0])
+                        sent_tokens = language_req.req.partial_sent_tokens
+                        
+                        logger.debug(
+                            f"Using cached values for rid={language_req.req.rid}: "
+                            f"actual_total_length={actual_total_length}, sent_tokens={sent_tokens}"
+                        )
                     
                     # Check if we already triggered resume for this sent_tokens value
                     last_resume_at = getattr(language_req.req, 'last_resume_at_sent_tokens', -1)

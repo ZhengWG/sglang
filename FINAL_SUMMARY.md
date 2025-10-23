@@ -61,6 +61,11 @@
 **修复**：改用sent_tokens追踪，不受indices影响  
 **文档**：`ALLOCATION_REUSE_FIX.md`
 
+### Bug #7: Resume blocks的get_buf()问题 ✅
+**问题**：Resume分配的新blocks的aux_data未初始化，get_buf()读取失败  
+**修复**：只在第一次Transferring调用get_buf()，后续使用缓存值  
+**文档**：`RESUME_GET_BUF_FIX.md`
+
 ---
 
 ## 📊 最终代码统计
