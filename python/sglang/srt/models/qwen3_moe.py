@@ -722,10 +722,6 @@ class Qwen3MoeModel(Qwen2MoeModel):
             self._input_deepstack_embeds = None  # Clean up
 
 
-
-        )
-
-
 class Qwen3MoeForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
