@@ -520,7 +520,6 @@ class Qwen2MoeModel(nn.Module):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.hidden_size = config.hidden_size
         self.pp_group = get_pp_group()
 
         if self.pp_group.is_first_rank:
@@ -563,7 +562,6 @@ class Qwen2MoeModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
@@ -599,13 +597,6 @@ class Qwen2MoeModel(nn.Module):
                     layer = self.layers[i]
                     hidden_states, residual = layer(
                         positions, hidden_states, forward_batch, residual
-                    )
-
-                # Process deepstack embeddings for first 3 layers
-                if input_deepstack_embeds is not None and i in range(3):
-                    sep = self.hidden_size * i
-                    hidden_states.add_(
-                        input_deepstack_embeds[:, sep : sep + self.hidden_size]
                     )
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -666,7 +657,6 @@ class Qwen2MoeForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,
@@ -674,7 +664,6 @@ class Qwen2MoeForCausalLM(nn.Module):
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
-            input_deepstack_embeds=input_deepstack_embeds,
         )
         aux_hidden_states = None
         if self.capture_aux_hidden_states:
