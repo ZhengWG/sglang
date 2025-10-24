@@ -43,7 +43,7 @@ from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.qwen3_moe import Qwen3MoeModel
+from sglang.srt.models.qwen3_moe import Qwen3MoeModel, Qwen3MoeModelWithDeepStack
 from sglang.srt.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLForConditionalGeneration,
@@ -54,60 +54,6 @@ from sglang.srt.utils.hf_transformers_utils import get_processor
 logger = logging.getLogger(__name__)
 
 cached_get_processor = lru_cache(get_processor)
-
-
-class Qwen3MoeLLMModel(Qwen3MoeModel):
-    """Qwen3 MoE model with DeepStack support for VL models.
-    
-    This class extends Qwen3MoeModel to add deepstack embedding support,
-    which is specific to vision-language models. The deepstack embeddings
-    are added to the first 3 layers during forward pass.
-    """
-
-    def __init__(
-        self,
-        *,
-        config: Qwen3VLMoeConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__(config=config, quant_config=quant_config, prefix=prefix)
-        self.hidden_size = config.hidden_size
-        self._input_deepstack_embeds = None  # Store for _process_layer_output
-
-    def _process_layer_output(
-        self,
-        layer_idx: int,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process deepstack embeddings for first 3 layers (VL-specific)."""
-        if self._input_deepstack_embeds is not None and layer_idx in range(3):
-            sep = self.hidden_size * layer_idx
-            hidden_states.add_(
-                self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
-            )
-        return hidden_states, residual
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor = None,
-        pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Union[torch.Tensor, PPProxyTensors]:
-        # Store deepstack for _process_layer_output hook
-        self._input_deepstack_embeds = input_deepstack_embeds
-        try:
-            return super().forward(
-                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
-            )
-        finally:
-            self._input_deepstack_embeds = None  # Clean up
 
 
 class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
@@ -130,7 +76,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             prefix=add_prefix("visual", prefix),
         )
 
-        self.model = Qwen3MoeLLMModel(
+        # Use Qwen3MoeModelWithDeepStack for deepstack support (shared with disagg)
+        self.model = Qwen3MoeModelWithDeepStack(
             config=config,
             quant_config=quant_config,
             prefix=add_prefix("model", prefix),

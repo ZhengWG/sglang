@@ -673,13 +673,13 @@ class Qwen3MoeModel(Qwen2MoeModel):
 
 
 class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
-    """Qwen3 MoE model with DeepStack support for disaggregation language side.
+    """Qwen3 MoE model with DeepStack support (for VL and disaggregation).
     
-    This is a specialized variant used in disaggregation scenarios where the
-    language side receives deepstack embeddings from the encode side. The deepstack
-    embeddings are added to the first 3 layers during forward pass.
+    This class adds deepstack embedding support for:
+    1. Vision-language models (Qwen3-VL-MoE)
+    2. Disaggregation language side (when receiving deepstack from encode)
     
-    Note: This is only used in disaggregation mode. Regular inference should use Qwen3MoeModel.
+    The deepstack embeddings are added to the first 3 layers during forward pass.
     """
 
     def __init__(
@@ -699,7 +699,7 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
         residual: torch.Tensor,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process deepstack embeddings for first 3 layers (for VL disaggregation)."""
+        """Process deepstack embeddings for first 3 layers."""
         if self._input_deepstack_embeds is not None and layer_idx in range(3):
             sep = self.hidden_size * layer_idx
             hidden_states.add_(
