@@ -73,6 +73,22 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
     ):
         super().__init__(config=config, quant_config=quant_config, prefix=prefix)
         self.hidden_size = config.hidden_size
+        self._input_deepstack_embeds = None  # Store for _process_layer_output
+
+    def _process_layer_output(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process deepstack embeddings for first 3 layers (VL-specific)."""
+        if self._input_deepstack_embeds is not None and layer_idx in range(3):
+            sep = self.hidden_size * layer_idx
+            hidden_states.add_(
+                self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
+            )
+        return hidden_states, residual
 
     def forward(
         self,
@@ -82,60 +98,16 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         input_deepstack_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, PPProxyTensors]:
-        if self.pp_group.is_first_rank:
-            if input_embeds is None:
-                hidden_states = self.embed_tokens(input_ids)
-            else:
-                hidden_states = input_embeds
-            residual = None
-        else:
-            assert pp_proxy_tensors is not None
-            hidden_states = pp_proxy_tensors["hidden_states"]
-            residual = pp_proxy_tensors["residual"]
-
-        aux_hidden_states = []
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer]
-        ):
-            layer_idx += self.start_layer
-            if layer_idx in self.layers_to_capture:
-                aux_hidden_states.append(
-                    hidden_states + residual if residual is not None else hidden_states
-                )
-
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                forward_batch,
-                residual,
+        # Store deepstack for _process_layer_output hook
+        self._input_deepstack_embeds = input_deepstack_embeds
+        try:
+            return super().forward(
+                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
-
-            # Process deepstack embeddings for first 3 layers (VL-specific)
-            if input_deepstack_embeds is not None and layer_idx in range(3):
-                sep = self.hidden_size * layer_idx
-                hidden_states.add_(
-                    input_deepstack_embeds[:, sep : sep + self.hidden_size]
-                )
-
-        if not self.pp_group.is_last_rank:
-            return PPProxyTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
-        else:
-            if hidden_states.shape[0] != 0:
-                if residual is None:
-                    hidden_states = self.norm(hidden_states)
-                else:
-                    hidden_states, _ = self.norm(hidden_states, residual)
-
-        if len(aux_hidden_states) == 0:
-            return hidden_states
-
-        return hidden_states, aux_hidden_states
+        finally:
+            self._input_deepstack_embeds = None  # Clean up
 
 
 class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):

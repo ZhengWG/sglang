@@ -690,6 +690,22 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
     ) -> None:
         super().__init__(config=config, quant_config=quant_config, prefix=prefix)
         self.hidden_size = config.hidden_size
+        self._input_deepstack_embeds = None  # Store for _process_layer_output
+
+    def _process_layer_output(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process deepstack embeddings for first 3 layers (for VL disaggregation)."""
+        if self._input_deepstack_embeds is not None and layer_idx in range(3):
+            sep = self.hidden_size * layer_idx
+            hidden_states.add_(
+                self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
+            )
+        return hidden_states, residual
 
     def forward(
         self,
@@ -699,70 +715,16 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         input_deepstack_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, PPProxyTensors]:
-        if self.pp_group.is_first_rank:
-            if input_embeds is None:
-                hidden_states = self.embed_tokens(input_ids)
-            else:
-                hidden_states = input_embeds
-            residual = None
-        else:
-            assert pp_proxy_tensors is not None
-            hidden_states = pp_proxy_tensors["hidden_states"]
-            residual = pp_proxy_tensors["residual"]
-
-        aux_hidden_states = []
-        if forward_batch.can_run_tbo:
-            hidden_states, residual = model_forward_maybe_tbo(
-                layers=self.layers,
-                enable_tbo=True,
-                input_data_scatter_mode=ScatterMode.model_input_output(),
-                positions=positions,
-                forward_batch=forward_batch,
-                hidden_states=hidden_states,
-                residual=residual,
+        # Store deepstack for _process_layer_output hook
+        self._input_deepstack_embeds = input_deepstack_embeds
+        try:
+            return super().forward(
+                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
-            # Note: TBO mode doesn't support deepstack yet
-            # If needed, would need to add deepstack after TBO
-        else:
-            for i in range(self.start_layer, self.end_layer):
-                if i in self.layers_to_capture:
-                    aux_hidden_states.append(
-                        hidden_states + residual
-                        if residual is not None
-                        else hidden_states
-                    )
-                with get_global_expert_distribution_recorder().with_current_layer(i):
-                    layer = self.layers[i]
-                    hidden_states, residual = layer(
-                        positions, hidden_states, forward_batch, residual
-                    )
-
-                # Process deepstack embeddings for first 3 layers (for VL disaggregation)
-                if input_deepstack_embeds is not None and i in range(3):
-                    sep = self.hidden_size * i
-                    hidden_states.add_(
-                        input_deepstack_embeds[:, sep : sep + self.hidden_size]
-                    )
-
-        if not self.pp_group.is_last_rank:
-            return PPProxyTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
-        else:
-            if hidden_states.shape[0] != 0:
-                if residual is None:
-                    hidden_states = self.norm(hidden_states)
-                else:
-                    hidden_states, _ = self.norm(hidden_states, residual)
-
-        if len(aux_hidden_states) == 0:
-            return hidden_states
-
-        return hidden_states, aux_hidden_states
+        finally:
+            self._input_deepstack_embeds = None  # Clean up
 
 
 class Qwen3MoeForCausalLMWithDeepStack(nn.Module):
@@ -845,8 +807,6 @@ class Qwen3MoeForCausalLMWithDeepStack(nn.Module):
         input_embeds: torch.Tensor = None,
         input_deepstack_embeds: Optional[torch.Tensor] = None,
     ):
-        # Note: This is a simplified version, deepstack handling in split prefill
-        # may need special attention
         return self.model.forward(
             input_ids,
             positions,
