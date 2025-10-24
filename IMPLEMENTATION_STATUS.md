@@ -3,7 +3,7 @@
 ## 🎯 Objective
 实现 qwen3-moe-vl 的 encode/language 分离，支持 deepstack_embedding 的传输和处理。
 
-## ✅ Phase 0: 模型层重构 (已完成)
+## ✅ Phase 0: 模型层重构与简化 (已完成)
 
 ### 问题分析
 - **原问题**: Language侧应该使用纯文本模型 `Qwen3MoeForCausalLM`，但它不支持 `input_deepstack_embeds`
@@ -102,6 +102,23 @@ Language Side 现在可以使用:
 - ✅ Git diff 检查通过
 - ✅ 无 linter errors
 - ✅ 语法正确
+
+### Phase 0.2: 简化 qwen3_vl_moe.py (已完成)
+
+**删除重复代码**:
+- ❌ 删除了整个 `Qwen3MoeLLMModel` 类 (90行)
+- ✅ `Qwen3VLMoeForConditionalGeneration` 直接使用 `Qwen3MoeModel`
+- ✅ 移动 `get_image_feature()` 到正确位置
+
+**架构改进**:
+```
+Before: Qwen3VLMoeForConditionalGeneration → Qwen3MoeLLMModel → Qwen3MoeModel
+After:  Qwen3VLMoeForConditionalGeneration → Qwen3MoeModel (直接使用)
+```
+
+**净减少**: 90 行重复代码
+
+详见: `SIMPLIFICATION_SUMMARY.md`
 
 ---
 
