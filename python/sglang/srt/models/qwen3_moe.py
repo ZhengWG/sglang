@@ -656,6 +656,13 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
 
 class Qwen3MoeModel(Qwen2MoeModel):
+    """Qwen3 MoE model with optional DeepStack support.
+    
+    Supports deepstack embeddings for VL models and disaggregation scenarios.
+    If input_deepstack_embeds is provided in forward(), they are added to the
+    first 3 layers. Otherwise, behaves as a standard text model.
+    """
+    
     def __init__(
         self,
         config: Qwen3MoeConfig,
@@ -670,28 +677,10 @@ class Qwen3MoeModel(Qwen2MoeModel):
             decoder_layer_type=Qwen3MoeDecoderLayer,
             alt_stream=alt_stream,
         )
-
-
-class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
-    """Qwen3 MoE model with DeepStack support (for VL and disaggregation).
-    
-    This class adds deepstack embedding support for:
-    1. Vision-language models (Qwen3-VL-MoE)
-    2. Disaggregation language side (when receiving deepstack from encode)
-    
-    The deepstack embeddings are added to the first 3 layers during forward pass.
-    """
-
-    def __init__(
-        self,
-        config: Qwen3MoeConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config=config, quant_config=quant_config, prefix=prefix)
+        # For deepstack support (VL and disaggregation)
         self.hidden_size = config.hidden_size
-        self._input_deepstack_embeds = None  # Store for _process_layer_output
-
+        self._input_deepstack_embeds = None
+    
     def _process_layer_output(
         self,
         layer_idx: int,
@@ -699,14 +688,14 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
         residual: torch.Tensor,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process deepstack embeddings for first 3 layers."""
+        """Process deepstack embeddings for first 3 layers (if provided)."""
         if self._input_deepstack_embeds is not None and layer_idx in range(3):
             sep = self.hidden_size * layer_idx
             hidden_states.add_(
                 self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
             )
         return hidden_states, residual
-
+    
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -717,6 +706,12 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
         input_deepstack_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, PPProxyTensors]:
+        """Forward with optional deepstack support.
+        
+        Args:
+            input_deepstack_embeds: Optional deepstack embeddings for VL models.
+                If None, behaves as standard text model.
+        """
         # Store deepstack for _process_layer_output hook
         self._input_deepstack_embeds = input_deepstack_embeds
         try:
@@ -727,228 +722,7 @@ class Qwen3MoeModelWithDeepStack(Qwen3MoeModel):
             self._input_deepstack_embeds = None  # Clean up
 
 
-class Qwen3MoeForCausalLMWithDeepStack(nn.Module):
-    """Qwen3 MoE for Causal LM with DeepStack support for disaggregation.
-    
-    This variant is used in disaggregation language side when receiving
-    deepstack embeddings from the encode side. It wraps Qwen3MoeModelWithDeepStack
-    to provide deepstack support.
-    
-    Usage:
-        # In disaggregation language mode
-        model = Qwen3MoeForCausalLMWithDeepStack(config)
-        output = model.forward(..., input_deepstack_embeds=deepstack_data)
-    """
-    fall_back_to_pt_during_load = False
 
-    def __init__(
-        self,
-        config: Qwen3MoeConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.pp_group = get_pp_group()
-        self.config = config
-        self.quant_config = quant_config
-        self.model = Qwen3MoeModelWithDeepStack(
-            config, quant_config, prefix=add_prefix("model", prefix)
-        )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=add_prefix("lm_head", prefix),
-            use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
-        )
-        self.logits_processor = LogitsProcessor(config)
-        self.capture_aux_hidden_states = False
-
-    def get_input_embeddings(self) -> nn.Embedding:
-        return self.model.embed_tokens
-
-    @torch.no_grad()
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor = None,
-        pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            forward_batch,
-            input_embeds,
-            pp_proxy_tensors=pp_proxy_tensors,
-            input_deepstack_embeds=input_deepstack_embeds,
-        )
-
-        aux_hidden_states = None
-        if self.capture_aux_hidden_states:
-            hidden_states, aux_hidden_states = hidden_states
-
-        if self.pp_group.is_last_rank:
-            return self.logits_processor(
-                input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
-            )
-        else:
-            return hidden_states
-
-    @torch.no_grad()
-    def forward_split_prefill(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        split_interval: Tuple[int, int],
-        input_embeds: torch.Tensor = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
-    ):
-        return self.model.forward(
-            input_ids,
-            positions,
-            forward_batch,
-            input_embeds,
-            input_deepstack_embeds=input_deepstack_embeds,
-        )
-
-    @property
-    def start_layer(self):
-        return self.model.start_layer
-
-    @property
-    def end_layer(self):
-        return self.model.end_layer
-
-    def get_embed_and_head(self):
-        return self.model.embed_tokens.weight, self.lm_head.weight
-
-    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
-        if not self.pp_group.is_last_rank:
-            return
-
-        self.capture_aux_hidden_states = True
-        if layer_ids is None:
-            num_layers = self.config.num_hidden_layers
-            self.model.layers_to_capture = [
-                2,
-                num_layers // 2,
-                num_layers - 3,
-            ]
-        else:
-            self.model.layers_to_capture = [val + 1 for val in layer_ids]
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # Delegate to model's load_weights method
-        # The weights structure is identical to Qwen3MoeForCausalLM
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
-        # Cache params_dict to avoid repeated expensive traversal of model parameters
-        if not hasattr(self, "_cached_params_dict"):
-            self._cached_params_dict = dict(self.named_parameters())
-        params_dict = self._cached_params_dict
-        
-        for name, loaded_weight in weights:
-            layer_id = get_layer_id(name)
-            if (
-                layer_id is not None
-                and hasattr(self.model, "start_layer")
-                and (
-                    layer_id < self.model.start_layer
-                    or layer_id >= self.model.end_layer
-                )
-            ):
-                continue
-
-            if "rotary_emb.inv_freq" in name:
-                continue
-            
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    is_expert_weight = True
-                    name = name.replace(weight_name, param_name)
-                    if name not in params_dict:
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if is_expert_weight:
-                        continue
-
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if name not in params_dict:
-                        continue
-
-                    if name in params_dict.keys():
-                        param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
-                    else:
-                        logger.warning(f"Parameter {name} not found in params_dict")
-
-        if not hasattr(self, "routed_experts_weights_of_layer"):
-            self.routed_experts_weights_of_layer = {
-                layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
-                for layer_id in range(self.start_layer, self.end_layer)
-                if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
-            }
-
-    @classmethod
-    def get_model_config_for_expert_location(cls, config):
-        return ModelConfigForExpertLocation(
-            num_layers=config.num_hidden_layers,
-            num_logical_experts=config.num_experts,
-            num_groups=None,
         )
 
 
@@ -989,13 +763,21 @@ class Qwen3MoeForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass with optional deepstack support.
+        
+        Args:
+            input_deepstack_embeds: Optional deepstack embeddings for VL/disaggregation.
+                If None, behaves as standard text model.
+        """
         hidden_states = self.model(
             input_ids,
             positions,
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
+            input_deepstack_embeds=input_deepstack_embeds,
         )
 
         aux_hidden_states = None

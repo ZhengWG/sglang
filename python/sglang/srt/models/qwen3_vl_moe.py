@@ -43,7 +43,7 @@ from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.qwen3_moe import Qwen3MoeModel, Qwen3MoeModelWithDeepStack
+from sglang.srt.models.qwen3_moe import Qwen3MoeModel
 from sglang.srt.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLForConditionalGeneration,
@@ -76,8 +76,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             prefix=add_prefix("visual", prefix),
         )
 
-        # Use Qwen3MoeModelWithDeepStack for deepstack support (shared with disagg)
-        self.model = Qwen3MoeModelWithDeepStack(
+        # Qwen3MoeModel has built-in deepstack support (via input_deepstack_embeds param)
+        self.model = Qwen3MoeModel(
             config=config,
             quant_config=quant_config,
             prefix=add_prefix("model", prefix),
