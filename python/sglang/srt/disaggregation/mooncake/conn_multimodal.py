@@ -329,12 +329,23 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 embedding_item_len = self.data_args.aux_item_lens[buffer_type_idx]
 
                 # Calculate chunk size based on buffer type and tokens_in_block
-                # For aux_datas, only transfer in first block of initial transfer
+                # For aux_datas (buffer 3), only transfer in first block of initial transfer
                 if buffer_type_idx == 3:  # aux_datas
                     if sent_tokens == 0 and block_idx == 0:
                         chunk_size = embedding_item_len  # Transfer full aux_datas
                     else:
                         continue  # Skip aux_datas for resume or other blocks
+                # For deepstack_embeddings (buffer 4, if exists), only transfer in first block of initial transfer
+                elif buffer_type_idx == 4:  # deepstack_embeddings
+                    # Check if deepstack buffer exists (buffer count > 4)
+                    if len(self.data_args.aux_item_lens) > 4:
+                        if sent_tokens == 0 and block_idx == 0:
+                            # Transfer full deepstack for first block
+                            chunk_size = embedding_item_len
+                        else:
+                            continue  # Skip deepstack for resume or other blocks
+                    else:
+                        continue  # Skip if no deepstack buffer
                 else:
                     # For embeddings, fill_ids, mrope_positions: scale by tokens_in_block
                     # embedding_item_len already contains the full block size
