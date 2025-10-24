@@ -44,6 +44,47 @@ The disaggregation architecture separates multimodal model processing into two s
 
 ## Implementation Plan
 
+### ✅ Phase 0: Model Layer Refactoring (COMPLETED)
+
+**Goal**: Enable Language side to use pure text model `Qwen3MoeForCausalLM` with deepstack support
+
+**Motivation**: 
+- Language side should use pure text model, not VL model with visual encoder
+- Only `Qwen3MoeLLMModel` (in qwen3_vl_moe.py) originally supported deepstack
+- Need to add deepstack support to base `Qwen2MoeModel` and `Qwen3MoeForCausalLM`
+
+**Changes Made**:
+
+1. **`qwen2_moe.py` - `Qwen2MoeModel`**:
+   - Added `self.hidden_size = config.hidden_size` in `__init__`
+   - Added `input_deepstack_embeds` parameter to `forward()`
+   - Added deepstack processing after each layer forward (layers 0-2 only):
+     ```python
+     if input_deepstack_embeds is not None and i in range(3):
+         sep = self.hidden_size * i
+         hidden_states.add_(
+             input_deepstack_embeds[:, sep : sep + self.hidden_size]
+         )
+     ```
+
+2. **`qwen2_moe.py` - `Qwen2MoeForCausalLM`**:
+   - Added `input_deepstack_embeds` parameter to `forward()`
+   - Pass parameter through to `self.model()`
+
+3. **`qwen3_moe.py` - `Qwen3MoeForCausalLM`**:
+   - Added `input_deepstack_embeds` parameter to `forward()`
+   - Pass parameter through to `self.model()`
+
+**Benefits**:
+- Language side can use `Qwen3MoeForCausalLM` (pure text model)
+- No visual encoder overhead on Language side
+- Unified deepstack interface across all Qwen MoE models
+- Fully backward compatible (parameter is optional, defaults to None)
+
+**Documentation**: See `REFACTORING_SUMMARY.md` for detailed changes
+
+---
+
 ### Phase 1: Extend Buffer Structure (`utils.py`)
 
 **Goal**: Add deepstack_embeddings buffer to MultimodalDataBuffers
