@@ -18,7 +18,7 @@
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -656,6 +656,13 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
 
 class Qwen3MoeModel(Qwen2MoeModel):
+    """Qwen3 MoE model with optional DeepStack support.
+    
+    Supports deepstack embeddings for VL models and disaggregation scenarios.
+    If input_deepstack_embeds is provided in forward(), they are added to the
+    first 3 layers. Otherwise, behaves as a standard text model.
+    """
+    
     def __init__(
         self,
         config: Qwen3MoeConfig,
@@ -670,6 +677,49 @@ class Qwen3MoeModel(Qwen2MoeModel):
             decoder_layer_type=Qwen3MoeDecoderLayer,
             alt_stream=alt_stream,
         )
+        # For deepstack support (VL and disaggregation)
+        self.hidden_size = config.hidden_size
+        self._input_deepstack_embeds = None
+    
+    def _process_layer_output(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process deepstack embeddings for first 3 layers (if provided)."""
+        if self._input_deepstack_embeds is not None and layer_idx in range(3):
+            sep = self.hidden_size * layer_idx
+            hidden_states.add_(
+                self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
+            )
+        return hidden_states, residual
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[torch.Tensor, PPProxyTensors]:
+        """Forward with optional deepstack support.
+        
+        Args:
+            input_deepstack_embeds: Optional deepstack embeddings for VL models.
+                If None, behaves as standard text model.
+        """
+        # Store deepstack for _process_layer_output hook
+        self._input_deepstack_embeds = input_deepstack_embeds
+        try:
+            return super().forward(
+                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
+            )
+        finally:
+            self._input_deepstack_embeds = None  # Clean up
 
 
 class Qwen3MoeForCausalLM(nn.Module):
@@ -709,13 +759,21 @@ class Qwen3MoeForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass with optional deepstack support.
+        
+        Args:
+            input_deepstack_embeds: Optional deepstack embeddings for VL/disaggregation.
+                If None, behaves as standard text model.
+        """
         hidden_states = self.model(
             input_ids,
             positions,
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
+            input_deepstack_embeds=input_deepstack_embeds,
         )
 
         aux_hidden_states = None

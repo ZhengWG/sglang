@@ -495,17 +495,25 @@ def prepare_abort(req: Req, error_message: str, status_code=None):
 
 
 class MultimodalDataBuffers:
-    def __init__(self, size: int, block_size: int, embedding_dim: int = 8192) -> None:
+    def __init__(
+        self,
+        size: int,
+        block_size: int,
+        embedding_dim: int = 8192,
+        num_deepstack_embeddings: int = 0,
+    ) -> None:
         """Initialize block-based multimodal data buffers.
 
         Args:
             size: Total number of blocks
             block_size: Block size (tokens per block)
             embedding_dim: Embedding dimension
+            num_deepstack_embeddings: Number of deepstack embeddings (0 to disable)
         """
         self.total_blocks = size
         self.block_size = block_size
         self.embedding_dim = embedding_dim
+        self.num_deepstack_embeddings = num_deepstack_embeddings
 
         # Block-based storage: each "row" is a block
         self.input_embeddings = torch.zeros(
@@ -521,11 +529,21 @@ class MultimodalDataBuffers:
         # aux_datas: embedding_length, mrope_position_delta, to speedup transfer
         self.aux_datas = torch.zeros((size, 16), dtype=torch.int32, device="cpu")
 
+        # Deepstack embeddings buffer (only if enabled)
+        if num_deepstack_embeddings > 0:
+            self.deepstack_embeddings = torch.zeros(
+                (size, block_size * embedding_dim * num_deepstack_embeddings),
+                dtype=torch.bfloat16,
+                device="cpu",
+            )
+        else:
+            self.deepstack_embeddings = None
+
     def get_block_buffer_sizes(self):
         """Get fixed buffer sizes for each buffer type in a full block.
 
         Returns:
-            Tuple of (embedding_size, fill_ids_size, mrope_size, aux_size) for one full block
+            Tuple of (embedding_size, fill_ids_size, mrope_size, aux_size, deepstack_size) for one full block
         """
         embedding_size = (
             self.block_size * self.embedding_dim * self.input_embeddings.itemsize
@@ -534,7 +552,17 @@ class MultimodalDataBuffers:
         mrope_size = self.block_size * 3 * self.mrope_positions.itemsize
         aux_size = self.aux_datas.shape[1] * self.aux_datas.itemsize
 
-        return embedding_size, fill_ids_size, mrope_size, aux_size
+        if self.deepstack_embeddings is not None:
+            deepstack_size = (
+                self.block_size
+                * self.embedding_dim
+                * self.num_deepstack_embeddings
+                * self.deepstack_embeddings.itemsize
+            )
+        else:
+            deepstack_size = 0
+
+        return embedding_size, fill_ids_size, mrope_size, aux_size, deepstack_size
 
     def get_buf_infos(self):
         ptrs = [
@@ -555,6 +583,13 @@ class MultimodalDataBuffers:
             self.mrope_positions[0].nbytes,
             self.aux_datas[0].nbytes,
         ]
+
+        # Add deepstack buffers if enabled
+        if self.deepstack_embeddings is not None:
+            ptrs.append(self.deepstack_embeddings.data_ptr())
+            data_lens.append(self.deepstack_embeddings.nbytes)
+            item_lens.append(self.deepstack_embeddings[0].nbytes)
+
         return ptrs, data_lens, item_lens
 
     def get_buf(self, block_indices: list = None, actual_total_length: int = None):
@@ -562,9 +597,11 @@ class MultimodalDataBuffers:
 
         Args:
             block_indices: List of block indices for block-based access
+            actual_total_length: Actual total length (for resumed transfers)
 
         Returns:
-            Tuple of (input_embeddings, fill_ids, mrope_positions, aux_datas)
+            Tuple of (input_embeddings, fill_ids, mrope_positions, aux_datas, deepstack_embeddings)
+            Note: deepstack_embeddings is None if not enabled
         """
         if block_indices is None or len(block_indices) == 0:
             raise ValueError("Either idx or block_indices must be provided")
@@ -578,6 +615,7 @@ class MultimodalDataBuffers:
         gathered_embeddings = []
         gathered_fill_ids = []
         gathered_mrope_positions = []
+        gathered_deepstack = []
 
         tokens_gathered = 0
         for block_idx in block_indices:
@@ -599,6 +637,16 @@ class MultimodalDataBuffers:
                 self.mrope_positions[block_idx, : 3 * tokens_in_block].reshape(3, -1)
             )
 
+            # Gather deepstack embeddings if enabled
+            if self.deepstack_embeddings is not None:
+                deepstack_size = tokens_in_block * self.embedding_dim * self.num_deepstack_embeddings
+                block_deepstack = self.deepstack_embeddings[block_idx, :deepstack_size]
+                gathered_deepstack.append(
+                    block_deepstack.reshape(
+                        tokens_in_block, self.embedding_dim * self.num_deepstack_embeddings
+                    )
+                )
+
             tokens_gathered += tokens_in_block
             if tokens_gathered >= total_length:
                 break
@@ -608,13 +656,18 @@ class MultimodalDataBuffers:
         fill_ids = torch.cat(gathered_fill_ids)
         mrope_positions = torch.cat(gathered_mrope_positions, dim=-1)
 
-        return input_embeddings, fill_ids, mrope_positions, aux_datas
+        # Concatenate deepstack if enabled
+        deepstack_embeddings = None
+        if self.deepstack_embeddings is not None and len(gathered_deepstack) > 0:
+            deepstack_embeddings = torch.cat(gathered_deepstack, dim=0)
+
+        return input_embeddings, fill_ids, mrope_positions, aux_datas, deepstack_embeddings
 
     def set_buf(self, req: Req):
         """Set buffer data using block-based scatter operation.
 
         Args:
-            req: Request with metadata_block_indices, embedding, and fill_ids
+            req: Request with metadata_block_indices, embedding, fill_ids, and optional deepstack_embedding
         """
         embed_length = req.embedding.shape[0]
         block_indices = req.embedding_indices
@@ -656,6 +709,21 @@ class MultimodalDataBuffers:
                         .detach()
                         .cpu()
                     )
+
+            # Scatter deepstack embeddings if present and enabled
+            if (
+                self.deepstack_embeddings is not None
+                and hasattr(req, "deepstack_embedding")
+                and req.deepstack_embedding is not None
+            ):
+                deepstack_start = min(start_pos, embed_length)
+                deepstack_end = min(end_pos, embed_length)
+                if deepstack_end > deepstack_start:
+                    deepstack_len = deepstack_end - deepstack_start
+                    self.deepstack_embeddings[
+                        block_id,
+                        : deepstack_len * self.embedding_dim * self.num_deepstack_embeddings,
+                    ] = req.deepstack_embedding[deepstack_start:deepstack_end].flatten()
 
             # Store metadata in first block
             if block_idx_pos == 0:
