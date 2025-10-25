@@ -35,6 +35,7 @@ class TimeStats:
     """
 
     disagg_mode: DisaggregationMode = DisaggregationMode.NULL
+    wait_queue_size: int = 0
     lb_entry_time: float = 0.0
     wait_queue_entry_time: float = 0.0
     forward_entry_time: float = 0.0
@@ -43,6 +44,15 @@ class TimeStats:
     prefill_transfer_queue_entry_time: float = 0.0
     decode_prealloc_queue_entry_time: float = 0.0
     decode_transfer_queue_entry_time: float = 0.0
+    arrive_time_ts: float = 0.0
+    arrive_time: float = 0.0
+
+    # token level stats
+    tokens_scheduled_time: List[float] = field(default_factory=list)
+    tokens_generation_time: List[float] = field(default_factory=list)
+    tokens_iter_batch_size: List[int] = field(default_factory=list)
+    tokens_iter_waiting_size: List[int] = field(default_factory=list)
+    tokens_iter_total_token: List[int] = field(default_factory=list)
 
     def get_queueing_time(self) -> float:
         return self.forward_entry_time - self.wait_queue_entry_time

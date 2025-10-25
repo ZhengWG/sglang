@@ -208,6 +208,9 @@ def _handle_output_by_index(output, i):
                 if len(output.first_scheduled_times) > i
                 else None
             ),
+            req_metrics={output.rids[i]: output.req_metrics[output.rids[i]]}
+                if output.req_metrics and output.rids[i] in output.req_metrics
+                else {},
         )
     elif isinstance(output, BatchEmbeddingOutput):
         new_output = BatchEmbeddingOutput(
@@ -340,6 +343,9 @@ def _handle_output_by_index(output, i):
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
             token_steps=([output.token_steps[i]] if output.token_steps else None),
+            req_metrics={output.rids[i]: output.req_metrics[output.rids[i]]}
+                if output.req_metrics and output.rids[i] in output.req_metrics
+                else {},
         )
     elif isinstance(output, BatchMultimodalOutput):
         new_output = BatchMultimodalOutput(

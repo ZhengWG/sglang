@@ -401,6 +401,8 @@ class SchedulerDisaggregationPrefillMixin:
         if copy_done is not None:
             copy_done.synchronize()
 
+        batch.mark_end_time()
+
         logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         next_token_ids = result.next_token_ids.tolist()
@@ -414,6 +416,10 @@ class SchedulerDisaggregationPrefillMixin:
                     logits_output.input_token_logprobs.tolist()
                 )
 
+        # req trace metric stats
+        total_tokens = sum(r.seqlen for r in batch.reqs) if batch.reqs else 0
+        batch_size = len(batch.reqs)
+
         hidden_state_offset = 0
         for i, (req, next_token_id) in enumerate(
             zip(batch.reqs, next_token_ids, strict=True)
@@ -423,6 +429,11 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
                 req.add_latency(RequestStage.PREFILL_FORWARD)
+
+                # req trace metric stats
+                if self.enable_trace:
+                    req.log_disaggregation_prefill_first_token_time_stats(batch_size=batch_size, total_tokens=total_tokens)
+
                 self.disagg_prefill_inflight_queue.append(req)
                 if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
                     req.output_topk_p = batch.spec_info.topk_p[i]

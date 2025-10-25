@@ -194,9 +194,15 @@ async def init_multi_tokenizer() -> ServerArgs:
     )
 
     if server_args.enable_trace:
-        process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+        process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
         if server_args.disaggregation_mode == "null":
             thread_label = f"MultiTokenizer-{tokenizer_manager.worker_id}"
+            trace_set_thread_info(thread_label)
+        elif server_args.disaggregation_mode == "prefill":
+            thread_label = f"Prefill MultiTokenizer-{tokenizer_manager.worker_id}"
+            trace_set_thread_info(thread_label)
+        elif server_args.disaggregation_mode == "decode":
+            thread_label = f"Decode MultiTokenizer-{tokenizer_manager.worker_id}"
             trace_set_thread_info(thread_label)
 
     return server_args
@@ -1346,9 +1352,15 @@ def launch_server(
         )
 
         if server_args.enable_trace:
-            process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+            process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
             if server_args.disaggregation_mode == "null":
                 thread_label = "Tokenizer"
+                trace_set_thread_info(thread_label)
+            elif server_args.disaggregation_mode == "prefill":
+                thread_label = "Prefill Tokenizer"
+                trace_set_thread_info(thread_label)
+            elif server_args.disaggregation_mode == "decode":
+                thread_label = "Decode Tokenizer"
                 trace_set_thread_info(thread_label)
 
     set_global_state(

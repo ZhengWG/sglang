@@ -13,6 +13,7 @@ from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOutput,
     BatchTokenIDOutput,
+    ReqMetric,
 )
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
 from sglang.srt.utils.common import ceil_div
@@ -224,6 +225,11 @@ class SchedulerOutputProcessorMixin:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
 
+        if self.enable_metrics and self.enable_trace and batch and batch.reqs:
+            total_tokens = sum(r.seqlen for r in batch.reqs)
+            for req in batch.reqs:
+                req.log_token_time_stats(len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size)
+
         self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
 
     def _resolve_spec_overlap_token_ids(
@@ -386,6 +392,11 @@ class SchedulerOutputProcessorMixin:
                     )
                     self.abort_request(AbortReq(rid=req.rid))
                 req.grammar.finished = req.finished()
+
+        if self.enable_metrics and self.enable_trace and batch and batch.reqs:
+            total_tokens = sum(r.seqlen for r in batch.reqs)
+            for req in batch.reqs:
+                req.log_token_time_stats(len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size)
 
         self.stream_output(batch.reqs, batch.return_logprob)
         self.token_to_kv_pool_allocator.free_group_end()
@@ -716,6 +727,8 @@ class SchedulerOutputProcessorMixin:
 
         first_scheduled_times = []
 
+        req_metrics: dict[str, ReqMetric] = {}
+
         decoded_texts = []
         decode_ids_list = []
         read_offsets = []
@@ -914,6 +927,33 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ):
                 req.log_time_stats()
+            
+            # req trace metric stats
+            if (
+                req.finished()
+                and self.tp_rank == 0
+                and self.enable_metrics 
+                and self.enable_trace
+            ):
+                req_metric = ReqMetric(tokens_generation_time=req.time_stats.tokens_generation_time, 
+                                       tokens_scheduled_time=req.time_stats.tokens_scheduled_time,
+                                       tokens_iter_batch_size=req.time_stats.tokens_iter_batch_size,
+                                       tokens_iter_waiting_size=req.time_stats.tokens_iter_waiting_size,
+                                       tokens_iter_total_token=req.time_stats.tokens_iter_total_token,
+                                       forward_entry_time=req.time_stats.forward_entry_time,
+                                       completion_time=req.time_stats.completion_time,
+                                       arrive_time=req.time_stats.arrive_time,
+                                       arrive_time_ts=req.time_stats.arrive_time_ts,
+                                       wait_queue_entry_time=req.time_stats.wait_queue_entry_time,
+                                       prefill_bootstrap_queue_entry_time=req.time_stats.prefill_bootstrap_queue_entry_time,
+                                       prefill_transfer_queue_entry_time=req.time_stats.prefill_transfer_queue_entry_time,
+                                       decode_prealloc_queue_entry_time=req.time_stats.decode_prealloc_queue_entry_time,
+                                       decode_transfer_queue_entry_time=req.time_stats.decode_transfer_queue_entry_time,
+                                       wait_queue_size=req.time_stats.wait_queue_size,
+                                       
+                )
+                req_metrics[req.rid] = req_metric
+
 
             if req.finished():
                 req.release_mm_resources()
@@ -957,6 +997,7 @@ class SchedulerOutputProcessorMixin:
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
                     first_scheduled_times=first_scheduled_times,
+                    req_metrics=req_metrics,
                 )
             )
 
