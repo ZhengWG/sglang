@@ -221,7 +221,7 @@ async def lifespan(fast_api_app: FastAPI):
 
     # Init tracing
     if server_args.enable_trace:
-        process_tracing_init(server_args.oltp_traces_endpoint, "sglang")
+        process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
         if server_args.disaggregation_mode == "null":
             trace_set_thread_info(thread_label)
         elif server_args.disaggregation_mode == "prefill":
