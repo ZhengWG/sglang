@@ -137,7 +137,7 @@ class ReqState:
     last_output_offset: int = 0
 
     # req metric from scheduler
-    scheduler_req_metric: ReqMetric = None  # type: ignore 
+    scheduler_req_metric: ReqMetric = None  # type: ignore
 
     # For incremental state update.
     # TODO(lianmin): do not initialize some lists if not needed.
@@ -875,7 +875,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
         created_time: Optional[float] = None,
     ):
-        input_process_finish_time = time.time() 
+        input_process_finish_time = time.time()
         trace_slice_start("dispatch", obj.rid)
         tokenized_obj.trace_context = trace_get_proc_propagate_context(obj.rid)
         self.send_to_scheduler.send_pyobj(tokenized_obj)
@@ -1468,10 +1468,10 @@ class TokenizerManager(TokenizerCommunicatorMixin):
 
                 if getattr(recv_obj, "first_scheduled_times", None):
                     meta_info["queue_latency"] = recv_obj.first_scheduled_times[i]
-                
+
                 if getattr(recv_obj, "req_metrics", None):
-                    state.scheduler_req_metric = recv_obj.req_metrics[rid] if rid in recv_obj.req_metrics else None
-                
+                    state.scheduler_req_metric = recv_obj.req_metrics.get(rid, None)
+
                 completion_tokens = (
                     recv_obj.completion_tokens[i]
                     if getattr(recv_obj, "completion_tokens", None)
@@ -1481,10 +1481,10 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     recv_obj.prompt_tokens[i]
                     if getattr(recv_obj, "prompt_tokens", None)
                     else 0
-                ) 
+                )
                 state.completion_tokens = completion_tokens
                 state.prompt_tokens = prompt_tokens
-                
+
                 state.finish_reason = recv_obj.finished_reasons[i]["type"]
 
                 trace_req_finish(rid, ts=int(state.finished_time * 1e9), attrs=convert_to_span_attrs(state))
@@ -2276,13 +2276,13 @@ def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
         span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] = state.scheduler_req_metric.get_queueing_time()
         span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD] = state.scheduler_req_metric.get_forward_time()
         if state.output_ids and len(state.output_ids) > 1:
-            completion_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.completion_time 
+            completion_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.completion_time
             span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = completion_time_ts - state.first_token_time
         span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = state.scheduler_req_metric.completion_time - state.scheduler_req_metric.forward_entry_time
         if state.scheduler_req_metric.prefill_bootstrap_queue_entry_time > 0.0:
             span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = 0.0
             state.first_token_time = state.finished_time
-        forward_entry_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.forward_entry_time 
+        forward_entry_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.forward_entry_time
         span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = state.first_token_time - forward_entry_time_ts
     if state.first_token_time and state.created_time:
         span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = state.first_token_time - state.created_time
@@ -2315,8 +2315,8 @@ def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
         # GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS
         if state.output_ids and len(state.output_ids) >= state.completion_tokens:
             span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS] = orjson_dumps(([id for id in state.output_ids[-state.completion_tokens:]]))
-            # GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS 
-            decode_tokens = state.text_in_list 
+            # GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS
+            decode_tokens = state.text_in_list
             if decode_tokens and len(decode_tokens) >= state.completion_tokens:
                 span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS] = orjson_dumps([token_name for token_name in decode_tokens[-state.completion_tokens:]])
         span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = ENHANCED_TRACE_LEVEL
