@@ -36,9 +36,12 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-from sglang.srt.layers.pooler import Pooler, PoolingType
+from sglang.srt.layers.pooler import EmbeddingPoolerOutput, Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+from sglang.srt.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
@@ -76,11 +79,28 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             prefix=add_prefix("visual", prefix),
         )
 
-        self.model = Qwen3MoeModel(
-            config=config,
-            quant_config=quant_config,
-            prefix=add_prefix("model", prefix),
-        )
+        self.is_multimodal_embedding = False
+        if (
+            hasattr(config, "is_multimodal_embedding")
+            and config.is_multimodal_embedding
+        ):
+            # build a dummy model for text embedding
+            self.model = nn.Module()
+            model_prefix = add_prefix("model", prefix)
+            self.model.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=add_prefix("embed_tokens", model_prefix),
+            )
+            setattr(self.model, "get_input_embeddings", lambda: self.model.embed_tokens)
+            self.is_multimodal_embedding = True
+        else:
+            self.model = Qwen3MoeModel(
+                config=config,
+                quant_config=quant_config,
+                prefix=add_prefix("model", prefix),
+            )
 
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
@@ -124,6 +144,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         get_embedding: bool = False,
+        get_multimodal_embedding: bool = False,
     ):
         """Run forward pass for Qwen3-VL.
 
@@ -150,14 +171,26 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-        hidden_states = general_mm_embed_routine(
+        mm_embeds = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.model,
             multimodal_model=self,
             positions=positions,
             use_deepstack=self.use_deepstack,
+            get_multimodal_embedding=get_multimodal_embedding,
         )
+
+        if get_multimodal_embedding:
+            if self.use_deepstack:
+                hidden_states, deepstack_embeds = mm_embeds
+            else:
+                hidden_states = mm_embeds
+            return EmbeddingPoolerOutput(
+                embeddings=hidden_states,
+                deepstack_embeddings=deepstack_embeds if self.use_deepstack else None,
+            )
+        hidden_states = mm_embeds
 
         if not get_embedding:
             return self.logits_processor(

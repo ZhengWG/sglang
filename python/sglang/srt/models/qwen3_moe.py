@@ -744,6 +744,9 @@ class Qwen3MoeForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
         self.capture_aux_hidden_states = False
+        self.is_mrope_enabled = (
+            hasattr(config, "rope_scaling") and config.rope_scaling is not None
+        )
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -757,6 +760,17 @@ class Qwen3MoeForCausalLM(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
+        if self.get_is_mrope_enabled():
+            positions = forward_batch.mrope_positions
+        # TODO: remove here from modeling
+        if (
+            not forward_batch.forward_mode.is_decode()
+            and forward_batch.contains_mm_inputs()
+        ):
+            # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
+            # just being defensive here
+            forward_batch.mm_inputs = None
+
         hidden_states = self.model(
             input_ids,
             positions,
@@ -867,6 +881,10 @@ class Qwen3MoeForCausalLM(nn.Module):
             self._cached_params_dict = dict(self.named_parameters())
         params_dict = self._cached_params_dict
         for name, loaded_weight in weights:
+            # adapt name for disaggregated mode
+            if "language_model" in name:
+                name = name.replace(r"language_model.", r"model.")
+
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None
