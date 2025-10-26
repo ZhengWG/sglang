@@ -1006,7 +1006,10 @@ class Scheduler(
                 block_size=block_size,
             )
             self.disagg_metadata_buffers = MultimodalDataBuffers(
-                buffer_size, block_size, self.model_config.hidden_size
+                buffer_size,
+                block_size,
+                self.model_config.hidden_size,
+                num_deepstack_embeddings=self.model_config.num_deepstack_embeddings,
             )
             self.disagg_embedding_bootstrap_queue = MultimodalEmbeddingBootstrapQueue(
                 req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
@@ -1031,7 +1034,10 @@ class Scheduler(
                 block_size=block_size,
             )
             self.disagg_metadata_buffers = MultimodalDataBuffers(
-                buffer_size, block_size, self.model_config.hidden_size
+                buffer_size,
+                block_size,
+                self.model_config.hidden_size,
+                num_deepstack_embeddings=self.model_config.num_deepstack_embeddings,
             )
             self.disagg_language_transfer_queue = MultimodalLanguageTransferQueue(
                 gloo_group=self.attn_tp_cpu_group,

@@ -2040,6 +2040,14 @@ class ModelRunner:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
         if forward_batch.input_embeds is not None:
             kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
+        if self.model_config.num_deepstack_embeddings > 0:
+            # NOTE: separate input_embeds and deepstack_embedding in the model forward pass
+            # Only for Qwen3-VL with deepstack
+            separate_index = self.model_config.hidden_size
+            kwargs["input_embeds"] = forward_batch.input_embeds[:, :separate_index]
+            kwargs["deepstack_embedding"] = forward_batch.input_embeds[
+                :, separate_index:
+            ]
         if not self.is_generation:
             kwargs["get_embedding"] = True
         if self.multimodal_encode_disaggregated:

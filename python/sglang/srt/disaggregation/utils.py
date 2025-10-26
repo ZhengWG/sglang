@@ -655,14 +655,24 @@ class MultimodalDataBuffers:
         input_embeddings = torch.cat(gathered_embeddings, dim=0)
         fill_ids = torch.cat(gathered_fill_ids)
         mrope_positions = torch.cat(gathered_mrope_positions, dim=-1)
+        # Concatenate deepstack if enabled
+        deepstack_embeddings = None
+        if self.deepstack_embeddings is not None and len(gathered_deepstack) > 0:
+            deepstack_embeddings = torch.cat(gathered_deepstack, dim=0)
 
-        return input_embeddings, fill_ids, mrope_positions, aux_datas
+        return (
+            input_embeddings,
+            fill_ids,
+            mrope_positions,
+            aux_datas,
+            deepstack_embeddings,
+        )
 
     def set_buf(self, req: Req):
         """Set buffer data using block-based scatter operation.
 
         Args:
-            req: Request with metadata_block_indices, embedding, and fill_ids
+            req: Request with metadata_block_indices, embedding, fill_ids, and optional deepstack_embedding
         """
         embed_length = req.embedding.shape[0]
         block_indices = req.embedding_indices
@@ -704,6 +714,23 @@ class MultimodalDataBuffers:
                         .detach()
                         .cpu()
                     )
+
+            # Scatter deepstack embeddings if present and enabled
+            if (
+                self.deepstack_embeddings is not None
+                and hasattr(req, "deepstack_embedding")
+                and req.deepstack_embedding is not None
+            ):
+                deepstack_start = min(start_pos, embed_length)
+                deepstack_end = min(end_pos, embed_length)
+                if deepstack_end > deepstack_start:
+                    deepstack_len = deepstack_end - deepstack_start
+                    self.deepstack_embeddings[
+                        block_id,
+                        : deepstack_len
+                        * self.embedding_dim
+                        * self.num_deepstack_embeddings,
+                    ] = req.deepstack_embedding[deepstack_start:deepstack_end].flatten()
 
             # Store metadata in first block
             if block_idx_pos == 0:

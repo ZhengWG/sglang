@@ -606,6 +606,7 @@ class Req:
 
         # Embedding (return values)
         self.embedding = None
+        self.deepstack_embedding = None
 
         # Constrained decoding
         self.grammar: Optional[BaseGrammarObject] = None
