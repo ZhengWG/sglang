@@ -65,13 +65,10 @@ runtime_common = [
   "grpcio==1.75.1", # keep it align with compile_proto.py
   "grpcio-tools==1.75.1", # keep it align with compile_proto.py
   "grpcio-reflection==1.75.1", # required by srt/entrypoints/grpc_server.py
-]
-
-tracing = [
-  "opentelemetry-sdk",
-  "opentelemetry-api",
-  "opentelemetry-exporter-otlp",
-  "opentelemetry-exporter-otlp-proto-grpc",
+  "opentelemetry-sdk>=1.26.0", # required by tracing
+  "opentelemetry-api>=1.26.0", # required by tracing
+  "opentelemetry-exporter-otlp>=1.26.0", # required by tracing
+  "opentelemetry-semantic-conventions-ai>=0.4.1", # required by tracing
 ]
 
 # HIP (Heterogeneous-computing Interface for Portability) for AMD
