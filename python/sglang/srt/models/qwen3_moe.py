@@ -719,132 +719,8 @@ class Qwen3MoeModel(Qwen2MoeModel):
             self._input_deepstack_embeds = None
 
 
-class Qwen3MoeForCausalLM(nn.Module):
-    fall_back_to_pt_during_load = False
-
-    def __init__(
-        self,
-        config: Qwen3MoeConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.pp_group = get_pp_group()
-        self.config = config
-        self.quant_config = quant_config
-        self.model = Qwen3MoeModel(
-            config, quant_config, prefix=add_prefix("model", prefix)
-        )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=add_prefix("lm_head", prefix),
-            use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
-        )
-        self.logits_processor = LogitsProcessor(config)
-        self.capture_aux_hidden_states = False
-        self.is_mrope_enabled = (
-            hasattr(config, "rope_scaling") and config.rope_scaling is not None
-        )
-
-    def get_input_embeddings(self) -> nn.Embedding:
-        return self.model.embed_tokens
-
-    @torch.no_grad()
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor = None,
-        pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: torch.Tensor = None,
-    ) -> torch.Tensor:
-        if self.get_is_mrope_enabled():
-            positions = forward_batch.mrope_positions
-        # TODO: remove here from modeling
-        if (
-            not forward_batch.forward_mode.is_decode()
-            and forward_batch.contains_mm_inputs()
-        ):
-            # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
-            # just being defensive here
-            forward_batch.mm_inputs = None
-
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            forward_batch,
-            input_embeds,
-            pp_proxy_tensors=pp_proxy_tensors,
-            input_deepstack_embeds=input_deepstack_embeds,
-        )
-
-        aux_hidden_states = None
-        if self.capture_aux_hidden_states:
-            hidden_states, aux_hidden_states = hidden_states
-
-        if self.pp_group.is_last_rank:
-            return self.logits_processor(
-                input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
-            )
-        else:
-            return hidden_states
-
-    @torch.no_grad()
-    def forward_split_prefill(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        split_interval: Tuple[int, int],  # [start, end) 0-based
-        input_embeds: torch.Tensor = None,
-    ):
-        start, end = split_interval
-        # embed
-        if start == 0:
-            if input_embeds is None:
-                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
-            else:
-                forward_batch.hidden_states = input_embeds
-
-        # decoder layer
-        for i in range(start, end):
-            with get_global_expert_distribution_recorder().with_current_layer(i):
-                layer = self.model.layers[i]
-                forward_batch.hidden_states, forward_batch.residual = layer(
-                    positions,
-                    forward_batch.hidden_states,
-                    forward_batch,
-                    forward_batch.residual,
-                )
-
-        if end == self.model.config.num_hidden_layers:
-            # norm
-            hidden_states, _ = self.model.norm(
-                forward_batch.hidden_states, forward_batch.residual
-            )
-            forward_batch.hidden_states = hidden_states
-            # logits process
-            result = self.logits_processor(
-                input_ids, forward_batch.hidden_states, self.lm_head, forward_batch
-            )
-        else:
-            result = None
-
-        return result
-
-    @property
-    def start_layer(self):
-        return self.model.start_layer
-
-    @property
-    def end_layer(self):
-        return self.model.end_layer
-
-    def get_embed_and_head(self):
-        return self.model.embed_tokens.weight, self.lm_head.weight
+class Qwen3MoeWeightLoaderMixin:
+    """Mixin class for loading Qwen3 MoE weights with fused expert support."""
 
     def load_fused_expert_weights(
         self,
@@ -888,22 +764,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                 )
         return True
 
-    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
-        if not self.pp_group.is_last_rank:
-            return
-
-        self.capture_aux_hidden_states = True
-        if layer_ids is None:
-            num_layers = self.config.num_hidden_layers
-            self.model.layers_to_capture = [
-                2,
-                num_layers // 2,
-                num_layers - 3,
-            ]  # Specific layers for EAGLE3 support
-        else:
-            self.model.layers_to_capture = [val + 1 for val in layer_ids]
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights_impl(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        """Shared implementation for loading Qwen3 MoE weights."""
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -1086,14 +948,163 @@ class Qwen3MoeForCausalLM(nn.Module):
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
 
-        # TODO mimic deepseek
         # Lazy initialization of expert weights cache to avoid slowing down load_weights
         if not hasattr(self, "routed_experts_weights_of_layer"):
-            self.routed_experts_weights_of_layer = {
-                layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
-                for layer_id in range(self.start_layer, self.end_layer)
-                if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
-            }
+            if hasattr(self, "start_layer") and hasattr(self, "end_layer"):
+                self.routed_experts_weights_of_layer = {
+                    layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
+                    for layer_id in range(self.start_layer, self.end_layer)
+                    if isinstance(
+                        self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock
+                    )
+                }
+
+
+class Qwen3MoeForCausalLM(nn.Module, Qwen3MoeWeightLoaderMixin):
+    fall_back_to_pt_during_load = False
+
+    def __init__(
+        self,
+        config: Qwen3MoeConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.pp_group = get_pp_group()
+        self.config = config
+        self.quant_config = quant_config
+        self.model = Qwen3MoeModel(
+            config, quant_config, prefix=add_prefix("model", prefix)
+        )
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=add_prefix("lm_head", prefix),
+            use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
+        )
+        self.logits_processor = LogitsProcessor(config)
+        self.capture_aux_hidden_states = False
+        self.is_mrope_enabled = (
+            hasattr(config, "rope_scaling") and config.rope_scaling is not None
+        )
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.embed_tokens
+
+    @torch.no_grad()
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: torch.Tensor = None,
+    ) -> torch.Tensor:
+        if self.get_is_mrope_enabled():
+            positions = forward_batch.mrope_positions
+        # TODO: remove here from modeling
+        if (
+            not forward_batch.forward_mode.is_decode()
+            and forward_batch.contains_mm_inputs()
+        ):
+            # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
+            # just being defensive here
+            forward_batch.mm_inputs = None
+
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
+            input_deepstack_embeds=input_deepstack_embeds,
+        )
+
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states:
+            hidden_states, aux_hidden_states = hidden_states
+
+        if self.pp_group.is_last_rank:
+            return self.logits_processor(
+                input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
+            )
+        else:
+            return hidden_states
+
+    @torch.no_grad()
+    def forward_split_prefill(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        split_interval: Tuple[int, int],  # [start, end) 0-based
+        input_embeds: torch.Tensor = None,
+    ):
+        start, end = split_interval
+        # embed
+        if start == 0:
+            if input_embeds is None:
+                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
+            else:
+                forward_batch.hidden_states = input_embeds
+
+        # decoder layer
+        for i in range(start, end):
+            with get_global_expert_distribution_recorder().with_current_layer(i):
+                layer = self.model.layers[i]
+                forward_batch.hidden_states, forward_batch.residual = layer(
+                    positions,
+                    forward_batch.hidden_states,
+                    forward_batch,
+                    forward_batch.residual,
+                )
+
+        if end == self.model.config.num_hidden_layers:
+            # norm
+            hidden_states, _ = self.model.norm(
+                forward_batch.hidden_states, forward_batch.residual
+            )
+            forward_batch.hidden_states = hidden_states
+            # logits process
+            result = self.logits_processor(
+                input_ids, forward_batch.hidden_states, self.lm_head, forward_batch
+            )
+        else:
+            result = None
+
+        return result
+
+    @property
+    def start_layer(self):
+        return self.model.start_layer
+
+    @property
+    def end_layer(self):
+        return self.model.end_layer
+
+    def get_embed_and_head(self):
+        return self.model.embed_tokens.weight, self.lm_head.weight
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        if not self.pp_group.is_last_rank:
+            return
+
+        self.capture_aux_hidden_states = True
+        if layer_ids is None:
+            num_layers = self.config.num_hidden_layers
+            self.model.layers_to_capture = [
+                2,
+                num_layers // 2,
+                num_layers - 3,
+            ]  # Specific layers for EAGLE3 support
+        else:
+            self.model.layers_to_capture = [val + 1 for val in layer_ids]
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        """Load weights using the shared implementation from Qwen3MoeWeightLoaderMixin."""
+        self.load_weights_impl(weights)
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
