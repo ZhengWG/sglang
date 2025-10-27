@@ -1346,6 +1346,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             )
         else:
             self.input_embeds = input_embeds.to(self.device, non_blocking=True)
+
         for mm_input in multimodal_inputs:
             if mm_input is None:
                 continue

@@ -222,25 +222,9 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 req.embedding = embedding
             else:
                 req.embedding = torch.cat([req.embedding, embedding])
+
             embedding_offsets += req.extend_input_len
             if req.is_chunked <= 0:
-                # Extract deepstack if model supports it
-                if (
-                    hasattr(self.model_runner.model, "use_deepstack")
-                    and self.model_runner.model.use_deepstack
-                ):
-                    if hasattr(self.model_runner.model, "separate_deepstack_embeds"):
-                        req.embedding, req.deepstack_embedding = (
-                            self.model_runner.model.separate_deepstack_embeds(
-                                req.embedding
-                            )
-                        )
-                    else:
-                        # Fallback: assume no deepstack if method doesn't exist
-                        req.deepstack_embedding = None
-                else:
-                    req.deepstack_embedding = None
-
                 # Dummy output token for embedding models
                 req.output_ids.append(0)
                 dummy_output_ids.append(0)

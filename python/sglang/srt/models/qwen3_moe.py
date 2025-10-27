@@ -761,7 +761,7 @@ class Qwen3MoeForCausalLM(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         input_deepstack_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        if self.get_is_mrope_enabled():
+        if self._is_mrope_enabled:
             positions = forward_batch.mrope_positions
         # TODO: remove here from modeling
         if (

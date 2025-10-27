@@ -21,7 +21,6 @@ class PoolingType(IntEnum):
 @dataclass
 class EmbeddingPoolerOutput:
     embeddings: torch.Tensor
-    deepstack_embeddings: Optional[torch.Tensor] = None
 
 
 class Pooler(nn.Module):

@@ -322,6 +322,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                logger.info(f"Loaded stacked weight for {name}")
                 break
             else:
                 # Track if this is an expert weight to enable early skipping
@@ -332,6 +333,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     if weight_name not in name:
                         continue
                     if "visual" in name:
+                        continue
+                    if self.is_multimodal_embedding and name not in params_dict:
                         continue
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
@@ -382,6 +385,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                             shard_id=shard_id,
                             expert_id=expert_id,
                         )
+                        logger.info(f"Loaded expert weight for {name_mapped}")
                     name = name_mapped
                     break
                 else:
@@ -403,6 +407,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
+                        logger.info(f"Loaded weight for {name}")
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
 

@@ -700,9 +700,7 @@ def general_mm_embed_routine(
         inputs_embeds = embed_tokens(input_ids)
 
     if get_multimodal_embedding:
-        if use_deepstack:
-            return inputs_embeds, kwargs.get("input_deepstack_embeds", None)
-        return inputs_embeds
+        return inputs_embeds, kwargs.get("input_deepstack_embeds", None)
 
     hidden_states = language_model(
         input_ids=None,

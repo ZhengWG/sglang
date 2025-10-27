@@ -362,20 +362,23 @@ class MultimodalLanguageTransferQueue:
 
                     embedding_length = int(aux_datas[0])
                     mrope_position_delta = aux_datas[1]
-                    language_req.req.deepstack_embedding = deepstack_embedding
-                    if deepstack_embedding is not None:
-                        # NOTE: merge input_embeds and deepstack_embedding to input_embeds to
-                        # simplify the model forward pass
-                        # TODO: separate input_embeds and deepstack_embedding in the model forward pass
-                        language_req.req.input_embeds = torch.cat(
-                            [embedding_data, deepstack_embedding],
-                            dim=-1,
-                        )
-                    else:
-                        language_req.req.input_embeds = embedding_data
                     language_req.req.origin_input_ids = fill_ids.tolist()
                     mm_inputs = None
                     ori_input_length = len(language_req.req.origin_input_ids)
+
+                    # deepstack embedding only exists when mm_inputs is not None
+                    if (
+                        deepstack_embedding is not None
+                        and ori_input_length < embedding_length
+                    ):
+                        # NOTE: merge input_embeds and deepstack_embedding to input_embeds to
+                        # simplify the model forward pass
+                        language_req.req.input_embeds = torch.cat(
+                            [embedding_data, deepstack_embedding],
+                            dim=-1,
+                        ).contiguous()
+                    else:
+                        language_req.req.input_embeds = embedding_data
 
                     if ori_input_length == embedding_length:
                         mm_inputs = None

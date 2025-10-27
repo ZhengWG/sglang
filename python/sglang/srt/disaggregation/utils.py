@@ -668,6 +668,31 @@ class MultimodalDataBuffers:
             deepstack_embeddings,
         )
 
+    def _separate_deepstack_embeddings(self, embedding: torch.Tensor):
+        """Separate deepstack embeddings from the main embedding tensor."""
+        embedding_num = embedding.shape[-1] // self.embedding_dim
+        if self.deepstack_embeddings is not None:
+            if embedding_num > 1:
+                assert (
+                    embedding_num - 1
+                ) == self.num_deepstack_embeddings, f"Expected {self.num_deepstack_embeddings} deepstack embeddings, got {embedding_num - 1}"
+                input_embeds = embedding[:, : self.embedding_dim]
+                deepstack_embeds = embedding[:, self.embedding_dim :]
+                return input_embeds, deepstack_embeds
+            else:
+                # No deepstack embeddings present, only text request
+                deepstack_embeds = torch.zeros(
+                    (
+                        embedding.shape[0],
+                        self.embedding_dim * self.num_deepstack_embeddings,
+                    ),
+                    dtype=embedding.dtype,
+                    device=embedding.device,
+                )
+                return embedding, deepstack_embeds
+
+        return embedding, None
+
     def set_buf(self, req: Req):
         """Set buffer data using block-based scatter operation.
 
@@ -692,13 +717,17 @@ class MultimodalDataBuffers:
                 req.fill_ids[start_pos:end_pos]
             )
 
+            embeds, deepstack_embeds = self._separate_deepstack_embeddings(
+                req.embedding
+            )
+
             # Scatter embeddings
             embed_start = min(start_pos, embed_length)
             embed_end = min(end_pos, embed_length)
             if embed_end > embed_start:
                 self.input_embeddings[
                     block_id, : (embed_end - embed_start) * self.embedding_dim
-                ] = req.embedding[embed_start:embed_end].flatten()
+                ] = embeds[embed_start:embed_end].flatten()
 
             # Scatter mrope_positions
             if (
@@ -716,11 +745,7 @@ class MultimodalDataBuffers:
                     )
 
             # Scatter deepstack embeddings if present and enabled
-            if (
-                self.deepstack_embeddings is not None
-                and hasattr(req, "deepstack_embedding")
-                and req.deepstack_embedding is not None
-            ):
+            if self.deepstack_embeddings is not None and deepstack_embeds is not None:
                 deepstack_start = min(start_pos, embed_length)
                 deepstack_end = min(end_pos, embed_length)
                 if deepstack_end > deepstack_start:
@@ -730,7 +755,7 @@ class MultimodalDataBuffers:
                         : deepstack_len
                         * self.embedding_dim
                         * self.num_deepstack_embeddings,
-                    ] = req.deepstack_embedding[deepstack_start:deepstack_end].flatten()
+                    ] = deepstack_embeds[deepstack_start:deepstack_end].flatten()
 
             # Store metadata in first block
             if block_idx_pos == 0:
