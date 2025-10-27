@@ -846,6 +846,48 @@ class Qwen3MoeForCausalLM(nn.Module):
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
 
+    def load_fused_expert_weights(
+        self,
+        name: str,
+        params_dict: dict,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        num_experts: int,
+    ):
+        param = params_dict[name]
+        weight_loader = param.weight_loader
+        ep_rank = get_tensor_model_parallel_rank()
+        ep_size = get_moe_expert_parallel_world_size()
+        if ep_size == 1:
+            for expert_id in range(num_experts):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    expert_id,
+                )
+        else:
+            experts_per_ep = num_experts // ep_size
+            start_expert = ep_rank * experts_per_ep
+            end_expert = (
+                (ep_rank + 1) * experts_per_ep
+                if ep_rank != ep_size - 1
+                else num_experts
+            )
+
+            for idx, expert_id in enumerate(range(start_expert, end_expert)):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    idx,
+                )
+        return True
+
     def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
         if not self.pp_group.is_last_rank:
             return
@@ -878,6 +920,28 @@ class Qwen3MoeForCausalLM(nn.Module):
             num_experts=self.config.num_experts,
         )
 
+        # Skip loading extra parameters for GPTQ/modelopt models.
+        ignore_suffixes = (
+            ".bias",
+            "_bias",
+            ".k_scale",
+            "_k_scale",
+            ".v_scale",
+            "_v_scale",
+            ".weight_scale",
+            "_weight_scale",
+            ".input_scale",
+            "_input_scale",
+        )
+
+        is_fused_expert = False
+        fused_expert_params_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+
+        num_experts = self.config.num_experts
+
         # Cache params_dict to avoid repeated expensive traversal of model parameters
         if not hasattr(self, "_cached_params_dict"):
             self._cached_params_dict = dict(self.named_parameters())
@@ -900,7 +964,12 @@ class Qwen3MoeForCausalLM(nn.Module):
 
             if "rotary_emb.inv_freq" in name:
                 continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
+                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
+                    is_fused_expert = True
+                    expert_params_mapping = fused_expert_params_mapping
+
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -913,8 +982,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                 if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                # Skip loading extra parameters for GPTQ/modelopt models.
+                if name.endswith(ignore_suffixes) and name not in params_dict:
                     continue
                 if name not in params_dict:
                     continue
@@ -932,31 +1001,65 @@ class Qwen3MoeForCausalLM(nn.Module):
                     if weight_name not in name:
                         continue
 
-                    # Mark as expert weight regardless of whether we can process it
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
                     is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_fused_expert:
+                        loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
+                        if "experts.gate_up_proj" in name:
+                            loaded_weight = loaded_weight.chunk(2, dim=-2)
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[0],
+                                "w1",
+                                num_experts,
+                            )
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[1],
+                                "w3",
+                                num_experts,
+                            )
+                        else:
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight,
+                                shard_id,
+                                num_experts,
+                            )
+                    else:
+                        # Skip loading extra parameters for GPTQ/modelopt models.
+                        if (
+                            name_mapped.endswith(ignore_suffixes)
+                            and name_mapped not in params_dict
+                        ):
+                            continue
+                        if name_mapped not in params_dict:
+                            # Expert weight not on this rank, will be skipped below
+                            continue
 
-                    name = name.replace(weight_name, param_name)
-                    if name not in params_dict:
-                        # Expert weight not on this rank, will be skipped below
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
+                        param = params_dict[name_mapped]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
+                    name = name_mapped
                     break
                 else:
                     if is_expert_weight:
                         # This is an expert weight but not mapped to this rank, skip all remaining processing
                         continue
 
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if name.endswith(ignore_suffixes) and name not in params_dict:
                         continue
                     if name not in params_dict:
                         continue
