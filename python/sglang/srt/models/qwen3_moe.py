@@ -719,7 +719,248 @@ class Qwen3MoeModel(Qwen2MoeModel):
             self._input_deepstack_embeds = None
 
 
-class Qwen3MoeForCausalLM(nn.Module):
+class Qwen3MoeWeightLoaderMixin:
+    """Mixin class for loading Qwen3 MoE weights with fused expert support."""
+
+    def load_fused_expert_weights(
+        self,
+        name: str,
+        params_dict: dict,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        num_experts: int,
+    ):
+        param = params_dict[name]
+        weight_loader = param.weight_loader
+        ep_rank = get_tensor_model_parallel_rank()
+        ep_size = get_moe_expert_parallel_world_size()
+        if ep_size == 1:
+            for expert_id in range(num_experts):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    expert_id,
+                )
+        else:
+            experts_per_ep = num_experts // ep_size
+            start_expert = ep_rank * experts_per_ep
+            end_expert = (
+                (ep_rank + 1) * experts_per_ep
+                if ep_rank != ep_size - 1
+                else num_experts
+            )
+
+            for idx, expert_id in enumerate(range(start_expert, end_expert)):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    idx,
+                )
+        return True
+
+    def load_weights_impl(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        """Shared implementation for loading Qwen3 MoE weights."""
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
+
+        # Skip loading extra parameters for GPTQ/modelopt models.
+        ignore_suffixes = (
+            ".bias",
+            "_bias",
+            ".k_scale",
+            "_k_scale",
+            ".v_scale",
+            "_v_scale",
+            ".weight_scale",
+            "_weight_scale",
+            ".input_scale",
+            "_input_scale",
+        )
+
+        is_fused_expert = False
+        fused_expert_params_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+
+        num_experts = self.config.num_experts
+
+        # Cache params_dict to avoid repeated expensive traversal of model parameters
+        if not hasattr(self, "_cached_params_dict"):
+            self._cached_params_dict = dict(self.named_parameters())
+        params_dict = self._cached_params_dict
+        for name, loaded_weight in weights:
+            # adapt name for disaggregated mode
+            if "language_model" in name:
+                name = name.replace(r"language_model.", r"model.")
+
+            layer_id = get_layer_id(name)
+            if (
+                layer_id is not None
+                and hasattr(self.model, "start_layer")
+                and (
+                    layer_id < self.model.start_layer
+                    or layer_id >= self.model.end_layer
+                )
+            ):
+                continue
+
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
+                    is_fused_expert = True
+                    expert_params_mapping = fused_expert_params_mapping
+
+                # Skip non-stacked layers and experts (experts handled below).
+                if weight_name not in name:
+                    continue
+                # Skip visual module weights (for qwen3_vl_moe compatibility)
+                if "visual" in name:
+                    continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if "mlp.experts" in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra parameters for GPTQ/modelopt models.
+                if name.endswith(ignore_suffixes) and name not in params_dict:
+                    continue
+                if name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Track if this is an expert weight to enable early skipping
+                is_expert_weight = False
+
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    # Skip visual module weights (for qwen3_vl_moe compatibility)
+                    if "visual" in name:
+                        continue
+
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_fused_expert:
+                        loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
+                        if "experts.gate_up_proj" in name:
+                            loaded_weight = loaded_weight.chunk(2, dim=-2)
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[0],
+                                "w1",
+                                num_experts,
+                            )
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[1],
+                                "w3",
+                                num_experts,
+                            )
+                        else:
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight,
+                                shard_id,
+                                num_experts,
+                            )
+                    else:
+                        # Skip loading extra parameters for GPTQ/modelopt models.
+                        if (
+                            name_mapped.endswith(ignore_suffixes)
+                            and name_mapped not in params_dict
+                        ):
+                            continue
+                        if name_mapped not in params_dict:
+                            # Expert weight not on this rank, will be skipped below
+                            continue
+
+                        param = params_dict[name_mapped]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
+                    name = name_mapped
+                    break
+                else:
+                    if is_expert_weight:
+                        # This is an expert weight but not mapped to this rank, skip all remaining processing
+                        continue
+
+                    # Skip visual module weights (for qwen3_vl_moe compatibility)
+                    if "visual" in name:
+                        # Adapt visual weight names if needed (though we skip loading them)
+                        name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                        name = name.replace(r"model.visual.", r"visual.")
+                        continue
+
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if name.endswith(ignore_suffixes) and name not in params_dict:
+                        continue
+                    if name not in params_dict:
+                        continue
+
+                    if name in params_dict.keys():
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                    else:
+                        logger.warning(f"Parameter {name} not found in params_dict")
+
+        # Lazy initialization of expert weights cache to avoid slowing down load_weights
+        if not hasattr(self, "routed_experts_weights_of_layer"):
+            if hasattr(self, "start_layer") and hasattr(self, "end_layer"):
+                self.routed_experts_weights_of_layer = {
+                    layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
+                    for layer_id in range(self.start_layer, self.end_layer)
+                    if isinstance(
+                        self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock
+                    )
+                }
+
+
+class Qwen3MoeForCausalLM(nn.Module, Qwen3MoeWeightLoaderMixin):
     fall_back_to_pt_during_load = False
 
     def __init__(
@@ -862,122 +1103,8 @@ class Qwen3MoeForCausalLM(nn.Module):
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
-        # Cache params_dict to avoid repeated expensive traversal of model parameters
-        if not hasattr(self, "_cached_params_dict"):
-            self._cached_params_dict = dict(self.named_parameters())
-        params_dict = self._cached_params_dict
-        for name, loaded_weight in weights:
-            # adapt name for disaggregated mode
-            if "language_model" in name:
-                name = name.replace(r"language_model.", r"model.")
-
-            layer_id = get_layer_id(name)
-            if (
-                layer_id is not None
-                and hasattr(self.model, "start_layer")
-                and (
-                    layer_id < self.model.start_layer
-                    or layer_id >= self.model.end_layer
-                )
-            ):
-                continue
-
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Track if this is an expert weight to enable early skipping
-                is_expert_weight = False
-
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    # Mark as expert weight regardless of whether we can process it
-                    is_expert_weight = True
-
-                    name = name.replace(weight_name, param_name)
-                    if name not in params_dict:
-                        # Expert weight not on this rank, will be skipped below
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if is_expert_weight:
-                        # This is an expert weight but not mapped to this rank, skip all remaining processing
-                        continue
-
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if name not in params_dict:
-                        continue
-
-                    if name in params_dict.keys():
-                        param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
-                    else:
-                        logger.warning(f"Parameter {name} not found in params_dict")
-
-        # TODO mimic deepseek
-        # Lazy initialization of expert weights cache to avoid slowing down load_weights
-        if not hasattr(self, "routed_experts_weights_of_layer"):
-            self.routed_experts_weights_of_layer = {
-                layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
-                for layer_id in range(self.start_layer, self.end_layer)
-                if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
-            }
+        """Load weights using the shared implementation from Qwen3MoeWeightLoaderMixin."""
+        self.load_weights_impl(weights)
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
