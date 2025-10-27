@@ -700,7 +700,12 @@ def general_mm_embed_routine(
         inputs_embeds = embed_tokens(input_ids)
 
     if get_multimodal_embedding:
-        return inputs_embeds, kwargs.get("input_deepstack_embeds", None)
+        input_deepstack_embeds = kwargs.get("input_deepstack_embeds", None)
+        if input_deepstack_embeds is not None:
+            inputs_embeds = torch.concat(
+                [inputs_embeds, input_deepstack_embeds], dim=-1
+            )
+        return inputs_embeds
 
     hidden_states = language_model(
         input_ids=None,

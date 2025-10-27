@@ -171,7 +171,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-        mm_embeds = general_mm_embed_routine(
+        hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.model,
@@ -182,15 +182,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
 
         if get_multimodal_embedding:
-            if self.use_deepstack:
-                hidden_states, deepstack_embeds = mm_embeds
-            else:
-                hidden_states = mm_embeds
-            return EmbeddingPoolerOutput(
-                embeddings=hidden_states,
-                deepstack_embeddings=deepstack_embeds if self.use_deepstack else None,
-            )
-        hidden_states = mm_embeds
+            return EmbeddingPoolerOutput(embeddings=hidden_states)
 
         if not get_embedding:
             return self.logits_processor(

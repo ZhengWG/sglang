@@ -362,9 +362,9 @@ class MultimodalLanguageTransferQueue:
 
                     embedding_length = int(aux_datas[0])
                     mrope_position_delta = aux_datas[1]
-                    language_req.req.origin_input_ids = fill_ids.tolist()
                     mm_inputs = None
                     ori_input_length = len(language_req.req.origin_input_ids)
+                    language_req.req.origin_input_ids = fill_ids.tolist()
 
                     # deepstack embedding only exists when mm_inputs is not None
                     if (
