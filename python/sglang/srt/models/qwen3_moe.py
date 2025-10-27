@@ -995,24 +995,24 @@ class Qwen3MoeForCausalLM(nn.Module):
                     # Mark as expert weight regardless of whether we can process it
                     is_expert_weight = True
 
-                    name = name.replace(weight_name, param_name)
+                    name_mapped = name.replace(weight_name, param_name)
                     
                     # Only handle fused expert format here
                     if is_fused_expert:
-                        if name not in params_dict:
+                        if name_mapped not in params_dict:
                             continue
                         loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
                         if "experts.gate_up_proj" in name:
                             loaded_weight = loaded_weight.chunk(2, dim=-2)
                             self.load_fused_expert_weights(
-                                name,
+                                name_mapped,
                                 params_dict,
                                 loaded_weight[0],
                                 "w1",
                                 num_experts,
                             )
                             self.load_fused_expert_weights(
-                                name,
+                                name_mapped,
                                 params_dict,
                                 loaded_weight[1],
                                 "w3",
@@ -1020,7 +1020,7 @@ class Qwen3MoeForCausalLM(nn.Module):
                             )
                         else:
                             self.load_fused_expert_weights(
-                                name,
+                                name_mapped,
                                 params_dict,
                                 loaded_weight,
                                 shard_id,
@@ -1028,19 +1028,20 @@ class Qwen3MoeForCausalLM(nn.Module):
                             )
                     else:
                         # Standard expert loading path
-                        if name not in params_dict:
+                        if name_mapped not in params_dict:
                             # Expert weight not on this rank, will be skipped below
                             continue
 
-                        param = params_dict[name]
+                        param = params_dict[name_mapped]
                         weight_loader = param.weight_loader
                         weight_loader(
                             param,
                             loaded_weight,
-                            name,
+                            name_mapped,
                             shard_id=shard_id,
                             expert_id=expert_id,
                         )
+                    name = name_mapped
                     break
                 else:
                     if is_expert_weight:
