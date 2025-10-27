@@ -973,6 +973,9 @@ class Qwen3MoeForCausalLM(nn.Module):
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
+                # Skip visual module weights (for qwen3_vl_moe compatibility)
+                if "visual" in name:
+                    continue
                 # We have mlp.experts[0].gate_proj in the checkpoint.
                 # Since we handle the experts below in expert_params_mapping,
                 # we need to skip here BEFORE we update the name, otherwise
@@ -999,6 +1002,9 @@ class Qwen3MoeForCausalLM(nn.Module):
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
+                        continue
+                    # Skip visual module weights (for qwen3_vl_moe compatibility)
+                    if "visual" in name:
                         continue
 
                     # Anyway, this is an expert weight and should not be
@@ -1056,6 +1062,13 @@ class Qwen3MoeForCausalLM(nn.Module):
                 else:
                     if is_expert_weight:
                         # This is an expert weight but not mapped to this rank, skip all remaining processing
+                        continue
+
+                    # Skip visual module weights (for qwen3_vl_moe compatibility)
+                    if "visual" in name:
+                        # Adapt visual weight names if needed (though we skip loading them)
+                        name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                        name = name.replace(r"model.visual.", r"visual.")
                         continue
 
                     # Skip loading extra parameters for GPTQ/modelopt models.
