@@ -952,10 +952,10 @@ class Qwen3MoeForCausalLM(nn.Module):
             self._cached_params_dict = dict(self.named_parameters())
         params_dict = self._cached_params_dict
         for name, loaded_weight in weights:
-            # adapt name for disaggregated mode
             if "language_model" in name:
                 name = name.replace(r"model.language_model.", r"model.")
 
+            # Pipeline Parallel: Skip layers not on this rank
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None
@@ -967,9 +967,10 @@ class Qwen3MoeForCausalLM(nn.Module):
             ):
                 continue
 
+            # Skip rotary embedding inverse frequency
             if "rotary_emb.inv_freq" in name:
                 continue
-            
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                     is_fused_expert = True
@@ -978,7 +979,6 @@ class Qwen3MoeForCausalLM(nn.Module):
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
-                # Skip visual layers (for VL model compatibility)
                 if "visual" in name:
                     continue
 
@@ -994,6 +994,10 @@ class Qwen3MoeForCausalLM(nn.Module):
                 # Skip loading extra parameters for GPTQ/modelopt models.
                 if name.endswith(ignore_suffixes) and name not in params_dict:
                     continue
+                # [TODO] Skip layers that are on other devices (check if sglang has a similar function)
+                # if is_pp_missing_parameter(name, self):
+                #     continue
+
                 if name not in params_dict:
                     continue
 
@@ -1010,10 +1014,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    # Skip visual layers (for VL model compatibility)
                     if "visual" in name:
                         continue
-                    
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
                     is_expert_weight = True
@@ -1052,7 +1054,6 @@ class Qwen3MoeForCausalLM(nn.Module):
                         ):
                             continue
                         if name_mapped not in params_dict:
-                            # Expert weight not on this rank, skip
                             continue
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
@@ -1073,6 +1074,10 @@ class Qwen3MoeForCausalLM(nn.Module):
                     if is_expert_weight:
                         # This is an expert weight but not mapped to this rank, skip all remaining processing
                         continue
+                    if "visual" in name:
+                        # adapt to VisionAttention
+                        name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                        name = name.replace(r"model.visual.", r"visual.")
 
                     # Skip loading extra parameters for GPTQ/modelopt models.
                     if name.endswith(ignore_suffixes) and name not in params_dict:
@@ -1088,7 +1093,6 @@ class Qwen3MoeForCausalLM(nn.Module):
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
 
-        # TODO mimic deepseek
         # Lazy initialization of expert weights cache to avoid slowing down load_weights
         if not hasattr(self, "routed_experts_weights_of_layer"):
             self.routed_experts_weights_of_layer = {
