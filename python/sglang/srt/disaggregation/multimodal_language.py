@@ -440,7 +440,28 @@ class MultimodalLanguageTransferQueue:
                             f"need to resume for {remaining_tokens} more tokens"
                         )
 
-                        # Cache received partial data
+                        # Allocate new space for remaining tokens first
+                        new_allocation = (
+                            self.req_to_metadata_buffer_idx_allocator.alloc(
+                                num_tokens=remaining_tokens,
+                                req_id=language_req.req.rid,
+                                fake=isinstance(
+                                    language_req.embedding_receiver, FakeKVReceiver
+                                ),
+                            )
+                        )
+
+                        if new_allocation is None:
+                            # Not enough memory to resume now, wait for next iteration
+                            logger.debug(
+                                f"Waiting for memory to resume transfer for rid={language_req.req.rid}, "
+                                f"need {remaining_tokens} tokens"
+                            )
+                            # Keep request in queue, will retry in next pop_transferred call
+                            # Don't cache partial data or free old allocation yet
+                            continue
+
+                        # Only after successful allocation, cache partial data and free old allocation
                         language_req.partial_input_embeds = embedding_data
                         language_req.partial_fill_ids = fill_ids.tolist()
                         language_req.partial_mrope_positions = mrope_positions
@@ -456,27 +477,6 @@ class MultimodalLanguageTransferQueue:
                                 language_req.embedding_receiver, FakeKVReceiver
                             ),
                         )
-
-                        # Allocate new space for remaining tokens
-                        new_allocation = (
-                            self.req_to_metadata_buffer_idx_allocator.alloc(
-                                num_tokens=remaining_tokens,
-                                req_id=language_req.req.rid,
-                                fake=isinstance(
-                                    language_req.embedding_receiver, FakeKVReceiver
-                                ),
-                            )
-                        )
-
-                        if new_allocation is None:
-                            # Not enough memory to resume, mark as failed
-                            logger.error(
-                                f"Not enough memory to resume transfer for rid={language_req.req.rid}, "
-                                f"need {remaining_tokens} tokens"
-                            )
-                            self._handle_failed_request(language_req)
-                            indices_to_remove.add(i)
-                            continue
 
                         # Update embedding_indices
                         language_req.embedding_indices = new_allocation
