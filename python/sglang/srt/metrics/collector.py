@@ -835,7 +835,7 @@ class TokenizerMetricsCollector:
         self.num_retractions = Histogram(
             name="sglang:num_retractions",
             documentation="Histogram of retraction counts per request.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
             buckets=[
                 0,
                 1,
