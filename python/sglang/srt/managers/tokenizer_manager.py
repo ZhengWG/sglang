@@ -69,6 +69,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.mm_utils import TensorTransportMode
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
+from sglang.srt.managers.schedule_batch import RequestStage
 from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
@@ -86,6 +87,7 @@ from sglang.srt.tracing.trace import (
     trace_get_proc_propagate_context,
     trace_req_finish,
     trace_req_start,
+    trace_set_remote_propagate_context,
     trace_slice_end,
     trace_slice_start,
 )
@@ -408,6 +410,10 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
+        if request:
+            if "trace_context" in request.headers:
+                trace_set_remote_propagate_context(request.headers["trace_context"])
+
         if self.server_args.tokenizer_worker_num > 1:
             self._attach_multi_http_worker_info(obj)
 
@@ -630,7 +636,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             mm_inputs = None
 
         self._validate_one_request(obj, input_ids)
-        trace_slice_end("tokenize", obj.rid)
+        trace_slice_end(RequestStage.TOKENIZE, obj.rid)
         return self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )
@@ -856,7 +862,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     req, req.text, input_ids_list[i], None, None, token_type_ids
                 )
             )
-            trace_slice_end("tokenize", req.rid)
+            trace_slice_end(RequestStage.TOKENIZE, req.rid)
         logger.debug(f"Completed batch processing for {batch_size} requests")
         return tokenized_objs
 
@@ -909,12 +915,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         created_time: Optional[float] = None,
     ):
         input_process_finish_time = time.time()
-        trace_slice_start("dispatch", obj.rid)
+        trace_slice_start(RequestStage.TOKENIZER_DISPATCH, obj.rid)
         tokenized_obj.trace_context = trace_get_proc_propagate_context(obj.rid)
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time, input_process_finish_time=input_process_finish_time)
         self.rid_to_state[obj.rid] = state
-        trace_slice_end("dispatch", obj.rid, thread_finish_flag=True)
+        trace_slice_end(
+            RequestStage.TOKENIZER_DISPATCH, obj.rid, thread_finish_flag=True
+        )
         return state
 
     def _send_batch_request(
@@ -2227,7 +2235,13 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             bootstrap_room = (
                 obj.bootstrap_room if hasattr(obj, "bootstrap_room") else None
             )
-            trace_req_start(obj.rid, bootstrap_room, ts=int(created_time * 1e9), trace_headers=obj.trace_headers)
+            trace_req_start(
+                obj.rid,
+                bootstrap_room,
+                ts=int(created_time * 1e9),
+                role=self.server_args.disaggregation_mode,
+                trace_headers = obj.trace_headers,
+            )
             trace_slice_start("", obj.rid, ts=int(created_time * 1e9), anonymous=True)
         else:
             for i in range(len(obj.rid)):
@@ -2236,7 +2250,13 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     if hasattr(obj, "bootstrap_room") and obj.bootstrap_room
                     else None
                 )
-                trace_req_start(obj.rid[i], bootstrap_room, ts=int(created_time * 1e9), trace_headers=obj.trace_headers)
+                trace_req_start(
+                    obj.rid[i],
+                    bootstrap_room,
+                    ts=int(created_time * 1e9),
+                    role=self.server_args.disaggregation_mode,
+                    trace_headers=obj.trace_headers,
+                )
                 trace_slice_start(
                     "", obj.rid[i], ts=int(created_time * 1e9), anonymous=True
                 )
