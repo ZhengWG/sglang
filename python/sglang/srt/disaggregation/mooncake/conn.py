@@ -317,8 +317,9 @@ class MooncakeKVManager(CommonKVManager):
             self.session_pool = defaultdict(requests.Session)
             self.session_pool_lock = threading.Lock()
             self.addr_to_rooms_tracker = defaultdict(set)
-            if not is_multimodal:
-                self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
+            # Both DECODE and LANGUAGE modes need prefill_response_tracker
+            # (LANGUAGE receives from ENCODE, similar to DECODE receiving from PREFILL)
+            self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
             # Heartbeat interval should be at least 2 seconds
             self.heartbeat_interval = max(
                 float(os.getenv("SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL", 5.0)), 2.0
