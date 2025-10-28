@@ -639,16 +639,19 @@ class TokenizerMetricsCollector:
         self.labels = labels or {}
         self.collect_tokens_histogram = collect_tokens_histogram
 
+        # Include lora_adapter as a label
+        all_labels = list(labels.keys()) + ["lora_adapter"]
+
         self.prompt_tokens_total = Counter(
             name="sglang:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         self.generation_tokens_total = Counter(
             name="sglang:generation_tokens_total",
             documentation="Number of generation tokens processed.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         if collect_tokens_histogram:
@@ -687,7 +690,7 @@ class TokenizerMetricsCollector:
             self.prompt_tokens_histogram = Histogram(
                 name="sglang:prompt_tokens_histogram",
                 documentation="Histogram of prompt token length.",
-                labelnames=labels.keys(),
+                labelnames=all_labels,
                 buckets=generate_buckets(
                     server_args.prompt_tokens_buckets, default_bucket_prompt_tokens
                 ),
@@ -695,7 +698,7 @@ class TokenizerMetricsCollector:
             self.generation_tokens_histogram = Histogram(
                 name="sglang:generation_tokens_histogram",
                 documentation="Histogram of generation token length.",
-                labelnames=labels.keys(),
+                labelnames=all_labels,
                 buckets=generate_buckets(
                     server_args.generation_tokens_buckets,
                     default_bucket_prompt_tokens,
@@ -705,31 +708,31 @@ class TokenizerMetricsCollector:
         self.cached_tokens_total = Counter(
             name="sglang:cached_tokens_total",
             documentation="Number of cached prompt tokens.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         self.num_requests_total = Counter(
             name="sglang:num_requests_total",
             documentation="Number of requests processed.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         self.num_so_requests_total = Counter(
             name="sglang:num_so_requests_total",
             documentation="Number of structured output requests processed.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         self.num_aborted_requests_total = Counter(
             name="sglang:num_aborted_requests_total",
             documentation="Number of requests aborted.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
         )
 
         self.counter_request_success = Counter(
             name="sglang:request_success_total",
             documentation="Count of successfully processed requests.",
-            labelnames=list(labels.keys()) + ["finished_reason"],
+            labelnames=list(labels.keys()) + ["lora_adapter", "finished_reason"],
         )
 
         if bucket_time_to_first_token is None:
@@ -810,21 +813,21 @@ class TokenizerMetricsCollector:
         self.histogram_time_to_first_token = Histogram(
             name="sglang:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
             buckets=bucket_time_to_first_token,
         )
 
         self.histogram_inter_token_latency = Histogram(
             name="sglang:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
             buckets=bucket_inter_token_latency,
         )
 
         self.histogram_e2e_request_latency = Histogram(
             name="sglang:e2e_request_latency_seconds",
             documentation="Histogram of End-to-end request latency in seconds",
-            labelnames=labels.keys(),
+            labelnames=all_labels,
             buckets=bucket_e2e_request_latency,
         )
 

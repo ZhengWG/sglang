@@ -1728,12 +1728,27 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             else 0
         )
 
+        # get lora_path
+        lora_path = None
+        if isinstance(state.obj, GenerateReqInput):
+            lora_path = state.obj.lora_path
+            if isinstance(lora_path, list):
+                # If it is a list, use lora_path at the corresponding position
+                lora_path = lora_path[i] if i < len(lora_path) else None
+            elif isinstance(lora_path, str):
+                # A single string is passed directly
+                lora_path = lora_path
+            else:
+                lora_path = "base"
+
         custom_labels = getattr(state.obj, "custom_labels", None)
-        labels = (
-            {**self.metrics_collector.labels, **custom_labels}
-            if custom_labels
-            else self.metrics_collector.labels
-        )
+        labels = {**self.metrics_collector.labels}
+        if custom_labels:
+            labels.update(custom_labels)
+        # add lora_adapter
+        if lora_path:
+            labels["lora_adapter"] = lora_path
+
         if (
             state.first_token_time == 0.0
             and self.disaggregation_mode != DisaggregationMode.PREFILL
