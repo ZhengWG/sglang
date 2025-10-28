@@ -1406,7 +1406,7 @@ class MooncakeKVManager(CommonKVManager):
         if self.is_multimodal:
             # Multimodal Embedding mode
             assert self.disaggregation_mode == DisaggregationMode.ENCODE
-            assert is_last  # For embedding data, we only send once at the end
+            # Note: For embedding, we send data once (is_last=True), no aux_index needed
             
             if (
                 bootstrap_room not in self.request_status
@@ -1442,6 +1442,7 @@ class MooncakeKVManager(CommonKVManager):
         else:
             # KV mode
             assert self.disaggregation_mode == DisaggregationMode.PREFILL
+            # In KV mode, if is_last=True, aux_index must be provided
             assert not is_last or (is_last and aux_index is not None)
 
             if (
