@@ -1416,6 +1416,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 "finish_reason": recv_obj.finished_reasons[i],
                 "prompt_tokens": recv_obj.prompt_tokens[i],
                 "weight_version": self.server_args.weight_version,
+                "total_retractions": recv_obj.retraction_counts[i],
             }
 
             if getattr(state.obj, "return_logprob", False):
@@ -1762,6 +1763,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 or state.obj.sampling_params.get("ebnf", None)
                 or state.obj.sampling_params.get("structural_tag", None)
             )
+
+            retraction_count = (
+                recv_obj.retraction_counts[i]
+                if getattr(recv_obj, "retraction_counts", None)
+                and i < len(recv_obj.retraction_counts)
+                else 0
+            )
+
             self.metrics_collector.observe_one_finished_request(
                 labels,
                 recv_obj.prompt_tokens[i],
@@ -1769,6 +1778,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 recv_obj.cached_tokens[i],
                 state.finished_time - state.created_time,
                 has_grammar,
+                retraction_count,
                 state.finish_reason,
             )
 

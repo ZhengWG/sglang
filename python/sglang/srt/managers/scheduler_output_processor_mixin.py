@@ -745,6 +745,7 @@ class SchedulerOutputProcessorMixin:
         cached_tokens = []
         spec_verify_ct = []
         spec_accepted_tokens = []
+        retraction_counts = []
         output_hidden_states = None
 
         if return_logprob:
@@ -847,6 +848,8 @@ class SchedulerOutputProcessorMixin:
                 completion_tokens.append(len(output_ids_))
                 cached_tokens.append(req.cached_tokens)
 
+                retraction_counts.append(req.retraction_count)
+
                 if not self.spec_algorithm.is_none():
                     spec_verify_ct.append(req.spec_verify_ct)
                     spec_accepted_tokens.append(req.spec_accepted_tokens)
@@ -930,15 +933,15 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ):
                 req.log_time_stats()
-            
+
             # req trace metric stats
             if (
                 req.finished()
                 and self.tp_rank == 0
-                and self.enable_metrics 
+                and self.enable_metrics
                 and self.enable_trace
             ):
-                req_metric = ReqMetric(tokens_generation_time=req.time_stats.tokens_generation_time, 
+                req_metric = ReqMetric(tokens_generation_time=req.time_stats.tokens_generation_time,
                                        tokens_scheduled_time=req.time_stats.tokens_scheduled_time,
                                        tokens_iter_batch_size=req.time_stats.tokens_iter_batch_size,
                                        tokens_iter_waiting_size=req.time_stats.tokens_iter_waiting_size,
@@ -953,7 +956,7 @@ class SchedulerOutputProcessorMixin:
                                        decode_prealloc_queue_entry_time=req.time_stats.decode_prealloc_queue_entry_time,
                                        decode_transfer_queue_entry_time=req.time_stats.decode_transfer_queue_entry_time,
                                        wait_queue_size=req.time_stats.wait_queue_size,
-                                       
+
                 )
                 req_metrics[req.rid] = req_metric
 
@@ -999,6 +1002,7 @@ class SchedulerOutputProcessorMixin:
                     http_worker_ipcs=http_worker_ipcs,
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
+                    retraction_counts=retraction_counts,
                     first_scheduled_times=first_scheduled_times,
                     req_metrics=req_metrics,
                 )
@@ -1012,6 +1016,7 @@ class SchedulerOutputProcessorMixin:
         embeddings = []
         prompt_tokens = []
         cached_tokens = []
+        retraction_counts = []
         for req in reqs:
             if req.finished():
                 rids.append(req.rid)
@@ -1020,6 +1025,7 @@ class SchedulerOutputProcessorMixin:
                 embeddings.append(req.embedding)
                 prompt_tokens.append(len(req.origin_input_ids))
                 cached_tokens.append(req.cached_tokens)
+                retraction_counts.append(req.retraction_count)
         self.send_to_detokenizer.send_output(
             BatchEmbeddingOutput(
                 finished_reasons,
@@ -1030,5 +1036,6 @@ class SchedulerOutputProcessorMixin:
                 http_worker_ipcs=http_worker_ipcs,
                 placeholder_tokens_idx=None,
                 placeholder_tokens_val=None,
+                retraction_counts=retraction_counts,
             )
         )

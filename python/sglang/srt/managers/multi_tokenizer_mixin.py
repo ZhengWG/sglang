@@ -347,6 +347,11 @@ def _handle_output_by_index(output, i):
             ),
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
+            retraction_counts=(
+                [output.retraction_counts[i]]
+                if len(output.retraction_counts) > i
+                else None
+            ),
             token_steps=([output.token_steps[i]] if output.token_steps else None),
             req_metrics={output.rids[i]: output.req_metrics[output.rids[i]]}
                 if output.req_metrics and output.rids[i] in output.req_metrics
