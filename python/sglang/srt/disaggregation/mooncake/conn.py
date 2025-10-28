@@ -828,6 +828,15 @@ class MooncakeKVManager(CommonKVManager):
                 f"for {tokens_to_send} tokens, but only have {len(dst_embedding_indices)} blocks"
             )
 
+        # Validate buffer counts match
+        if len(self.kv_args.aux_data_ptrs) != len(dst_embedding_ptrs):
+            logger.warning_once(
+                f"Buffer count mismatch: src has {len(self.kv_args.aux_data_ptrs)} buffers "
+                f"(aux_item_lens={len(self.kv_args.aux_item_lens)}), "
+                f"dst has {len(dst_embedding_ptrs)} buffers. "
+                f"Will only transfer min(4, {len(dst_embedding_ptrs)}) buffers."
+            )
+
         # Calculate source block range based on sent_tokens
         start_block = sent_tokens // block_size
         embedding_indices_to_send = embedding_indices[
@@ -852,7 +861,11 @@ class MooncakeKVManager(CommonKVManager):
                 break
 
             # Transfer each buffer type within the block
-            for buffer_type_idx in range(len(self.kv_args.aux_item_lens)):
+            # Note: Only transfer first 4 buffers (embeddings, fill_ids, mrope_positions, aux_datas)
+            # Skip deepstack buffer (index 4) if it exists, as it's not part of the transfer
+            num_buffers_to_transfer = min(4, len(self.kv_args.aux_item_lens))
+            
+            for buffer_type_idx in range(num_buffers_to_transfer):
                 embedding_item_len = self.kv_args.aux_item_lens[buffer_type_idx]
 
                 # Calculate chunk size based on buffer type and tokens_in_block
