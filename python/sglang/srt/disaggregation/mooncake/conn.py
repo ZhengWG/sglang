@@ -50,6 +50,17 @@ class KVTransferError(Exception):
         return f"KVTransferError(bootstrap_room={self.bootstrap_room}): {self.failure_reason}"
 
 
+# Multimodal Embedding Error
+class EmbeddingTransferError(Exception):
+    def __init__(self, bootstrap_room: int, failure_reason: str):
+        super().__init__(failure_reason)
+        self.bootstrap_room = bootstrap_room
+        self.failure_reason = failure_reason
+
+    def __str__(self):
+        return f"EmbeddingTransferError(bootstrap_room={self.bootstrap_room}): {self.failure_reason}"
+
+
 # prefill
 @dataclasses.dataclass
 class TransferKVChunk:
@@ -58,6 +69,15 @@ class TransferKVChunk:
     index_slice: slice
     is_last: bool
     prefill_aux_index: Optional[int]
+
+
+# embedding (multimodal)
+@dataclasses.dataclass
+class TransferEmbeddingChunk:
+    room: int
+    embedding_indices: List[int]  # Source embedding indices
+    is_last: bool
+    total_tokens: int  # Total number of tokens to transfer
 
 
 # decode
@@ -122,6 +142,82 @@ class KVArgsRegisterInfo:
         )
 
 
+# language (multimodal)
+@dataclasses.dataclass
+class TransferEmbeddingInfo:
+    room: int
+    endpoint: str
+    dst_port: int
+    mooncake_session_id: str
+    dst_embedding_indices: List[int]
+    required_dst_info_num: int
+    sent_tokens: int = 0  # Number of tokens already sent (for resume transfer)
+    allocated_tokens: int = 0  # Number of tokens allocated by Language side
+    # For resume: need to store original embedding data to retrigger transfer
+    src_embedding_indices: List[int] = None  # Source embedding indices (from Embedding side)
+    total_tokens: int = 0  # Total tokens to transfer (from Embedding side)
+    resume_ready: bool = False  # Whether ready for resume transfer
+
+    @classmethod
+    def from_zmq(cls, msg: List[bytes]):
+        # Parse embedding_indices from message
+        # Format: comma-separated list of embedding indices
+        dst_embedding_indices_str = msg[4].decode("ascii")
+        if dst_embedding_indices_str:
+            dst_embedding_indices = [
+                int(x) for x in dst_embedding_indices_str.split(",")
+            ]
+        else:
+            dst_embedding_indices = []
+
+        required_dst_info_num = int(msg[5].decode("ascii"))
+
+        # Parse allocated_tokens (always present in init message, msg[6])
+        # For resume messages, msg[6] is sent_tokens, msg[7] is allocated_tokens
+        allocated_tokens = 0
+        sent_tokens = 0
+
+        if len(msg) >= 7:
+            # Check if this is a resume message (has 8 fields) or init message (has 7 fields)
+            if len(msg) >= 8:
+                # Resume message: msg[6] = sent_tokens, msg[7] = allocated_tokens
+                sent_tokens = int(msg[6].decode("ascii"))
+                allocated_tokens = int(msg[7].decode("ascii"))
+            else:
+                # Init message: msg[6] = allocated_tokens
+                allocated_tokens = int(msg[6].decode("ascii"))
+
+        return cls(
+            room=int(msg[0].decode("ascii")),
+            endpoint=msg[1].decode("ascii"),
+            dst_port=int(msg[2].decode("ascii")),
+            mooncake_session_id=msg[3].decode("ascii"),
+            dst_embedding_indices=dst_embedding_indices,
+            required_dst_info_num=required_dst_info_num,
+            sent_tokens=sent_tokens,
+            allocated_tokens=allocated_tokens,
+        )
+
+
+@dataclasses.dataclass
+class EmbeddingArgsRegisterInfo:
+    room: str
+    endpoint: str
+    dst_port: int
+    mooncake_session_id: str
+    dst_embedding_ptrs: list[int]
+
+    @classmethod
+    def from_zmq(cls, msg: List[bytes]):
+        return cls(
+            room=str(msg[0].decode("ascii")),
+            endpoint=msg[1].decode("ascii"),
+            dst_port=int(msg[2].decode("ascii")),
+            mooncake_session_id=msg[3].decode("ascii"),
+            dst_embedding_ptrs=list(struct.unpack(f"{len(msg[4])//8}Q", msg[4])),
+        )
+
+
 class AuxDataCodec:
     """Handles serialization and deserialization of auxiliary data buffers"""
 
@@ -151,11 +247,20 @@ class MooncakeKVManager(CommonKVManager):
         disaggregation_mode: DisaggregationMode,
         server_args: ServerArgs,
         is_mla_backend: Optional[bool] = False,
+        is_multimodal: bool = False,  # NEW: Support multimodal embedding/language mode
     ):
+        self.is_multimodal = is_multimodal
         super().__init__(args, disaggregation_mode, server_args, is_mla_backend)
         self.init_engine()
         self.register_buffer_to_engine()
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+        
+        # Check if this is sender mode (PREFILL or ENCODE)
+        is_sender_mode = (
+            self.disaggregation_mode == DisaggregationMode.PREFILL or
+            (is_multimodal and self.disaggregation_mode == DisaggregationMode.ENCODE)
+        )
+        
+        if is_sender_mode:
             self.start_prefill_thread()
             self.session_failures = defaultdict(int)
             self.failed_sessions = set()
@@ -194,12 +299,26 @@ class MooncakeKVManager(CommonKVManager):
             self.enable_custom_mem_pool = get_bool_env_var(
                 "SGLANG_MOONCAKE_CUSTOM_MEM_POOL", "false"
             )
-        elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            
+            # For multimodal ENCODE mode, set bootstrap timeout to 30s (shorter than KV's 300s)
+            if is_multimodal:
+                self.bootstrap_timeout = get_int_env_var(
+                    "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 30
+                )
+        
+        # Check if this is receiver mode (DECODE or LANGUAGE)
+        is_receiver_mode = (
+            self.disaggregation_mode == DisaggregationMode.DECODE or
+            (is_multimodal and self.disaggregation_mode == DisaggregationMode.LANGUAGE)
+        )
+        
+        if is_receiver_mode:
             self.heartbeat_failures = {}
             self.session_pool = defaultdict(requests.Session)
             self.session_pool_lock = threading.Lock()
             self.addr_to_rooms_tracker = defaultdict(set)
-            self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
+            if not is_multimodal:
+                self.prefill_response_tracker: Dict[int, Set[int]] = defaultdict(set)
             # Heartbeat interval should be at least 2 seconds
             self.heartbeat_interval = max(
                 float(os.getenv("SGLANG_DISAGGREGATION_HEARTBEAT_INTERVAL", 5.0)), 2.0
@@ -227,17 +346,26 @@ class MooncakeKVManager(CommonKVManager):
         )
 
     def register_buffer_to_engine(self):
-        # Batch register KV data buffers
-        if self.kv_args.kv_data_ptrs and self.kv_args.kv_data_lens:
-            self.engine.batch_register(
-                self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
-            )
+        # For multimodal mode, only register aux_data (embeddings)
+        if self.is_multimodal:
+            # Only register aux data buffers for embedding/language mode
+            if self.kv_args.aux_data_ptrs and self.kv_args.aux_data_lens:
+                self.engine.batch_register(
+                    self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
+                )
+        else:
+            # For KV mode, register both kv_data and aux_data
+            # Batch register KV data buffers
+            if self.kv_args.kv_data_ptrs and self.kv_args.kv_data_lens:
+                self.engine.batch_register(
+                    self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
+                )
 
-        # Batch register auxiliary data buffers
-        if self.kv_args.aux_data_ptrs and self.kv_args.aux_data_lens:
-            self.engine.batch_register(
-                self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
-            )
+            # Batch register auxiliary data buffers
+            if self.kv_args.aux_data_ptrs and self.kv_args.aux_data_lens:
+                self.engine.batch_register(
+                    self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
+                )
 
     def _transfer_data(self, mooncake_session_id, transfer_blocks):
         if not transfer_blocks:
@@ -605,6 +733,151 @@ class MooncakeKVManager(CommonKVManager):
                 str(prefill_rank).encode("ascii"),
             ]
         )
+
+    def sync_status_to_language_endpoint(
+        self, remote: str, dst_port: int, room: int, status: int
+    ):
+        """Sync status to Language endpoint (multimodal mode)"""
+        if ":" in remote:
+            remote = remote.split(":")[0]
+        self._connect("tcp://" + remote + ":" + str(dst_port)).send_multipart(
+            [
+                str(room).encode("ascii"),
+                str(status).encode("ascii"),
+            ]
+        )
+
+    def send_embedding(
+        self,
+        mooncake_session_id: str,
+        embedding_indices: List[int],
+        dst_embedding_ptrs: list[int],
+        dst_embedding_indices: List[int],
+        total_tokens: int,
+        block_size: int,
+        sent_tokens: int = 0,
+        allocated_tokens: int = None,
+    ):
+        """Send embedding data using block-based transfer (multimodal mode).
+
+        Args:
+            mooncake_session_id: Session ID for transfer
+            embedding_indices: Source embedding indices
+            dst_embedding_ptrs: Destination buffer pointers
+            dst_embedding_indices: Destination embedding indices
+            total_tokens: Total number of tokens to transfer
+            block_size: Number of tokens per block
+            sent_tokens: Number of tokens already sent (for resume transfer)
+            allocated_tokens: Number of tokens allocated by Language side
+
+        Returns:
+            Tuple of (ret, is_partial):
+                ret: 0 if all transfers succeed, 1 otherwise
+                is_partial: True if this is a partial transfer (more data remaining)
+        """
+        # Validate block_size consistency
+        if allocated_tokens is not None:
+            expected_block_size = allocated_tokens // len(dst_embedding_indices)
+            if expected_block_size != block_size:
+                raise ValueError(
+                    f"Block size mismatch: Embedding side uses {block_size}, "
+                    f"but Language side allocated {allocated_tokens} tokens "
+                    f"for {len(dst_embedding_indices)} blocks "
+                    f"(implies block_size={expected_block_size})"
+                )
+        else:
+            # Backward compatibility: if no allocated_tokens, calculate from block count
+            allocated_tokens = len(dst_embedding_indices) * block_size
+
+        # Calculate remaining tokens and determine if this is a partial transfer
+        remaining_tokens = total_tokens - sent_tokens
+
+        if remaining_tokens > allocated_tokens:
+            # Need partial transfer
+            logger.info(
+                f"Partial transfer: remaining={remaining_tokens} > "
+                f"allocated={allocated_tokens}. Will transfer {allocated_tokens} tokens."
+            )
+            tokens_to_send = allocated_tokens
+            is_partial = True
+        else:
+            # Can transfer all remaining tokens
+            tokens_to_send = remaining_tokens
+            is_partial = False
+
+        # Calculate required dst blocks
+        dst_blocks_needed = (tokens_to_send + block_size - 1) // block_size
+
+        # Validate dst buffer is sufficient
+        if dst_blocks_needed > len(dst_embedding_indices):
+            raise ValueError(
+                f"Insufficient dst blocks: need {dst_blocks_needed} blocks "
+                f"for {tokens_to_send} tokens, but only have {len(dst_embedding_indices)} blocks"
+            )
+
+        # Calculate source block range based on sent_tokens
+        start_block = sent_tokens // block_size
+        embedding_indices_to_send = embedding_indices[
+            start_block : start_block + dst_blocks_needed
+        ]
+        dst_embedding_indices = dst_embedding_indices[:dst_blocks_needed]
+
+        src_addrs = []
+        dst_addrs = []
+        lengths = []
+
+        tokens_transferred = 0
+
+        for block_idx, (src_block_idx, dst_block_idx) in enumerate(
+            zip(embedding_indices_to_send, dst_embedding_indices)
+        ):
+            # Calculate tokens in this block
+            remaining_in_transfer = tokens_to_send - tokens_transferred
+            tokens_in_block = min(block_size, remaining_in_transfer)
+
+            if tokens_in_block <= 0:
+                break
+
+            # Transfer each buffer type within the block
+            for buffer_type_idx in range(len(self.kv_args.aux_item_lens)):
+                embedding_item_len = self.kv_args.aux_item_lens[buffer_type_idx]
+
+                # Calculate chunk size based on buffer type and tokens_in_block
+                # For aux_datas, only transfer in first block of initial transfer
+                if buffer_type_idx == 3:  # aux_datas
+                    if sent_tokens == 0 and block_idx == 0:
+                        chunk_size = embedding_item_len  # Transfer full aux_datas
+                    else:
+                        continue  # Skip aux_datas for resume or other blocks
+                else:
+                    # For embeddings, fill_ids, mrope_positions: scale by tokens_in_block
+                    # embedding_item_len already contains the full block size
+                    # We need to transfer only tokens_in_block portion
+                    chunk_size = (embedding_item_len * tokens_in_block) // block_size
+
+                # Calculate source address: base_ptr + src_block_idx * item_len
+                embedding_addr = (
+                    self.kv_args.aux_data_ptrs[buffer_type_idx]
+                    + src_block_idx * embedding_item_len
+                )
+
+                # Calculate destination address: base_ptr + dst_block_idx * item_len
+                dst_embedding_addr = (
+                    dst_embedding_ptrs[buffer_type_idx]
+                    + dst_block_idx * embedding_item_len
+                )
+
+                src_addrs.append(embedding_addr)
+                dst_addrs.append(dst_embedding_addr)
+                lengths.append(chunk_size)
+
+            tokens_transferred += tokens_in_block
+
+        ret = self.engine.batch_transfer_sync(
+            mooncake_session_id, src_addrs, dst_addrs, lengths
+        )
+
+        return ret, is_partial
 
     def transfer_worker(
         self, queue: FastQueue, executor: concurrent.futures.ThreadPoolExecutor
@@ -1212,3 +1485,20 @@ class MooncakeKVReceiver(CommonKVReceiver):
 
 class MooncakeKVBootstrapServer(CommonKVBootstrapServer):
     pass
+
+
+# ============================================================================
+# Multimodal Embedding/Language Support (Aliases to KV classes with is_multimodal=True)
+# ============================================================================
+
+# Embedding Manager (just use KVManager with is_multimodal=True)
+MooncakeEmbeddingManager = MooncakeKVManager
+
+# Embedding Sender
+MooncakeEmbeddingSender = MooncakeKVSender
+
+# Embedding Receiver  
+MooncakeEmbeddingReceiver = MooncakeKVReceiver
+
+# Embedding Bootstrap Server (same as KV)
+MooncakeEmbeddingBootstrapServer = MooncakeKVBootstrapServer

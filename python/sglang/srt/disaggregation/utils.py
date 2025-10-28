@@ -374,8 +374,7 @@ def get_kv_class(
             MooncakeKVManager,
             MooncakeKVReceiver,
             MooncakeKVSender,
-        )
-        from sglang.srt.disaggregation.mooncake.conn_multimodal import (
+            # Multimodal Embedding/Language classes (now unified in conn.py)
             MooncakeEmbeddingBootstrapServer,
             MooncakeEmbeddingManager,
             MooncakeEmbeddingReceiver,
