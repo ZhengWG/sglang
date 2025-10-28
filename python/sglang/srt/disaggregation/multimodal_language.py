@@ -440,24 +440,7 @@ class MultimodalLanguageTransferQueue:
                             f"need to resume for {remaining_tokens} more tokens"
                         )
 
-                        # Cache received partial data
-                        language_req.partial_input_embeds = embedding_data
-                        language_req.partial_fill_ids = fill_ids.tolist()
-                        language_req.partial_mrope_positions = mrope_positions
-                        language_req.partial_aux_datas = aux_datas
-                        language_req.partial_sent_tokens = sent_tokens
-                        language_req.partial_deepstack_embedding = deepstack_embedding
-
-                        # Free old allocation
-                        self.req_to_metadata_buffer_idx_allocator.free(
-                            block_indices=block_indices,
-                            req_id=language_req.req.rid,
-                            fake=isinstance(
-                                language_req.embedding_receiver, FakeKVReceiver
-                            ),
-                        )
-
-                        # Allocate new space for remaining tokens
+                        # Allocate new space for remaining tokens first
                         new_allocation = (
                             self.req_to_metadata_buffer_idx_allocator.alloc(
                                 num_tokens=remaining_tokens,
@@ -475,7 +458,25 @@ class MultimodalLanguageTransferQueue:
                                 f"need {remaining_tokens} tokens"
                             )
                             # Keep request in queue, will retry in next pop_transferred call
+                            # Don't cache partial data or free old allocation yet
                             continue
+
+                        # Only after successful allocation, cache partial data and free old allocation
+                        language_req.partial_input_embeds = embedding_data
+                        language_req.partial_fill_ids = fill_ids.tolist()
+                        language_req.partial_mrope_positions = mrope_positions
+                        language_req.partial_aux_datas = aux_datas
+                        language_req.partial_sent_tokens = sent_tokens
+                        language_req.partial_deepstack_embedding = deepstack_embedding
+
+                        # Free old allocation
+                        self.req_to_metadata_buffer_idx_allocator.free(
+                            block_indices=block_indices,
+                            req_id=language_req.req.rid,
+                            fake=isinstance(
+                                language_req.embedding_receiver, FakeKVReceiver
+                            ),
+                        )
 
                         # Update embedding_indices
                         language_req.embedding_indices = new_allocation
