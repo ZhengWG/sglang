@@ -72,6 +72,7 @@ class TransferEmbeddingInfo:
         None  # Source embedding indices (from Embedding side)
     )
     total_tokens: int = 0  # Total tokens to transfer (from Embedding side)
+    resume_ready: bool = False  # Whether ready for resume transfer
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -542,43 +543,65 @@ class MooncakeEmbeddingManager(BaseKVManager):
                                 transfer_info.dst_embedding_indices
                             )
 
-                            logger.info(
+                            logger.debug(
                                 f"Resume transfer for room={room}, sent_tokens={transfer_info.sent_tokens}, "
+                                f"sent_tokens={transfer_info.sent_tokens}, "
                                 f"allocated_tokens={transfer_info.allocated_tokens}"
                             )
 
                             # Don't reset status - it should remain in current state (Transferring)
 
-                            # Trigger resume transfer by adding to queue
-                            if (
-                                req.src_embedding_indices is not None
-                                and req.total_tokens > 0
-                            ):
-                                # Calculate which queue to use (same as add_transfer_request)
-                                dst_infos = self.transfer_infos[room].keys()
-                                session_port_sum = sum(
-                                    int(session.split(":")[1]) for session in dst_infos
-                                )
-                                shard_idx = session_port_sum % len(self.transfer_queues)
+                            req.resume_ready = True
+                            # Check if all sessions are ready for resume (similar to init logic)
+                            all_dst_ranks_ready = all(
+                                dst_req.resume_ready
+                                for dst_req in self.transfer_infos[room].values()
+                            )
 
-                                # Add resume transfer chunk to queue
-                                self.transfer_queues[shard_idx].put(
-                                    TransferEmbeddingChunk(
-                                        room=room,
-                                        embedding_indices=req.src_embedding_indices,
-                                        is_last=True,  # Resume is always the last part
-                                        total_tokens=req.total_tokens,
+                            # Only trigger resume transfer when all dst ranks are ready
+                            if all_dst_ranks_ready:
+                                if (
+                                    req.src_embedding_indices is not None
+                                    and req.total_tokens > 0
+                                ):
+                                    # Calculate which queue to use (same as add_transfer_request)
+                                    dst_infos = self.transfer_infos[room].keys()
+                                    session_port_sum = sum(
+                                        int(session.split(":")[1])
+                                        for session in dst_infos
                                     )
-                                )
+                                    shard_idx = session_port_sum % len(
+                                        self.transfer_queues
+                                    )
 
-                                logger.info(
-                                    f"Resume transfer triggered: room={room}, "
-                                    f"queue_idx={shard_idx}, src_blocks={len(req.src_embedding_indices)}"
-                                )
+                                    # Add resume transfer chunk to queue (only once for all sessions)
+                                    self.transfer_queues[shard_idx].put(
+                                        TransferEmbeddingChunk(
+                                            room=room,
+                                            embedding_indices=req.src_embedding_indices,
+                                            is_last=True,  # Resume is always the last part
+                                            total_tokens=req.total_tokens,
+                                        )
+                                    )
+
+                                    logger.debug(
+                                        f"Resume transfer triggered: room={room}, "
+                                        f"queue_idx={shard_idx}, src_blocks={len(req.src_embedding_indices)}, "
+                                        f"all {len(self.transfer_infos[room])} sessions ready"
+                                    )
+                                    for dst_req in self.transfer_infos[room].values():
+                                        dst_req.resume_ready = (
+                                            False  # Reset for potential future resumes
+                                        )
+                                else:
+                                    logger.error(
+                                        f"Cannot trigger resume: missing src_embedding_indices or total_tokens "
+                                        f"for room={room} session={mooncake_session_id}"
+                                    )
                             else:
-                                logger.error(
-                                    f"Cannot trigger resume: missing src_embedding_indices or total_tokens "
-                                    f"for room={room} session={mooncake_session_id}"
+                                logger.debug(
+                                    f"Waiting for all dst ranks to be ready for resume: room={room}, "
+                                    f"ready={sum(dst_req.resume_ready for dst_req in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
                                 )
                         else:
                             logger.error(
