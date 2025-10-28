@@ -550,15 +550,15 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
                             # Don't reset status - it should remain in current state (Transferring)
 
-                            # Check if all sessions have sent_tokens > 0 (similar to init logic)
+                            # Check if all dst ranks have sent_tokens > 0 (similar to init logic)
                             # This means all dst ranks have sent resume messages
-                            all_sessions_ready = all(
-                                session_req.sent_tokens > 0
-                                for session_req in self.transfer_infos[room].values()
+                            all_dst_ranks_ready = all(
+                                dst_req.sent_tokens > 0
+                                for dst_req in self.transfer_infos[room].values()
                             )
 
                             # Only trigger resume transfer when all dst ranks are ready
-                            if all_sessions_ready:
+                            if all_dst_ranks_ready:
                                 if (
                                     req.src_embedding_indices is not None
                                     and req.total_tokens > 0
@@ -592,8 +592,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
                                     )
                             else:
                                 logger.debug(
-                                    f"Waiting for all sessions to be ready for resume: room={room}, "
-                                    f"ready={sum(s.sent_tokens > 0 for s in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
+                                    f"Waiting for all dst ranks to be ready for resume: room={room}, "
+                                    f"ready={sum(dst_req.sent_tokens > 0 for dst_req in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
                                 )
                         else:
                             logger.error(
