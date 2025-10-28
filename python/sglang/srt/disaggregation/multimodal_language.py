@@ -469,13 +469,12 @@ class MultimodalLanguageTransferQueue:
                         )
 
                         if new_allocation is None:
-                            # Not enough memory to resume, mark as failed
-                            logger.error(
-                                f"Not enough memory to resume transfer for rid={language_req.req.rid}, "
+                            # Not enough memory to resume now, wait for next iteration
+                            logger.debug(
+                                f"Waiting for memory to resume transfer for rid={language_req.req.rid}, "
                                 f"need {remaining_tokens} tokens"
                             )
-                            self._handle_failed_request(language_req)
-                            indices_to_remove.add(i)
+                            # Keep request in queue, will retry in next pop_transferred call
                             continue
 
                         # Update embedding_indices
