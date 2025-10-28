@@ -1695,66 +1695,55 @@ class MooncakeKVReceiver(CommonKVReceiver):
         self.kv_mgr.update_status(self.bootstrap_room, KVPoll.WaitingForInput)
 
     def _get_bootstrap_info_from_server(
-        self, engine_rank, target_dp_group, target_pp_rank
+        self, engine_rank, target_dp_group, target_pp_rank=None
     ):
         """Fetch the bootstrap info from the bootstrap server."""
         try:
-            url = f"http://{self.bootstrap_addr}/route?engine_rank={engine_rank}&target_dp_group={target_dp_group}&target_pp_rank={target_pp_rank}"
+            # Build URL based on parameters
+            if target_pp_rank is not None:
+                url = f"http://{self.bootstrap_addr}/route?engine_rank={engine_rank}&target_dp_group={target_dp_group}&target_pp_rank={target_pp_rank}"
+            else:
+                url = f"http://{self.bootstrap_addr}/route?engine_rank={engine_rank}&target_dp_group={target_dp_group}"
+            
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
-                bootstrap_info = response.json()
-                return bootstrap_info
+                return response.json()
             else:
                 logger.error(
-                    f"Failed to get prefill server info: {response.status_code}, {response.text}"
+                    f"Failed to get bootstrap info: {response.status_code}, {response.text}"
                 )
                 return None
         except Exception as e:
-            logger.error(f"Error fetching prefill info from bootstrap: {e}")
+            logger.error(f"Error fetching bootstrap info: {e}")
             return None
     
     def _get_embedding_parallel_info_from_server(self) -> Tuple[int, int]:
         """Fetch the embedding parallel info from the bootstrap server (multimodal mode)"""
-        try:
-            url = f"http://{self.bootstrap_addr}/route?engine_rank={-1}&target_dp_group={-1}"
-            response = requests.get(url)
-            if response.status_code == 200:
-                embedding_parallel_info = response.json()
-                return int(embedding_parallel_info["embedding_tp_size"]), int(
-                    embedding_parallel_info["embedding_dp_size"]
-                )
-            else:
-                logger.error(
-                    f"Failed to get embedding parallel info: {response.status_code}, {response.text}"
-                )
-                return None, None
-        except Exception as e:
-            logger.error(f"Error fetching embedding parallel info from bootstrap: {e}")
-            return None, None
+        # Reuse _get_bootstrap_info_from_server with special parameters
+        info = self._get_bootstrap_info_from_server(engine_rank=-1, target_dp_group=-1)
+        if info:
+            return int(info.get("embedding_tp_size", 0)), int(info.get("embedding_dp_size", 0))
+        return None, None
 
     def _register_kv_args(self):
         """Register KV or Embedding args to bootstrap server"""
         for bootstrap_info in self.bootstrap_infos:
+            # Build message parts based on mode
+            message_parts = [
+                "None".encode("ascii"),
+                self.kv_mgr.local_ip.encode("ascii"),
+                str(self.kv_mgr.rank_port).encode("ascii"),
+                self.session_id.encode("ascii"),
+            ]
+            
             if self.kv_mgr.is_multimodal:
-                # Multimodal Embedding mode: only send aux_data_ptrs
+                # Multimodal Embedding mode: only send aux_data_ptrs (embedding data)
                 packed_embedding_data_ptrs = b"".join(
-                    struct.pack("Q", ptr)
-                    for ptr in self.kv_mgr.kv_args.aux_data_ptrs
+                    struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.aux_data_ptrs
                 )
-                
-                sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
-                with lock:
-                    sock.send_multipart(
-                        [
-                            "None".encode("ascii"),
-                            self.kv_mgr.local_ip.encode("ascii"),
-                            str(self.kv_mgr.rank_port).encode("ascii"),
-                            self.session_id.encode("ascii"),
-                            packed_embedding_data_ptrs,
-                        ]
-                    )
+                message_parts.append(packed_embedding_data_ptrs)
             else:
-                # KV mode: send kv_data_ptrs and aux_data_ptrs
+                # KV mode: send kv_data_ptrs, aux_data_ptrs, and metadata
                 packed_kv_data_ptrs = b"".join(
                     struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.kv_data_ptrs
                 )
@@ -1764,25 +1753,19 @@ class MooncakeKVReceiver(CommonKVReceiver):
                 # Note(shangming): No need to add pp rank here since pp is not supported on the decode side yet
                 tp_rank = self.kv_mgr.kv_args.engine_rank
                 kv_item_len = self.kv_mgr.kv_args.kv_item_lens[0]
-                dst_tp_rank = str(tp_rank).encode("ascii")
-                dst_attn_tp_size = str(self.kv_mgr.attn_tp_size).encode("ascii")
-                dst_kv_item_len = str(kv_item_len).encode("ascii")
-
-                sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
-                with lock:
-                    sock.send_multipart(
-                        [
-                            "None".encode("ascii"),
-                            self.kv_mgr.local_ip.encode("ascii"),
-                            str(self.kv_mgr.rank_port).encode("ascii"),
-                            self.session_id.encode("ascii"),
-                            packed_kv_data_ptrs,
-                            packed_aux_data_ptrs,
-                            dst_tp_rank,
-                            dst_attn_tp_size,
-                            dst_kv_item_len,
-                        ]
-                    )
+                
+                message_parts.extend([
+                    packed_kv_data_ptrs,
+                    packed_aux_data_ptrs,
+                    str(tp_rank).encode("ascii"),
+                    str(self.kv_mgr.attn_tp_size).encode("ascii"),
+                    str(kv_item_len).encode("ascii"),
+                ])
+            
+            # Send the message
+            sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
+            with lock:
+                sock.send_multipart(message_parts)
 
     def init(
         self,
@@ -1793,51 +1776,47 @@ class MooncakeKVReceiver(CommonKVReceiver):
         allocated_tokens: Optional[int] = None,
     ):
         """Initialize receiver for KV or Embedding mode"""
-        if self.kv_mgr.is_multimodal:
-            # Multimodal Embedding mode
-            if embedding_indices is not None:
-                embedding_indices_str = ",".join(str(idx) for idx in embedding_indices)
+        for bootstrap_info in self.bootstrap_infos:
+            # Build common message parts
+            message_parts = [
+                str(self.bootstrap_room).encode("ascii"),
+                self.kv_mgr.local_ip.encode("ascii"),
+                str(self.kv_mgr.rank_port).encode("ascii"),
+                self.session_id.encode("ascii"),
+            ]
+            
+            if self.kv_mgr.is_multimodal:
+                # Multimodal Embedding mode
+                embedding_indices_str = (
+                    ",".join(str(idx) for idx in embedding_indices) 
+                    if embedding_indices is not None else ""
+                )
+                
+                # Calculate allocated_tokens if not provided
+                if allocated_tokens is None and embedding_indices is not None:
+                    # block_size = aux_item_lens[1] / fill_ids.itemsize (assuming int32 = 4 bytes)
+                    block_size = self.kv_mgr.kv_args.aux_item_lens[1] // 4
+                    allocated_tokens = len(embedding_indices) * block_size
+                
+                message_parts.extend([
+                    embedding_indices_str.encode("ascii"),
+                    str(self.required_dst_info_num).encode("ascii"),
+                    str(allocated_tokens).encode("ascii"),
+                ])
             else:
-                embedding_indices_str = ""
-            
-            # Calculate allocated_tokens if not provided
-            if allocated_tokens is None and embedding_indices is not None:
-                # block_size = aux_item_lens[1] / fill_ids.itemsize (assuming int32 = 4 bytes)
-                block_size = self.kv_mgr.kv_args.aux_item_lens[1] // 4
-                allocated_tokens = len(embedding_indices) * block_size
-            
-            for bootstrap_info in self.bootstrap_infos:
-                sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
-                with lock:
-                    sock.send_multipart(
-                        [
-                            str(self.bootstrap_room).encode("ascii"),
-                            self.kv_mgr.local_ip.encode("ascii"),
-                            str(self.kv_mgr.rank_port).encode("ascii"),
-                            self.session_id.encode("ascii"),
-                            embedding_indices_str.encode("ascii"),  # Send comma-separated embedding indices
-                            str(self.required_dst_info_num).encode("ascii"),
-                            str(allocated_tokens).encode("ascii"),  # Send allocated tokens
-                        ]
-                    )
-        else:
-            # KV mode
-            for bootstrap_info in self.bootstrap_infos:
-                sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
+                # KV mode
                 is_dummy = bootstrap_info["is_dummy"]
-
-                with lock:
-                    sock.send_multipart(
-                        [
-                            str(self.bootstrap_room).encode("ascii"),
-                            self.kv_mgr.local_ip.encode("ascii"),
-                            str(self.kv_mgr.rank_port).encode("ascii"),
-                            self.session_id.encode("ascii"),
-                            kv_indices.tobytes() if not is_dummy else b"",
-                            str(aux_index).encode("ascii") if not is_dummy else b"",
-                            str(self.required_dst_info_num).encode("ascii"),
-                        ]
-                    )
+                message_parts.extend([
+                    kv_indices.tobytes() if not is_dummy else b"",
+                    str(aux_index).encode("ascii") if not is_dummy else b"",
+                    str(self.required_dst_info_num).encode("ascii"),
+                ])
+            
+            # Send the message
+            sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
+            with lock:
+                sock.send_multipart(message_parts)
+        
         self.init_time = time.time()
     
     def resume_transfer(
