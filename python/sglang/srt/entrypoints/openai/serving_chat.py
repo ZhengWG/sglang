@@ -625,7 +625,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     model=request.model,
                     usage=None,
                 )
-            yield f"data: {finish_reason_chunk.model_dump_json(exclude_none=True)}\n\n"
+                yield f"data: {finish_reason_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             # Send hidden states if requested
             if request.return_hidden_states and hidden_states:
