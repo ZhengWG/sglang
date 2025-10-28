@@ -132,6 +132,7 @@ class MultimodalLanguagePreallocQueue:
             kv_args,
             DisaggregationMode.LANGUAGE,
             self.scheduler.server_args,
+            is_multimodal=True,  # Required for proper initialization
         )
         return data_manager
 

@@ -97,6 +97,7 @@ class MultimodalEmbeddingBootstrapQueue:
             kv_args,
             DisaggregationMode.ENCODE,
             self.scheduler.server_args,
+            is_multimodal=True,  # Required for proper initialization
         )
         return data_manager
 
