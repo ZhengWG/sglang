@@ -72,7 +72,6 @@ class TransferEmbeddingInfo:
         None  # Source embedding indices (from Embedding side)
     )
     total_tokens: int = 0  # Total tokens to transfer (from Embedding side)
-    resume_ready: bool = False  # Track if this session is ready for resume transfer
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -542,8 +541,6 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             req.dst_embedding_indices = (
                                 transfer_info.dst_embedding_indices
                             )
-                            # Mark this session as ready for resume
-                            req.resume_ready = True
 
                             logger.info(
                                 f"Resume transfer for room={room}, session={mooncake_session_id}, "
@@ -553,9 +550,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
 
                             # Don't reset status - it should remain in current state (Transferring)
 
-                            # Check if all sessions are ready for resume (similar to init logic)
+                            # Check if all sessions have sent_tokens > 0 (similar to init logic)
+                            # This means all dst ranks have sent resume messages
                             all_sessions_ready = all(
-                                session_req.resume_ready
+                                session_req.sent_tokens > 0
                                 for session_req in self.transfer_infos[room].values()
                             )
 
@@ -587,10 +585,6 @@ class MooncakeEmbeddingManager(BaseKVManager):
                                         f"queue_idx={shard_idx}, src_blocks={len(req.src_embedding_indices)}, "
                                         f"all {len(self.transfer_infos[room])} sessions ready"
                                     )
-
-                                    # Reset resume_ready flags for all sessions after triggering
-                                    for session_req in self.transfer_infos[room].values():
-                                        session_req.resume_ready = False
                                 else:
                                     logger.error(
                                         f"Cannot trigger resume: missing src_embedding_indices or total_tokens "
@@ -599,7 +593,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             else:
                                 logger.debug(
                                     f"Waiting for all sessions to be ready for resume: room={room}, "
-                                    f"ready={sum(s.resume_ready for s in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
+                                    f"ready={sum(s.sent_tokens > 0 for s in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
                                 )
                         else:
                             logger.error(
