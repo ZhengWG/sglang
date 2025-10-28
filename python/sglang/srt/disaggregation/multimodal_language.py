@@ -424,11 +424,9 @@ class MultimodalLanguageTransferQueue:
                 indices_to_remove.add(i)
             elif poll == KVPoll.Transferring:
                 # Partial transfer complete, need to resume with remaining data
+                # Note: This can happen multiple times if resume also results in partial transfer
                 block_indices = language_req.embedding_indices
-                if (
-                    not isinstance(language_req.embedding_receiver, FakeKVReceiver)
-                    and language_req.partial_input_embeds is None
-                ):
+                if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
                     # Get partial data and actual total length from aux_datas
                     (
                         embedding_data,
@@ -438,15 +436,24 @@ class MultimodalLanguageTransferQueue:
                         deepstack_embedding,
                     ) = self.metadata_buffers.get_buf(block_indices=block_indices)
                     actual_total_length = int(aux_datas[0])  # Actual total length
-                    sent_tokens = len(fill_ids)  # Tokens already sent
+                    current_received_tokens = len(fill_ids)  # Tokens in current buffer
+                    
+                    # Calculate total tokens received so far (including previous partial transfers)
+                    if language_req.partial_input_embeds is not None:
+                        # This is a subsequent partial transfer
+                        total_received_tokens = language_req.partial_sent_tokens + current_received_tokens
+                    else:
+                        # This is the first partial transfer
+                        total_received_tokens = current_received_tokens
 
-                    if actual_total_length > sent_tokens:
+                    if actual_total_length > total_received_tokens:
                         # Need to resume transfer
-                        remaining_tokens = actual_total_length - sent_tokens
+                        remaining_tokens = actual_total_length - total_received_tokens
 
                         logger.info(
                             f"Partial transfer detected for rid={language_req.req.rid}: "
-                            f"received {sent_tokens}/{actual_total_length} tokens, "
+                            f"received {total_received_tokens}/{actual_total_length} tokens "
+                            f"(current batch: {current_received_tokens}), "
                             f"need to resume for {remaining_tokens} more tokens"
                         )
 
@@ -471,13 +478,26 @@ class MultimodalLanguageTransferQueue:
                             # Don't cache partial data or free old allocation yet
                             continue
 
-                        # Only after successful allocation, cache partial data and free old allocation
-                        language_req.partial_input_embeds = embedding_data
-                        language_req.partial_fill_ids = fill_ids.tolist()
-                        language_req.partial_mrope_positions = mrope_positions
-                        language_req.partial_aux_datas = aux_datas
-                        language_req.partial_sent_tokens = sent_tokens
-                        language_req.partial_deepstack_embedding = deepstack_embedding
+                        # Cache/accumulate partial data
+                        if language_req.partial_input_embeds is None:
+                            # First partial transfer
+                            language_req.partial_input_embeds = embedding_data
+                            language_req.partial_fill_ids = fill_ids.tolist()
+                            language_req.partial_mrope_positions = mrope_positions
+                            language_req.partial_aux_datas = aux_datas
+                            language_req.partial_sent_tokens = current_received_tokens
+                            language_req.partial_deepstack_embedding = deepstack_embedding
+                        else:
+                            # Subsequent partial transfer: accumulate data
+                            language_req.partial_input_embeds = torch.cat(
+                                [language_req.partial_input_embeds, embedding_data], dim=0
+                            )
+                            language_req.partial_fill_ids.extend(fill_ids.tolist())
+                            language_req.partial_mrope_positions = torch.cat(
+                                [language_req.partial_mrope_positions, mrope_positions], dim=0
+                            )
+                            # aux_datas and deepstack don't need accumulation
+                            language_req.partial_sent_tokens = total_received_tokens
 
                         # Free old allocation
                         self.req_to_metadata_buffer_idx_allocator.free(
@@ -498,18 +518,19 @@ class MultimodalLanguageTransferQueue:
                         # Send resume request
                         language_req.embedding_receiver.resume_transfer(
                             embedding_indices=new_allocation,
-                            sent_tokens=sent_tokens,
+                            sent_tokens=total_received_tokens,
                             allocated_tokens=allocated_tokens,
                         )
 
                         logger.info(
                             f"Resume transfer initiated for rid={language_req.req.rid}: "
-                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens)"
+                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens), "
+                            f"total sent_tokens={total_received_tokens}"
                         )
                     else:
                         # This shouldn't happen - Transferring status but all data received
                         logger.warning(
-                            f"Unexpected: Transferring status but sent_tokens={sent_tokens} >= "
+                            f"Unexpected: Transferring status but total_received_tokens={total_received_tokens} >= "
                             f"actual_total_length={actual_total_length}"
                         )
                 # Continue waiting for transfer to complete
