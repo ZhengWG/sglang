@@ -1059,17 +1059,19 @@ class MooncakeKVManager(CommonKVManager):
         self, embedding_chunk: TransferEmbeddingChunk, executor: concurrent.futures.ThreadPoolExecutor
     ):
         """Embedding transfer worker (with Resume Transfer support)"""
-        reqs_to_be_processed = list(
-            self.transfer_infos[embedding_chunk.room].values()
+        reqs_to_be_processed = (
+            list(self.transfer_infos[embedding_chunk.room].values())
             if embedding_chunk.room in self.transfer_infos
             else []
         )
         polls = []
         dst_ranks_infos = []
+        is_partial = False  # Track if any transfer is partial
         
-        logger.debug(
+        logger.info(
             f"[Embedding Worker] Processing room={embedding_chunk.room}, "
-            f"num_reqs={len(reqs_to_be_processed)}"
+            f"num_reqs={len(reqs_to_be_processed)}, "
+            f"total_tokens={embedding_chunk.total_tokens}"
         )
         
         for req in reqs_to_be_processed:
@@ -1105,7 +1107,7 @@ class MooncakeKVManager(CommonKVManager):
             sent_tokens = req.sent_tokens
             allocated_tokens = req.allocated_tokens
             
-            ret, is_partial = self.send_embedding(
+            ret, req_is_partial = self.send_embedding(
                 req.mooncake_session_id,
                 embedding_chunk.embedding_indices,
                 self.decode_kv_args_table[req.mooncake_session_id].dst_embedding_ptrs,
@@ -1115,6 +1117,9 @@ class MooncakeKVManager(CommonKVManager):
                 sent_tokens,
                 allocated_tokens,
             )
+            
+            # Track if any transfer is partial (all should have same result)
+            is_partial = req_is_partial
             
             if ret != 0:
                 with self.session_lock:
@@ -1147,14 +1152,27 @@ class MooncakeKVManager(CommonKVManager):
             polls.append(True if ret == 0 else False)
             dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
             
-            logger.debug(
+            logger.info(
                 f"[Embedding Worker] Processed req for room={req.room}, "
-                f"ret={ret}, is_partial={is_partial}, "
+                f"session={req.mooncake_session_id[:16]}..., "
+                f"ret={ret}, is_partial={req_is_partial}, "
+                f"sent_tokens={req.sent_tokens}, "
                 f"len(polls)={len(polls)}, required={req.required_dst_info_num}"
             )
+        
+        # Status sync after processing all reqs
+        if len(polls) > 0:
+            # Use the required_dst_info_num from the first req (all should be same)
+            first_req = reqs_to_be_processed[0]
+            expected_num = first_req.required_dst_info_num
             
-            # Only sync status when all the dst ranks have received the embedding data
-            if len(polls) == req.required_dst_info_num:
+            logger.info(
+                f"[Embedding Worker] Checking status sync: room={embedding_chunk.room}, "
+                f"len(polls)={len(polls)}, expected={expected_num}, "
+                f"is_partial={is_partial}"
+            )
+            
+            if len(polls) == expected_num:
                 if is_partial:
                     # Partial transfer complete, waiting for resume
                     status = (
@@ -1165,16 +1183,22 @@ class MooncakeKVManager(CommonKVManager):
                     status = KVPoll.Success if all(polls) else KVPoll.Failed
                 
                 logger.info(
-                    f"[Embedding Worker] Syncing status to Language: room={req.room}, "
+                    f"[Embedding Worker] Syncing status to Language: room={first_req.room}, "
                     f"status={status}, is_partial={is_partial}, "
                     f"num_dst_ranks={len(dst_ranks_infos)}"
                 )
                 
-                self.update_status(req.room, status)
+                self.update_status(first_req.room, status)
                 for endpoint, dst_port, room in dst_ranks_infos:
                     self.sync_status_to_language_endpoint(
                         endpoint, dst_port, room, status
                     )
+            else:
+                logger.error(
+                    f"[Embedding Worker] Status sync SKIPPED: room={embedding_chunk.room}, "
+                    f"len(polls)={len(polls)} != expected={expected_num}. "
+                    f"This will cause Language side to hang!"
+                )
         
         if (
             embedding_chunk.room not in self.request_status
