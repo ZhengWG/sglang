@@ -1059,13 +1059,18 @@ class MooncakeKVManager(CommonKVManager):
         self, embedding_chunk: TransferEmbeddingChunk, executor: concurrent.futures.ThreadPoolExecutor
     ):
         """Embedding transfer worker (with Resume Transfer support)"""
-        reqs_to_be_processed = (
+        reqs_to_be_processed = list(
             self.transfer_infos[embedding_chunk.room].values()
             if embedding_chunk.room in self.transfer_infos
             else []
         )
         polls = []
         dst_ranks_infos = []
+        
+        logger.debug(
+            f"[Embedding Worker] Processing room={embedding_chunk.room}, "
+            f"num_reqs={len(reqs_to_be_processed)}"
+        )
         
         for req in reqs_to_be_processed:
             # Early exit if the request has failed
@@ -1142,6 +1147,12 @@ class MooncakeKVManager(CommonKVManager):
             polls.append(True if ret == 0 else False)
             dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
             
+            logger.debug(
+                f"[Embedding Worker] Processed req for room={req.room}, "
+                f"ret={ret}, is_partial={is_partial}, "
+                f"len(polls)={len(polls)}, required={req.required_dst_info_num}"
+            )
+            
             # Only sync status when all the dst ranks have received the embedding data
             if len(polls) == req.required_dst_info_num:
                 if is_partial:
@@ -1152,6 +1163,12 @@ class MooncakeKVManager(CommonKVManager):
                 else:
                     # Complete transfer done
                     status = KVPoll.Success if all(polls) else KVPoll.Failed
+                
+                logger.info(
+                    f"[Embedding Worker] Syncing status to Language: room={req.room}, "
+                    f"status={status}, is_partial={is_partial}, "
+                    f"num_dst_ranks={len(dst_ranks_infos)}"
+                )
                 
                 self.update_status(req.room, status)
                 for endpoint, dst_port, room in dst_ranks_infos:
