@@ -366,11 +366,7 @@ class MultimodalLanguageTransferQueue:
                     ori_input_length = len(language_req.req.origin_input_ids)
                     language_req.req.origin_input_ids = fill_ids.tolist()
 
-                    # deepstack embedding only exists when mm_inputs is not None
-                    if (
-                        deepstack_embedding is not None
-                        and ori_input_length < embedding_length
-                    ):
+                    if deepstack_embedding is not None:
                         # NOTE: merge input_embeds and deepstack_embedding to input_embeds to
                         # simplify the model forward pass
                         language_req.req.input_embeds = torch.cat(
