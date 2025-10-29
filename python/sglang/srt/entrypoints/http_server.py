@@ -120,6 +120,7 @@ from sglang.srt.utils import (
     add_prometheus_middleware,
     delete_directory,
     get_bool_env_var,
+    get_process_uptime,
     kill_process_tree,
     set_uvicorn_logging_configs,
 )
@@ -1622,6 +1623,7 @@ def _wait_and_warmup(
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
     logger.info("[SpanLogs] The server is fired up and ready to roll!")
+    logger.info(f"Overall startup time: {get_process_uptime():.2f} seconds")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

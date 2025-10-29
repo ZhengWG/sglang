@@ -34,7 +34,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import kill_process_tree
+from sglang.srt.utils import kill_process_tree, get_process_uptime
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
@@ -1001,6 +1001,7 @@ def _wait_and_warmup_grpc(
         health_servicer.set_serving()
 
     logger.info("The server is fired up and ready to roll!")
+    logger.info(f"Overall startup time: {get_process_uptime():.2f} seconds")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

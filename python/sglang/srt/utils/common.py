@@ -3671,6 +3671,7 @@ def calc_diff(x, y):
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
+
 def check_device_cross_numa_node(visible_device_idx=None) -> bool:
     """Check if the GPU devices are on different NUMA nodes.
        Assuming the device id format is like 00000001:8A:00.0
@@ -3702,3 +3703,8 @@ def check_device_cross_numa_node(visible_device_idx=None) -> bool:
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         return False
+
+
+def get_process_uptime() -> float:
+    current_process = psutil.Process()
+    return time.time() - current_process.create_time()
