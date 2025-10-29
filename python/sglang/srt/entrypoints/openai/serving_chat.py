@@ -485,6 +485,8 @@ class OpenAIServingChat(OpenAIServingBase):
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
 
+                cache_report = self.tokenizer_manager.server_args.enable_cache_report
+
                 # Handle logprobs
                 choice_logprobs = None
                 if request.logprobs:
@@ -527,6 +529,18 @@ class OpenAIServingChat(OpenAIServingBase):
                         choices=[choice_data],
                         model=request.model,
                     )
+                    # Add usage stats if continuous_usage_stats is enabled
+                    if (
+                        request.stream_options
+                        and request.stream_options.continuous_usage_stats
+                    ):
+                        chunk.usage = UsageProcessor.calculate_token_usage(
+                            prompt_tokens=prompt_tokens.get(index, 0),
+                            completion_tokens=0,
+                            cached_tokens=UsageProcessor._details_if_cached(
+                                cached_tokens.get(index, 0)
+                            ) if cache_report else None
+                        )
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 stream_buffer = stream_buffers.get(index, "")
@@ -559,6 +573,9 @@ class OpenAIServingChat(OpenAIServingBase):
                             chunk.usage = UsageProcessor.calculate_token_usage(
                                 prompt_tokens=prompt_tokens.get(index, 0),
                                 completion_tokens=completion_tokens.get(index, 0),
+                                cached_tokens=UsageProcessor._details_if_cached(
+                                    cached_tokens.get(index, 0)
+                                ) if cache_report else None
                             )
 
                         yield f"data: {chunk.model_dump_json()}\n\n"
@@ -614,6 +631,9 @@ class OpenAIServingChat(OpenAIServingBase):
                             chunk.usage = UsageProcessor.calculate_token_usage(
                                 prompt_tokens=prompt_tokens.get(index, 0),
                                 completion_tokens=completion_tokens.get(index, 0),
+                                cached_tokens=UsageProcessor._details_if_cached(
+                                    cached_tokens.get(index, 0)
+                                ) if cache_report else None
                             )
 
                         yield f"data: {chunk.model_dump_json()}\n\n"
@@ -647,6 +667,18 @@ class OpenAIServingChat(OpenAIServingBase):
                     model=request.model,
                     usage=None,
                 )
+                # Add usage stats if continuous_usage_stats is enabled
+                if (
+                    request.stream_options
+                    and request.stream_options.continuous_usage_stats
+                ):
+                    finish_reason_chunk.usage = UsageProcessor.calculate_token_usage(
+                        prompt_tokens=prompt_tokens.get(idx, 0),
+                        completion_tokens=completion_tokens.get(idx, 0),
+                        cached_tokens=UsageProcessor._details_if_cached(
+                            cached_tokens.get(idx, 0)
+                        ) if self.tokenizer_manager.server_args.enable_cache_report else None
+                    )
                 yield f"data: {finish_reason_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             # Send hidden states if requested
@@ -1112,6 +1144,7 @@ class OpenAIServingChat(OpenAIServingBase):
             normal_text, calls = parser.parse_stream_chunk(delta)
 
         # Yield normal text
+        cache_report = self.tokenizer_manager.server_args.enable_cache_report
         if normal_text:
             choice_data = ChatCompletionResponseStreamChoice(
                 index=index,
@@ -1129,9 +1162,13 @@ class OpenAIServingChat(OpenAIServingBase):
             if request.stream_options and request.stream_options.continuous_usage_stats:
                 prompt_tokens = content["meta_info"].get("prompt_tokens", 0)
                 completion_tokens = content["meta_info"].get("completion_tokens", 0)
+                cached_tokens = content["meta_info"].get("cached_tokens", 0)
                 chunk.usage = UsageProcessor.calculate_token_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    cached_tokens=UsageProcessor._details_if_cached(
+                        cached_tokens
+                    ) if cache_report else None
                 )
 
             yield f"data: {chunk.model_dump_json()}\n\n"
@@ -1179,9 +1216,13 @@ class OpenAIServingChat(OpenAIServingBase):
             if request.stream_options and request.stream_options.continuous_usage_stats:
                 prompt_tokens = content["meta_info"].get("prompt_tokens", 0)
                 completion_tokens = content["meta_info"].get("completion_tokens", 0)
+                cached_tokens = content["meta_info"].get("cached_tokens", 0)
                 chunk.usage = UsageProcessor.calculate_token_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    cached_tokens=UsageProcessor._details_if_cached(
+                        cached_tokens
+                    ) if cache_report else None
                 )
 
             yield f"data: {chunk.model_dump_json()}\n\n"
@@ -1254,6 +1295,20 @@ class OpenAIServingChat(OpenAIServingBase):
                 choices=[choice_data],
                 model=request.model,
             )
+
+            # Add usage stats if continuous_usage_stats is enabled
+            cache_report = self.tokenizer_manager.server_args.enable_cache_report
+            if request.stream_options and request.stream_options.continuous_usage_stats:
+                prompt_tokens = content["meta_info"].get("prompt_tokens", 0)
+                completion_tokens = content["meta_info"].get("completion_tokens", 0)
+                cached_tokens = content["meta_info"].get("cached_tokens", 0)
+                chunk.usage = UsageProcessor.calculate_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=UsageProcessor._details_if_cached(
+                        cached_tokens
+                    ) if cache_report else None
+                )
 
             return f"data: {chunk.model_dump_json()}\n\n"
 

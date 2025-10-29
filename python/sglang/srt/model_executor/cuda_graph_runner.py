@@ -209,6 +209,7 @@ def get_batch_sizes_to_capture(model_runner: ModelRunner):
         if server_args.enable_torch_compile
         else []
     )
+    server_args.cuda_graph_bs = capture_bs
     return capture_bs, compile_bs
 
 

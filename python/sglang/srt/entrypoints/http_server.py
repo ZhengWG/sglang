@@ -149,6 +149,11 @@ def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
 
+def _custom_dict_factory(field_list):
+    # 排除特定字段
+    exclude_fields = {"model_config"}
+    return {k: v for k, v in field_list if k not in exclude_fields}
+
 
 async def init_multi_tokenizer() -> ServerArgs:
     """Read args information from shm and init tokenizer manager for current process"""
@@ -496,6 +501,58 @@ async def get_weight_version():
     }
 
 
+@app.get("/simple_server_info")
+async def get_simple_server_info():
+    _simple_key = {
+        "mem_fraction_static": "mem_fraction_static",
+        "max_running_requests": "max_running_requests",
+        "chunked_prefill_size": "chunked_prefill_size",
+        "page_size": "page_size",
+        "tp_size": "tp_size",
+        "pp_size": "pp_size",
+        "dp_size": "dp_size",
+        "ep_size": "ep_size",
+        "nnodes": "nnodes",
+        "node_rank": "node_rank",
+        "allow_auto_truncate": "allow_auto_truncate",
+        "allow_auto_output_truncate": "allow_auto_output_truncate",
+        "max_req_input_len": "max_req_input_len",
+        "disaggregation_mode": "disaggregation_mode",
+        "enable_hierarchical_cache": "enable_hierarchical_cache",
+        "cuda_graph_bs": "cuda_graph_bs",
+        "max_total_num_tokens": "max_total_tokens",
+    }
+
+    internal_states: List[Dict[Any, Any]] = (
+        await _global_state.tokenizer_manager.get_internal_state()
+    )
+
+    # simple server info result
+    _simple_info = {
+        "sglang_version": __version__
+    }
+
+    # This field is not serializable.
+    if hasattr(_global_state.tokenizer_manager.server_args, "model_config"):
+        _simple_info["context_length"] = _global_state.tokenizer_manager.server_args.model_config.context_len
+
+    server_info = {
+        **dataclasses.asdict(
+            _global_state.tokenizer_manager.server_args,
+            dict_factory=_custom_dict_factory
+        ),
+        **_global_state.scheduler_info,
+    }
+
+    for key, r_key in _simple_key.items():
+        _simple_info[r_key] = server_info.get(key, None)
+
+    if internal_states and len(internal_states) > 0:
+        _simple_info["cuda_graph_bs"] = internal_states[0].get("cuda_graph_bs", None)
+
+    return _simple_info
+
+
 @app.get("/get_server_info")
 async def get_server_info():
     # Returns interna states per DP.
@@ -503,12 +560,11 @@ async def get_server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
-    # This field is not serializable.
-    if hasattr(_global_state.tokenizer_manager.server_args, "model_config"):
-        del _global_state.tokenizer_manager.server_args.model_config
-
     return {
-        **dataclasses.asdict(_global_state.tokenizer_manager.server_args),
+        **dataclasses.asdict(
+            _global_state.tokenizer_manager.server_args,
+            dict_factory=_custom_dict_factory
+        ),
         **_global_state.scheduler_info,
         "internal_states": internal_states,
         "version": __version__,
