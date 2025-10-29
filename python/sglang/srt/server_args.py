@@ -2358,12 +2358,13 @@ class ServerArgs:
         parser.add_argument(
             "--enable-trace",
             action="store_true",
+            default=os.getenv("ENABLE_TRACE", "0") == "1",
             help="Enable opentelemetry trace",
         )
         parser.add_argument(
             "--otlp-traces-endpoint",
             type=str,
-            default="localhost:4317",
+            default=os.getenv("OTLP_TRACES_ENDPOINT", "localhost:4317"),
             help="Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
         )
 

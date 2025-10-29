@@ -379,6 +379,9 @@ def trace_set_proc_propagate_context(rid, trace_context: Optional[Dict[str, Any]
 def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
     if not tracing_enabled:
         return ""
+    
+    if not tracing_multispan_enabled:
+        return ""
 
     reqs_trace_contexts = {}
     for bootstrap_room in bootstrap_room_list:
@@ -399,6 +402,9 @@ def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
 
 def trace_set_remote_propagate_context(base64_str):
     if not tracing_enabled:
+        return
+    
+    if not tracing_multispan_enabled:
         return
 
     if base64_str is None or base64_str == "" or base64_str == "None":
@@ -447,33 +453,35 @@ def trace_req_start(
         is_copy=False,
     )
 
-    # create bootstrap room span
-    tracer = threads_info[pid].tracer
-    if str(bootstrap_room) not in remote_trace_contexts:
-        attrs = {"bootstrap_room": str(hex(bootstrap_room))}
-        bootstrap_room_span = tracer.start_span(
-            name=f"Bootstrap Room {hex(bootstrap_room)}",
-            start_time=ts,
-            attributes=attrs,
-        )
-        reqs_context[rid].bootstrap_room_span = bootstrap_room_span
-        bootstrap_room_span_context = trace.set_span_in_context(bootstrap_room_span)
-    else:
-        bootstrap_room_span_context = remote_trace_contexts[
-            str(bootstrap_room)
-        ].root_span_context
-
     trace_context = extract_trace_context(trace_headers)
+
+    tracer = threads_info[pid].tracer
+    bootstrap_room_span_context = None
+    # create bootstrap room span
+    if tracing_multispan_enabled:
+        if str(bootstrap_room) not in remote_trace_contexts:
+            attrs = {"bootstrap_room": str(hex(bootstrap_room))}
+            bootstrap_room_span = tracer.start_span(
+                name=f"Bootstrap Room {hex(bootstrap_room)}",
+                start_time=ts,
+                attributes=attrs,
+                context=trace_context
+            )
+            reqs_context[rid].bootstrap_room_span = bootstrap_room_span
+            bootstrap_room_span_context = trace.set_span_in_context(bootstrap_room_span)
+        else:
+            bootstrap_room_span_context = remote_trace_contexts[
+                str(bootstrap_room)
+            ].root_span_context
 
     # Drop the worker_id added by MultiTokenizer
     orig_rid = rid.split("_")[-1]
     role = "" if role == "null" else role
     attrs = {"rid": orig_rid}
     root_span = tracer.start_span(
-        name=f"{role} Req {orig_rid[:8]}",
+        name="llm_request",
         start_time=ts,
-        context=bootstrap_room_span_context,
-        # context=trace_context,
+        context=bootstrap_room_span_context if tracing_multispan_enabled else trace_context,
         attributes=attrs,
         kind=trace.SpanKind.SERVER,
     )
@@ -495,10 +503,10 @@ def trace_req_start(
             reqs_context[rid].root_span_context,
             ts,
         )
-    if str(bootstrap_room) in remote_trace_contexts:
-        reqs_context[rid].threads_context[pid].last_span_context = (
-            remote_trace_contexts[str(bootstrap_room)].prev_span_context
-        )
+        if str(bootstrap_room) in remote_trace_contexts:
+            reqs_context[rid].threads_context[pid].last_span_context = (
+                remote_trace_contexts[str(bootstrap_room)].prev_span_context
+            )
 
 
 def trace_req_finish(
@@ -523,10 +531,11 @@ def trace_req_finish(
 
     req_context.root_span.set_status(trace.Status(trace.StatusCode.OK))
     req_context.root_span.end(end_time=ts)
-    if str(req_context.bootstrap_room) in remote_trace_contexts:
-        del remote_trace_contexts[str(req_context.bootstrap_room)]
-    else:
-        req_context.bootstrap_room_span.end(end_time=ts)
+    if tracing_multispan_enabled:
+        if str(req_context.bootstrap_room) in remote_trace_contexts:
+            del remote_trace_contexts[str(req_context.bootstrap_room)]
+        else:
+            req_context.bootstrap_room_span.end(end_time=ts)
 
     del reqs_context[rid]
 
@@ -849,7 +858,7 @@ def trace_event_batch(
     ts: Optional[int] = None,
     attrs: Dict[str, Any] = None,
 ):
-    if not tracing_enabled:
+    if not tracing_enabled or not tracing_multispan_enabled:
         return
 
     for req in reqs:
