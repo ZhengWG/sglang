@@ -37,6 +37,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingPar
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
     configure_logger,
+    get_process_uptime,
     kill_process_tree,
     prepare_model_and_tokenizer,
 )
@@ -1112,6 +1113,7 @@ def _wait_and_warmup_grpc(
         logger.info("Skipping gRPC server warmup (skip_server_warmup=True)")
 
     logger.info("The server is fired up and ready to roll!")
+    logger.info(f"Overall startup time: {get_process_uptime():.2f} seconds")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

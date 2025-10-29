@@ -3572,3 +3572,7 @@ def check_device_cross_numa_node(visible_device_idx=None) -> bool:
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         return False
+
+def get_process_uptime() -> float:
+    current_process = psutil.Process()
+    return time.time() - current_process.create_time()
