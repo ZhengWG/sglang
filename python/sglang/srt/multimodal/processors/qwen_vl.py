@@ -243,16 +243,16 @@ async def preprocess_video(
         video_fps = ele.get("fps", default_fps)
         idx = list(range(nframes))
 
-    video_meta = {
-        "total_num_frames": total_frames,
+    video_metadata = {
         "fps": video_fps,
+        "duration": total_frames / video_fps,
+        "total_num_frames": total_frames,
+        "frames_indices": idx,
+        "video_backend": "torchvision",
         "width": resized_width,
         "height": resized_height,
-        "duration": total_frames / video_fps,
-        "video_backend": "torchvision",
-        "frames_indices": idx,
     }
-    return video, video_meta
+    return video, video_metadata
 
 
 # Compatible with Qwen-VL & Qwen-Omni Series
@@ -347,6 +347,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             ]
             base_output.images = await asyncio.gather(*resize_tasks)
 
+        video_metadata = None
         if base_output.videos:
             video_results = await asyncio.gather(
                 *[
@@ -372,7 +373,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output,
                 self.mm_tokens,
-                video_metadata=video_metadata if base_output.videos else None,
+                video_metadata=video_metadata,
                 do_sample_frames=False,
             )
         else:
