@@ -1380,6 +1380,22 @@ class MooncakeKVManager(CommonKVManager):
                         )
                         if arrived_response_num == expected_response_num:
                             self.update_status(bootstrap_room, KVPoll.Success)
+                elif status == KVPoll.Transferring:
+                    # Partial transfer complete, need to resume
+                    if bootstrap_room in self.request_status:
+                        self.prefill_response_tracker[bootstrap_room].add(prefill_rank)
+                        expected_response_num = (
+                            self.required_prefill_response_num_table[bootstrap_room]
+                        )
+                        arrived_response_num = len(
+                            self.prefill_response_tracker[bootstrap_room]
+                        )
+                        if arrived_response_num == expected_response_num:
+                            logger.info(
+                                f"[Decode Thread] Received Transferring status from all prefill/embedding ranks: "
+                                f"room={bootstrap_room}, num_responses={arrived_response_num}"
+                            )
+                            self.update_status(bootstrap_room, KVPoll.Transferring)
                 elif status == KVPoll.Failed:
                     self.record_failure(
                         bootstrap_room,
