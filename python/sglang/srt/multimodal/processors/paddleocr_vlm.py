@@ -41,14 +41,14 @@ def smart_resize(
 
     """
     if height < factor:
-        print(
-            f"smart_resize: height={height} < factor={factor}, reset height=factor"
-        )
+        # print(
+        #     f"smart_resize: height={height} < factor={factor}, reset height=factor"
+        # )
         width = round((width * factor) / height)
         height = factor
 
     if width < factor:
-        print(f"smart_resize: width={width} < factor={factor}, reset width=factor")
+        # print(f"smart_resize: width={width} < factor={factor}, reset width=factor")
         height = round((height * factor) / width)
         width = factor
 
