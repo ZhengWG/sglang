@@ -532,8 +532,8 @@ def embed_mm_inputs(
     for mm_inputs in mm_inputs_list:
         item_flatten_list += [item for item in mm_inputs.mm_items if item is not None]
 
-    # deepstack_embeddings: per-modality
-    modalities, embeddings, masks, deepstack_embeddings = [], [], [], []
+    # deepstack_embeddings: per-modality (dictionary mapping modality to deepstack embedding)
+    modalities, embeddings, masks, deepstack_embeddings = [], [], [], {}
 
     # 2. Get multimodal embedding separately
     # Try get mm embedding if any
@@ -586,7 +586,7 @@ def embed_mm_inputs(
                 embedding, deepstack_embedding = (
                     multimodal_model.separate_deepstack_embeds(embedding)
                 )
-                deepstack_embeddings += [deepstack_embedding]
+                deepstack_embeddings[modality] = deepstack_embedding
             modalities += [modality]
             embeddings += [embedding]
             masks += [mask]
@@ -626,7 +626,7 @@ def embed_mm_inputs(
         indices = torch.where(mask.squeeze(dim=-1))[0]
         inputs_embeds[indices] = embedding.to(inputs_embeds.device, inputs_embeds.dtype)
         if use_deepstack.get(modality, None):
-            input_deepstack_embeds[indices] = deepstack_embeddings[i].to(
+            input_deepstack_embeds[indices] = deepstack_embeddings[modality].to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
 
