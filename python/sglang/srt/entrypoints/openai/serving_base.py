@@ -103,12 +103,13 @@ class OpenAIServingBase(ABC):
             adapted_request, processed_request = self._convert_to_internal_request(
                 request, raw_request
             )
-
-            adapted_request.trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+            
+            if hasattr(adapted_request, "trace_headers"):
+                adapted_request.trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
 
             # Note(Xinyuan): raw_request below is only used for detecting the connection of the client
             if hasattr(request, "stream") and request.stream:
@@ -298,7 +299,9 @@ class OpenAIServingBase(ABC):
         self,
         headers: Headers,
     ) -> Optional[Mapping[str, str]]:
-
+        if headers is None:
+            return None
+        
         if is_tracing_enabled():
             return extract_trace_headers(headers)
 

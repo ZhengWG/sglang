@@ -2242,7 +2242,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 bootstrap_room,
                 ts=int(created_time * 1e9),
                 role=self.server_args.disaggregation_mode,
-                trace_headers = obj.trace_headers,
+                trace_headers=getattr(obj, "trace_headers", None),
             )
             trace_slice_start("", obj.rid, ts=int(created_time * 1e9), anonymous=True)
         else:
@@ -2257,7 +2257,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     bootstrap_room,
                     ts=int(created_time * 1e9),
                     role=self.server_args.disaggregation_mode,
-                    trace_headers=obj.trace_headers,
+                    trace_headers=getattr(obj, "trace_headers", None),
                 )
                 trace_slice_start(
                     "", obj.rid[i], ts=int(created_time * 1e9), anonymous=True
@@ -2422,7 +2422,7 @@ def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
             span_attrs[SpanAttributes.POD_NAME] = pod_name
         if hostname := env_info.hostname:
             span_attrs[SpanAttributes.HOSTNAME] = hostname
-    if trace_headers := state.obj.trace_headers:
+    if trace_headers := getattr(state.obj, "trace_headers", None):
         sofa_trace_info = get_sofa_trace_info(trace_headers)
         if sofa_trace_id := sofa_trace_info.sofa_trace_id:
             span_attrs[SpanAttributes.SOFA_TRACE_ID] = sofa_trace_id
