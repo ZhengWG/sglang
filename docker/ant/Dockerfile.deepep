@@ -110,5 +110,6 @@ RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
 RUN yum install -y gdb && \
     pip install pystack-debugger py-spy concurrent_log_handler
 
-ENV ENGINE_TYPE sglang
-
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
+    ENGINE_TYPE=sglang
