@@ -236,7 +236,6 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 req.embedding = embedding
             else:
                 req.embedding = torch.cat([req.embedding, embedding])
-
             embedding_offsets += req.extend_input_len
             if req.is_chunked <= 0:
                 # Dummy output token for embedding models
