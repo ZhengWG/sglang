@@ -30,7 +30,8 @@ def timer(msg: str):
     start = time.perf_counter()
     yield
     end = time.perf_counter()
-    logger.info(f"{msg} duration: {end - start:.2f} seconds")
+    rank = int(os.getenv("RANK", 0))
+    logger.info(f"{rank} {msg} duration: {end - start:.2f} seconds")
 
 
 def check_sglang_ready(
@@ -132,10 +133,10 @@ def update_weights(
     update_method: Literal["broadcast", "p2p", "all"] = "broadcast",
     uds: str | None = None,
 ):
-    ps.register_checkpoint(
-        checkpoint_name, files=checkpoint_files, named_tensors=named_tensors
-    )
-    ps.init_process_group()
+    with timer("Init process group"):
+        ps.init_process_group()
+    with timer("Register checkpoint"):
+        ps.register_checkpoint(checkpoint_name, files=checkpoint_files, named_tensors=named_tensors)
     check_sglang_ready(endpoint, inference_parallel_size, uds)
     dist.barrier()
     with timer("Gather metas"):
@@ -216,16 +217,13 @@ if __name__ == "__main__":
             args.uds,
         )
     else:
-        if os.path.exists(
-            os.path.join(args.checkpoint_path, "model.safetensors.index.json")
-        ):
-            named_tensors = split_tensors(args.checkpoint_path, rank, world_size)
-            checkpoint_files = []
-        else:
-            checkpoint_files = split_checkpoint_files(
-                args.checkpoint_path, rank, world_size
-            )
-            named_tensors = {}
+        with timer("Split checkpoint files and tensors"):
+            if os.path.exists(os.path.join(args.checkpoint_path, "model.safetensors.index.json")):
+                named_tensors = split_tensors(args.checkpoint_path, rank, world_size)
+                checkpoint_files = []
+            else:
+                checkpoint_files = split_checkpoint_files(args.checkpoint_path, rank, world_size)
+                named_tensors = {}
         update_weights(
             ps,
             args.checkpoint_name,

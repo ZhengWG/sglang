@@ -408,16 +408,13 @@ class ModelRunner:
             logger.warning(f"{class_name} model detected, disable radix cache")
             self.server_args.disable_radix_cache = True
 
-        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
-            load_config = LoadConfig(
-                load_format=self.server_args.load_format,
-                model_loader_extra_config=self.server_args.model_loader_extra_config,
-            )
-
-            # Only support DefaultModelLoader for now
-            loader = get_model_loader(load_config)
-            assert isinstance(loader, DefaultModelLoader)
-
+        load_config = LoadConfig(
+            load_format=self.server_args.load_format,
+            model_loader_extra_config=self.server_args.model_loader_extra_config,
+        )
+        loader = get_model_loader(load_config)
+        is_default_loader = isinstance(loader, DefaultModelLoader)
+        if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
             def get_weights(config):
                 iter = loader._get_weights_iterator(
                     DefaultModelLoader.Source.init_new(config, self.model)
@@ -523,7 +520,7 @@ class ModelRunner:
 
             self.model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
 
-        if POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model:
+        if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
             weights = future.result()
             executor.shutdown()
 
