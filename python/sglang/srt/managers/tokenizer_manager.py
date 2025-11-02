@@ -76,7 +76,11 @@ from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_regi
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import (
+    PortArgs,
+    ServerArgs,
+    set_global_server_args_for_tokenizer,
+)
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.tracing.trace import (
     APP_NAME,
@@ -112,6 +116,16 @@ from orjson import dumps as orjson_dumps
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
+
+
+def _determine_tensor_transport_mode(server_args: ServerArgs) -> TensorTransportMode:
+    is_cross_node = server_args.dist_init_addr
+
+    if is_cross_node:
+        # Fallback to default CPU transport for multi-node
+        return "default"
+    else:
+        return "cuda_ipc"
 
 
 @dataclasses.dataclass
@@ -201,6 +215,8 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         )
 
         # Initialize tokenizer and processor
+        set_global_server_args_for_tokenizer(server_args)
+
         if self.model_config.is_multimodal:
             import_processors("sglang.srt.multimodal.processors")
             try:
@@ -939,7 +955,6 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             batch_req = BatchTokenizedEmbeddingReqInput(batch=tokenized_objs)
 
         self.send_to_scheduler.send_pyobj(batch_req)
-
         # Create states for each individual request in the batch
         for i, tokenized_obj in enumerate(tokenized_objs):
             tmp_obj = obj[i]
@@ -2274,16 +2289,6 @@ class ServerStatus(Enum):
     Up = "Up"
     Starting = "Starting"
     UnHealthy = "UnHealthy"
-
-
-def _determine_tensor_transport_mode(server_args: ServerArgs) -> TensorTransportMode:
-    is_cross_node = server_args.dist_init_addr
-
-    if is_cross_node:
-        # Fallback to default CPU transport for multi-node
-        return "default"
-    else:
-        return "cuda_ipc"
 
 
 async def print_exception_wrapper(func):
