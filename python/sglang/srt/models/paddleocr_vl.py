@@ -725,7 +725,11 @@ class PaddleOCRVLForConditionalGeneration(Ernie4_5_ForCausalLM):
             cu_seqlens=cu_seqlens,
         )
         image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
-        image_embeds = torch.stack(image_embeds, dim=0)
+
+        # TODO(yudian.zy): torch.cat for stack expects each tensor to be equal
+        #  size, which is incompatible for multi image inputs.
+        # image_embeds = torch.stack(image_embeds, dim=0)
+        image_embeds = torch.cat(image_embeds, dim=0)
 
         return image_embeds
 
