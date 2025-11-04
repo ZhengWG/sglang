@@ -529,19 +529,6 @@ class SchedulerMetricsCollector:
     def observe_queue_time(self, latency: float) -> None:
         self._log_histogram(self.queue_time, latency)
 
-    def observe_mm_inputs_prepare(self, duration_s: float) -> None:
-        duration = max(duration_s, 0.0)
-        self.mm_inputs_prepare_latency.labels(**self.labels).observe(duration)
-
-    def observe_mm_inputs_broadcast(self, duration_s: float) -> None:
-        duration = max(duration_s, 0.0)
-        self.mm_inputs_broadcast_latency.labels(**self.labels).observe(duration)
-
-    def inc_mm_inputs_broadcast_fallback(self, reason: str) -> None:
-        labels_with_reason = dict(self.labels)
-        labels_with_reason["reason"] = reason
-        self.mm_inputs_broadcast_fallback.labels(**labels_with_reason).inc()
-
     def log_stats(self, stats: SchedulerStats) -> None:
         self._log_gauge(self.num_running_reqs, stats.num_running_reqs)
         self._log_gauge(self.num_used_tokens, stats.num_used_tokens)
@@ -726,25 +713,6 @@ class TokenizerMetricsCollector:
             name="sglang:num_aborted_requests_total",
             documentation="Number of requests aborted.",
             labelnames=labels.keys(),
-        )
-
-        mm_latency_buckets = exponential_buckets(1e-5, 2.0, 20)
-        self.mm_inputs_prepare_latency = Histogram(
-            name="sglang:mm_inputs_prepare_latency_seconds",
-            documentation="Time spent preparing multimodal inputs for broadcast on entry TP rank.",
-            labelnames=labels.keys(),
-            buckets=mm_latency_buckets,
-        )
-        self.mm_inputs_broadcast_latency = Histogram(
-            name="sglang:mm_inputs_broadcast_latency_seconds",
-            documentation="Time spent broadcasting multimodal inputs from entry TP rank to others.",
-            labelnames=labels.keys(),
-            buckets=mm_latency_buckets,
-        )
-        self.mm_inputs_broadcast_fallback = Counter(
-            name="sglang:mm_inputs_broadcast_fallback_total",
-            documentation="Number of multimodal input broadcasts skipped or failed, broken down by reason.",
-            labelnames=list(labels.keys()) + ["reason"],
         )
 
         if bucket_time_to_first_token is None:

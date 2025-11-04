@@ -1172,8 +1172,6 @@ class Scheduler(
         if raw_mm_inputs is None:
             return None
 
-        metrics_collector = getattr(self, "metrics_collector", None)
-
         # Fallback to local reconstruction when broadcast is disabled or not supported.
         broadcast_enabled = (
             self.server_args.mm_broadcast_inputs
@@ -1181,8 +1179,8 @@ class Scheduler(
         )
 
         if not broadcast_enabled:
-            if metrics_collector is not None:
-                metrics_collector.inc_mm_inputs_broadcast_fallback("disabled")
+            if self.is_entry_rank and self.server_args.mm_broadcast_inputs:
+                print("[mm_broadcast] disabled or no cpu_group -> fallback local")
             return MultimodalInputs.from_dict(raw_mm_inputs)
 
         # Skip broadcast when queue pressure is high to avoid serial bottlenecks.
@@ -1193,8 +1191,10 @@ class Scheduler(
         if self.chunked_req is not None:
             queue_pressure += 1
         if queue_pressure >= self.server_args.mm_broadcast_queue_threshold:
-            if metrics_collector is not None:
-                metrics_collector.inc_mm_inputs_broadcast_fallback("queue")
+            if self.is_entry_rank:
+                print(
+                    f"[mm_broadcast] queue pressure {queue_pressure} >= threshold {self.server_args.mm_broadcast_queue_threshold}, fallback local"
+                )
             return MultimodalInputs.from_dict(raw_mm_inputs)
 
         group_world_size = 1
@@ -1204,16 +1204,16 @@ class Scheduler(
                     group=self.cpu_group
                 )
         except Exception as e:
-            if metrics_collector is not None:
-                metrics_collector.inc_mm_inputs_broadcast_fallback("error")
             logger.warning(
                 f"Failed to get world size in mm_inputs handling with {e}, fallback to local reconstruction."
             )
+            if self.is_entry_rank:
+                print(f"[mm_broadcast] error getting world size: {e}")
             return MultimodalInputs.from_dict(raw_mm_inputs)
 
         if group_world_size <= 1:
-            if metrics_collector is not None:
-                metrics_collector.inc_mm_inputs_broadcast_fallback("single_rank")
+            if self.is_entry_rank:
+                print("[mm_broadcast] single rank group -> fallback local")
             return MultimodalInputs.from_dict(raw_mm_inputs)
 
         descriptor = None
@@ -1225,11 +1225,9 @@ class Scheduler(
                 image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
                 descriptor = image_inputs.to_descriptor()
                 prepare_end = time.perf_counter()
-
-                if metrics_collector is not None:
-                    metrics_collector.observe_mm_inputs_prepare(
-                        prepare_end - prepare_start
-                    )
+                print(
+                    f"[mm_broadcast] prepare descriptor in {prepare_end - prepare_start:.6f}s"
+                )
             else:
                 descriptor = None
 
@@ -1244,10 +1242,9 @@ class Scheduler(
 
             if descriptor is None:
                 raise RuntimeError("Broadcast descriptor is None")
-
-            if metrics_collector is not None and self.is_entry_rank:
-                metrics_collector.observe_mm_inputs_broadcast(
-                    broadcast_end - broadcast_start
+            if self.is_entry_rank:
+                print(
+                    f"[mm_broadcast] broadcast descriptor in {broadcast_end - broadcast_start:.6f}s"
                 )
 
             if not self.is_entry_rank:
@@ -1258,12 +1255,12 @@ class Scheduler(
 
             return image_inputs
         except Exception as e:
-            if metrics_collector is not None:
-                metrics_collector.inc_mm_inputs_broadcast_fallback("exception")
             logger.warning(
                 "Broadcast multimodal inputs failed, fallback to local reconstruction: %s",
                 e,
             )
+            if self.is_entry_rank:
+                print(f"[mm_broadcast] exception {e}, fallback local")
             return MultimodalInputs.from_dict(raw_mm_inputs)
 
     def handle_generate_request(
