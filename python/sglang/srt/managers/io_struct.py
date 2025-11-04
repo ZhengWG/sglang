@@ -1406,6 +1406,7 @@ class ExpertDistributionReqType(Enum):
     DUMP_RECORD = 3
 
 
+@dataclass
 class ExpertDistributionReq(BaseReq):
     action: ExpertDistributionReqType
 
