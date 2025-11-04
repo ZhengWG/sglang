@@ -3681,6 +3681,16 @@ def calc_diff(x, y):
     return 1 - sim
 
 
+cached_device_index = -1
+
+
+def get_current_device_stream_fast():
+    global cached_device_index
+    if cached_device_index == -1:
+        cached_device_index = torch.get_device_module().current_device()
+    return torch.get_device_module().current_stream(cached_device_index)
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 

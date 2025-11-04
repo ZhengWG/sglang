@@ -11,7 +11,6 @@ from sglang.srt.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    parallel_state,
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
@@ -480,7 +479,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        with use_symmetric_memory(parallel_state.get_tp_group()) as sm:
+        with use_symmetric_memory(get_tp_group()) as sm:
             output_parallel = self.quant_method.embedding(self, masked_input.long())
             sm.tag(output_parallel)
         # Mask the output embedding.
