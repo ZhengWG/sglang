@@ -424,10 +424,9 @@ class ModelRunner:
         is_default_loader = isinstance(loader, DefaultModelLoader)
         if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
             def get_weights(config):
-                iter = loader._get_weights_iterator(
+                return loader._get_weights_iterator(
                     DefaultModelLoader.Source.init_new(config, self.model)
                 )
-                return [weight for weight in iter]
 
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = executor.submit(get_weights, self.model_config)
