@@ -593,6 +593,8 @@ class ForwardBatch:
                     batch.extend_seq_lens[batch_idx],
                     batch.extend_prefix_lens[batch_idx],
                 )
+                needed_end = extend_prefix_len + extend_seq_len
+
                 if mm_input is None:
                     # text only
                     mrope_positions = torch.tensor(
@@ -608,10 +610,102 @@ class ForwardBatch:
                         * 3
                     )
                 else:
-                    mrope_positions = mm_input.mrope_positions[
-                        :,
-                        extend_prefix_len : extend_prefix_len + extend_seq_len,
-                    ]
+                    stored_positions = mm_input.mrope_positions
+                    if stored_positions is None or stored_positions.numel() == 0:
+                        rows = (
+                            stored_positions.shape[0]
+                            if stored_positions is not None
+                            else (
+                                mm_input.mrope_position_delta.shape[0]
+                                if getattr(mm_input, "mrope_position_delta", None)
+                                is not None
+                                else 3
+                            )
+                        )
+                        device = (
+                            stored_positions.device
+                            if stored_positions is not None
+                            else model_runner.device
+                        )
+                        dtype = (
+                            stored_positions.dtype
+                            if stored_positions is not None
+                            else torch.int64
+                        )
+                        base_scalar = extend_prefix_len - 1
+                        base_tensor = torch.full(
+                            (rows, 1), base_scalar, device=device, dtype=dtype
+                        )
+                        delta = getattr(mm_input, "mrope_position_delta", None)
+                        if delta is not None:
+                            delta = delta.to(device=device, dtype=dtype)
+                            if delta.ndim == 1:
+                                delta = delta.unsqueeze(-1)
+                            base_tensor = base_tensor + delta[:, :1]
+                        offsets = torch.arange(
+                            1,
+                            extend_seq_len + 1,
+                            device=device,
+                            dtype=dtype,
+                        ).unsqueeze(0)
+                        mrope_positions = base_tensor + offsets
+                    else:
+                        rows, available = stored_positions.shape
+                        device = stored_positions.device
+                        dtype = stored_positions.dtype
+
+                        existing_start = min(extend_prefix_len, available)
+                        existing_end = min(needed_end, available)
+                        existing_count = max(existing_end - existing_start, 0)
+
+                        pieces = []
+                        if existing_count > 0:
+                            pieces.append(
+                                stored_positions[:, existing_start:existing_end]
+                            )
+
+                        missing_count = extend_seq_len - existing_count
+                        if missing_count > 0:
+                            if available > 0:
+                                # Use the last available column as the base.
+                                base_index = min(
+                                    max(existing_start, available) - 1, available - 1
+                                )
+                                base_tensor = stored_positions[
+                                    :, base_index : base_index + 1
+                                ]
+                            else:
+                                base_scalar = extend_prefix_len - 1
+                                base_tensor = torch.full(
+                                    (rows, 1),
+                                    base_scalar,
+                                    device=device,
+                                    dtype=dtype,
+                                )
+                                delta = getattr(mm_input, "mrope_position_delta", None)
+                                if delta is not None:
+                                    delta = delta.to(device=device, dtype=dtype)
+                                    if delta.ndim == 1:
+                                        delta = delta.unsqueeze(-1)
+                                    base_tensor = base_tensor + delta[:, :1]
+
+                            offsets = torch.arange(
+                                1,
+                                missing_count + 1,
+                                device=device,
+                                dtype=dtype,
+                            ).unsqueeze(0)
+                            new_positions = base_tensor + offsets
+                            pieces.append(new_positions)
+
+                        if pieces:
+                            mrope_positions = torch.cat(pieces, dim=1)
+                        else:
+                            # No overlap with cached positions but extend_seq_len is zero.
+                            mrope_positions = torch.empty(
+                                rows, 0, device=device, dtype=dtype
+                            )
+
                 mrope_positions_list[batch_idx] = mrope_positions
 
         self.mrope_positions = torch.cat(
