@@ -44,6 +44,10 @@ class TimeStats:
     prefill_transfer_queue_entry_time: float = 0.0
     decode_prealloc_queue_entry_time: float = 0.0
     decode_transfer_queue_entry_time: float = 0.0
+    # TODO: correct set them
+    bootstrap_duration: float = 0.0
+    alloc_waiting_duration: float = 0.0
+
     arrive_time_ts: float = 0.0
     arrive_time: float = 0.0
 
@@ -83,7 +87,20 @@ class TimeStats:
                         and forward_duration >= 0
                     ), f"bootstrap_duration={bootstrap_duration} < 0 or queue_duration={queue_duration} < 0 or forward_duration={forward_duration} < 0"
 
-            return f"bootstrap_duration={self.format_duration(bootstrap_duration)}, queue_duration={self.format_duration(queue_duration)}, forward_duration={self.format_duration(forward_duration)}, start_time={self.prefill_bootstrap_queue_entry_time:.3f}"
+            other = max(
+                0.0,
+                bootstrap_duration
+                - (self.alloc_waiting_duration + self.bootstrap_duration),
+            )
+            return (
+                f"bootstrap_queue_duration({self.format_duration(bootstrap_duration)}) "
+                f"= alloc_wait({self.format_duration(self.alloc_waiting_duration)}) "
+                f"+ bootstrap({self.format_duration(self.bootstrap_duration)}) "
+                f"+ other({self.format_duration(other)}); "
+                f"queue_duration={self.format_duration(queue_duration)}, "
+                f"forward_duration={self.format_duration(forward_duration)}, "
+                f"start={self.prefill_bootstrap_queue_entry_time:.3f}"
+            )
         elif self.disagg_mode == DisaggregationMode.DECODE:
             prealloc_duration = (
                 self.decode_transfer_queue_entry_time
@@ -104,7 +121,21 @@ class TimeStats:
                         and forward_duration >= 0
                     ), f"prealloc_duration={prealloc_duration} < 0 or transfer_duration={transfer_duration} < 0 or queue_duration={queue_duration} < 0 or forward_duration={forward_duration} < 0. {self=}"
 
-            return f"prealloc_duration={self.format_duration(prealloc_duration)}, transfer_duration={self.format_duration(transfer_duration)}, queue_duration={self.format_duration(queue_duration)}, forward_duration={self.format_duration(forward_duration)}, start_time={self.decode_prealloc_queue_entry_time:.3f}"
+            other = max(
+                0.0,
+                prealloc_duration
+                - (self.alloc_waiting_duration + self.bootstrap_duration),
+            )
+            return (
+                f"prealloc_queue_duration({self.format_duration(prealloc_duration)}) "
+                f"= alloc_wait({self.format_duration(self.alloc_waiting_duration)}) "
+                f"+ bootstrap({self.format_duration(self.bootstrap_duration)}) "
+                f"+ other({self.format_duration(other)}); "
+                f"transfer_duration={self.format_duration(transfer_duration)}; "
+                f"queue_duration={self.format_duration(queue_duration)}, "
+                f"forward_duration={self.format_duration(forward_duration)}, "
+                f"start={self.decode_prealloc_queue_entry_time:.3f}"
+            )
         else:
             return "Unknown Time Stats"
 
@@ -151,6 +182,8 @@ class SchedulerStats:
     num_decode_transfer_queue_reqs: int = 0
     kv_transfer_speed_gb_s: float = 0.0
     kv_transfer_latency_ms: float = 0.0
+    kv_transfer_bootstrap_ms: float = 0.0
+    kv_transfer_alloc_ms: float = 0.0
 
     # Utilization
     utilization: float = 0.0
@@ -304,6 +337,18 @@ class SchedulerMetricsCollector:
         self.kv_transfer_latency_ms = Gauge(
             name="sglang:kv_transfer_latency_ms",
             documentation="The transfer latency of the KV cache in ms.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.kv_transfer_bootstrap_ms = Gauge(
+            name="sglang:kv_transfer_bootstrap_ms",
+            documentation="The bootstrap time of the KV transfer in ms.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.kv_transfer_alloc_ms = Gauge(
+            name="sglang:kv_transfer_alloc_ms",
+            documentation="The allocation waiting time of the KV transfer in ms.",
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
@@ -574,6 +619,8 @@ class SchedulerMetricsCollector:
         )
         self._log_gauge(self.kv_transfer_speed_gb_s, stats.kv_transfer_speed_gb_s)
         self._log_gauge(self.kv_transfer_latency_ms, stats.kv_transfer_latency_ms)
+        self._log_gauge(self.kv_transfer_bootstrap_ms, stats.kv_transfer_bootstrap_ms)
+        self._log_gauge(self.kv_transfer_alloc_ms, stats.kv_transfer_alloc_ms)
 
         # Retract
         self._log_gauge(self.num_retracted_reqs, stats.num_retracted_reqs)
