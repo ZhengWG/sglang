@@ -1172,46 +1172,54 @@ class Scheduler(
         if raw_mm_inputs is None:
             return None
 
+        # Fallback to local reconstruction when broadcast is disabled or not supported.
+        broadcast_enabled = (
+            self.server_args.mm_broadcast_inputs
+            and self.cpu_group is not None
+        )
+
+        if not broadcast_enabled:
+            return MultimodalInputs.from_dict(raw_mm_inputs)
+
+        # Skip broadcast when queue pressure is high to avoid serial bottlenecks.
+        queue_pressure = (
+            len(self.waiting_queue)
+            + self.running_batch.batch_size()
+        )
+        if self.chunked_req is not None:
+            queue_pressure += 1
+        if queue_pressure >= self.server_args.mm_broadcast_queue_threshold:
+            return MultimodalInputs.from_dict(raw_mm_inputs)
+
         group_world_size = 1
         try:
-            if (
-                torch.distributed.is_available()
-                and torch.distributed.is_initialized()
-                and self.cpu_group is not None
-            ):
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
                 group_world_size = torch.distributed.get_world_size(
                     group=self.cpu_group
                 )
         except Exception as e:
             logger.warning(
-                f"Failed to get world size in mm_inputs handling with {e}, fallback to 1."
+                f"Failed to get world size in mm_inputs handling with {e}, fallback to local reconstruction."
             )
+            return MultimodalInputs.from_dict(raw_mm_inputs)
 
-        # In case tp size > 1, all the Scheduler TP ranks runs the duplicated computing
-        # process in CPU which occupies the main thread CPU cycle. This computing logic
-        # merely needs to be run on TP0 and be broadcast to other TP ranks.
-        # Since the Scheduler is single-threaded, any large CPU cost will impact
-        # handling of other messages. For example, CPU hits 99.9% can significantly
-        # increase the CUDA kernel launch time.
+        if group_world_size <= 1:
+            return MultimodalInputs.from_dict(raw_mm_inputs)
+
         if self.is_entry_rank:
-            # Only the entry rank materializes once from dict.
             image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
-            # Broadcast to other TP ranks (use src=0 within the group).
-            if group_world_size > 1:
-                obj_list = [image_inputs]
-                torch.distributed.broadcast_object_list(
-                    obj_list, src=0, group=self.cpu_group
-                )
-                image_inputs = obj_list[0]
+            obj_list = [image_inputs]
+            torch.distributed.broadcast_object_list(
+                obj_list, src=0, group=self.cpu_group
+            )
+            image_inputs = obj_list[0]
         else:
-            # Non-entry ranks: receive if group size > 1; otherwise materialize locally.
-            if group_world_size > 1:
-                obj_list = [None]
-                torch.distributed.broadcast_object_list(
-                    obj_list, src=0, group=self.cpu_group
-                )
-                image_inputs = obj_list[0]
-            else:
+            obj_list = [None]
+            torch.distributed.broadcast_object_list(
+                obj_list, src=0, group=self.cpu_group
+            )
+            image_inputs = obj_list[0]
+            if image_inputs is None:
                 image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
 
         return image_inputs

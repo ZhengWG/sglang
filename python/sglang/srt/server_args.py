@@ -551,6 +551,8 @@ class ServerArgs:
     # For Multi-Modal
     mm_max_concurrent_calls: int = 32
     mm_per_request_timeout: float = 10.0
+    mm_broadcast_inputs: bool = False
+    mm_broadcast_queue_threshold: int = 32
 
     def __post_init__(self):
         """
@@ -566,6 +568,12 @@ class ServerArgs:
 
         # Set missing default values.
         self._handle_missing_default_values()
+
+        if self.mm_broadcast_queue_threshold < 1:
+            logger.warning(
+                "mm_broadcast_queue_threshold must be >= 1. Resetting to 1."
+            )
+            self.mm_broadcast_queue_threshold = 1
 
         # Get GPU memory capacity, which is a common dependency for several configuration steps.
         gpu_mem = get_device_memory_capacity(self.device)
@@ -3549,6 +3557,17 @@ class ServerArgs:
             type=int,
             default=ServerArgs.mm_per_request_timeout,
             help="The timeout for each multi-modal request in seconds.",
+        )
+        parser.add_argument(
+            "--mm-broadcast-inputs",
+            action="store_true",
+            help="Broadcast multimodal inputs from entry TP rank to other ranks. Disabled by default for performance safety.",
+        )
+        parser.add_argument(
+            "--mm-broadcast-queue-threshold",
+            type=int,
+            default=ServerArgs.mm_broadcast_queue_threshold,
+            help="When broadcasting multimodal inputs is enabled, fallback to local reconstruction once waiting queue exceeds this size.",
         )
 
     @classmethod
