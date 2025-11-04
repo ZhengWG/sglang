@@ -289,6 +289,35 @@ class MultimodalDataItem:
         self.hash = hash((self.hash, other.hash))
         self.set_pad_value()
 
+    def to_descriptor(self) -> dict:
+        return {
+            "modality": self.modality.name,
+            "hash": self.hash,
+            "pad_value": self.pad_value,
+            "offsets": self.offsets,
+            "feature": self.feature,
+            "precomputed_embeddings": self.precomputed_embeddings,
+            "model_specific_data": dict(self.model_specific_data or {}),
+        }
+
+    @staticmethod
+    def from_descriptor(obj: dict) -> "MultimodalDataItem":
+        modality = obj.get("modality")
+        if isinstance(modality, Modality):
+            modality_enum = modality
+        else:
+            modality_enum = Modality[modality]
+
+        return MultimodalDataItem(
+            modality=modality_enum,
+            hash=obj.get("hash"),
+            pad_value=obj.get("pad_value"),
+            offsets=obj.get("offsets"),
+            feature=obj.get("feature"),
+            precomputed_embeddings=obj.get("precomputed_embeddings"),
+            model_specific_data=dict(obj.get("model_specific_data") or {}),
+        )
+
 
 @dataclasses.dataclass
 class MultimodalInputs:
@@ -398,6 +427,51 @@ class MultimodalInputs:
                 # set token_ids
                 if getattr(self, key, None) is None:
                     setattr(self, key, getattr(other, key, None))
+
+    def to_descriptor(self) -> dict:
+        return {
+            "mm_items": [item.to_descriptor() for item in self.mm_items],
+            "image_pad_len": self.image_pad_len,
+            "num_image_tokens": self.num_image_tokens,
+            "im_token_id": self.im_token_id,
+            "im_start_id": self.im_start_id,
+            "im_end_id": self.im_end_id,
+            "slice_start_id": self.slice_start_id,
+            "slice_end_id": self.slice_end_id,
+            "video_token_id": self.video_token_id,
+            "audio_token_id": self.audio_token_id,
+            "audio_start_id": self.audio_start_id,
+            "audio_end_id": self.audio_end_id,
+            "mrope_positions": self.mrope_positions,
+            "mrope_position_delta": self.mrope_position_delta,
+        }
+
+    @staticmethod
+    def from_descriptor(obj: dict) -> "MultimodalInputs":
+        mm_items_desc = obj.get("mm_items", [])
+        mm_items = [MultimodalDataItem.from_descriptor(item) for item in mm_items_desc]
+        ret = MultimodalInputs(mm_items=mm_items)
+
+        optional_args = [
+            "image_pad_len",
+            "num_image_tokens",
+            "im_token_id",
+            "im_start_id",
+            "im_end_id",
+            "slice_start_id",
+            "slice_end_id",
+            "video_token_id",
+            "audio_token_id",
+            "audio_start_id",
+            "audio_end_id",
+            "mrope_positions",
+            "mrope_position_delta",
+        ]
+        for arg in optional_args:
+            if arg in obj:
+                setattr(ret, arg, obj[arg])
+
+        return ret
         # other args would be kept intact
 
 
