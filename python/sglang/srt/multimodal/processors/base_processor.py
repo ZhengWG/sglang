@@ -673,7 +673,7 @@ class BaseMultimodalProcessor(ABC):
                 add_special_tokens=True,
             ).input_ids.flatten()
 
-        # Add offsets to all items
+        # Add offsets to all items and precompute pad metadata once
         for mm_item in all_collected_items:
             mm_token_id = mm_tokens.get_token_id_by_modality(mm_item.modality)
             if mm_token_id is None:
@@ -682,6 +682,14 @@ class BaseMultimodalProcessor(ABC):
                 input_ids=input_ids,
                 mm_token_id=mm_token_id,
             )
+            try:
+                mm_item.set_pad_value()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to set pad value for multimodal item %s: %s",
+                    mm_item.modality,
+                    exc,
+                )
 
         """
         solution for cuda-ipc memory-leak:
