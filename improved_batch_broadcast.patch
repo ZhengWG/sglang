@@ -1,0 +1,267 @@
+# 改进方案：批量 Broadcast mm_inputs
+# 保留 PR #11910 的优点（避免重复materialization）
+# 修复高并发问题（批量broadcast，减少同步阻塞）
+
+# 应用此patch:
+# git apply improved_batch_broadcast.patch
+
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -388,6 +388,11 @@ class Scheduler(
+             self.cpu_group = self.tp_cpu_group
+             self.is_entry_rank = self.tp_group.rank == 0
+ 
++        # Cache for batch-processed mm_inputs
++        # Key: rid, Value: MultimodalInputs object
++        self.mm_inputs_cache = {}
++        self.cache_max_size = 1000
++
+         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
+         set_random_seed(self.random_seed)
+ 
+@@ -1222,7 +1227,96 @@ class Scheduler(
+         return recv_reqs
+ 
+     def process_input_requests(self, recv_reqs: List):
++        # Batch process all mm_inputs before handling individual requests
++        # This reduces broadcast overhead from O(N) to O(1) for N requests
++        if recv_reqs and self.tp_size > 1:
++            self._batch_process_mm_inputs(recv_reqs)
++        
+         for recv_req in recv_reqs:
+             # If it is a health check generation request and there are running requests, ignore it.
+             if is_health_check_generate_req(recv_req) and (
+@@ -1236,6 +1330,93 @@ class Scheduler(
+                 if isinstance(output, RpcReqOutput):
+                     if self.recv_from_rpc is not None:
+                         self.recv_from_rpc.send_pyobj(output)
+                 else:
+                     self.send_to_tokenizer.send_output(output, recv_req)
++    
++    def _batch_process_mm_inputs(self, recv_reqs: List):
++        """
++        Batch process mm_inputs to reduce broadcast overhead.
++        
++        Key optimizations:
++        1. Collect all mm_inputs that need processing
++        2. Entry rank executes from_dict for all of them (avoid duplicate materialization)
++        3. Broadcast once with all results packed together (reduce sync overhead)
++        4. Cache results for subsequent use by individual request handlers
++        
++        Performance improvement:
++        - Original: N requests × (from_dict + pickle + broadcast) = High overhead
++        - Commit 17a57fd86: N × (from_dict + pickle + broadcast) individually = Serial bottleneck
++        - This approach: 1 × (N×from_dict + batch_pickle + broadcast) = Amortized overhead
++        
++        Example (10 requests, TP=4, from_dict=500ms):
++        - Original: 10×4×500ms = 20s CPU (parallel execution)
++        - Commit: 10×500ms = 5s CPU, but 10×650ms = 6.5s latency (serial)
++        - This: 10×500ms = 5s CPU, 5s+200ms = 5.2s latency (batch)
++        """
++        # Collect requests with mm_inputs that need processing
++        reqs_to_process = []
++        
++        for recv_req in recv_reqs:
++            if isinstance(recv_req, TokenizedGenerateReqInput):
++                if hasattr(recv_req, 'mm_inputs') and recv_req.mm_inputs is not None:
++                    if recv_req.rid not in self.mm_inputs_cache:
++                        reqs_to_process.append((recv_req.rid, recv_req.mm_inputs))
++            elif isinstance(recv_req, BatchTokenizedGenerateReqInput):
++                for sub_req in recv_req.batch:
++                    if hasattr(sub_req, 'mm_inputs') and sub_req.mm_inputs is not None:
++                        if sub_req.rid not in self.mm_inputs_cache:
++                            reqs_to_process.append((sub_req.rid, sub_req.mm_inputs))
++        
++        if not reqs_to_process:
++            return
++        
++        group_world_size = 1
++        try:
++            if (
++                torch.distributed.is_available()
++                and torch.distributed.is_initialized()
++                and self.cpu_group is not None
++            ):
++                group_world_size = torch.distributed.get_world_size(
++                    group=self.cpu_group
++                )
++        except Exception as e:
++            logger.warning(
++                f"Failed to get world size in batch mm_inputs processing: {e}, fallback to 1."
++            )
++        
++        # Entry rank: batch execute from_dict
++        if self.is_entry_rank:
++            mm_inputs_map = {}
++            
++            for rid, raw_mm_inputs in reqs_to_process:
++                try:
++                    # Execute from_dict (materialization happens here, ~500ms per request)
++                    # This is expensive but only done once per request
++                    mm_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
++                    mm_inputs_map[rid] = mm_inputs
++                except Exception as e:
++                    logger.warning(f"Failed to process mm_inputs for {rid}: {e}")
++                    mm_inputs_map[rid] = None
++            
++            # Single broadcast for all mm_inputs (amortize overhead)
++            if mm_inputs_map and group_world_size > 1:
++                obj_list = [mm_inputs_map]
++                try:
++                    torch.distributed.broadcast_object_list(
++                        obj_list, src=0, group=self.cpu_group
++                    )
++                except Exception as e:
++                    logger.warning(f"Failed to broadcast batch mm_inputs: {e}")
++            
++            # Update cache
++            self.mm_inputs_cache.update(mm_inputs_map)
++        else:
++            # Non-entry ranks: receive batch broadcast
++            if group_world_size > 1:
++                obj_list = [None]
++                try:
++                    torch.distributed.broadcast_object_list(
++                        obj_list, src=0, group=self.cpu_group
++                    )
++                    mm_inputs_map = obj_list[0]
++                    if mm_inputs_map:
++                        self.mm_inputs_cache.update(mm_inputs_map)
++                except Exception as e:
++                    logger.warning(f"Failed to receive batch mm_inputs broadcast: {e}")
++                    # Fallback: process locally
++                    for rid, raw_mm_inputs in reqs_to_process:
++                        try:
++                            self.mm_inputs_cache[rid] = MultimodalInputs.from_dict(raw_mm_inputs)
++                        except Exception as ex:
++                            logger.error(f"Failed to fallback process mm_inputs for {rid}: {ex}")
++                            self.mm_inputs_cache[rid] = None
++            else:
++                # Single-rank mode: process locally
++                for rid, raw_mm_inputs in reqs_to_process:
++                    self.mm_inputs_cache[rid] = MultimodalInputs.from_dict(raw_mm_inputs)
++        
++        # Limit cache size to prevent memory leak
++        if len(self.mm_inputs_cache) > self.cache_max_size:
++            excess = len(self.mm_inputs_cache) - self.cache_max_size
++            # Remove oldest entries (simple FIFO)
++            for _ in range(excess):
++                self.mm_inputs_cache.pop(next(iter(self.mm_inputs_cache)))
+ 
+     def init_req_max_new_tokens(self, req):
+         req.sampling_params.max_new_tokens = min(
+@@ -1297,17 +1478,22 @@ class Scheduler(
+ 
+         # Handle multimodal inputs
+         if recv_req.mm_inputs is not None:
+-            image_inputs = self._process_and_broadcast_mm_inputs(recv_req.mm_inputs)
+-
+-            # The following steps are already fast, execute locally on each rank.
++            # Get from cache (pre-processed in batch)
++            if recv_req.rid in self.mm_inputs_cache:
++                image_inputs = self.mm_inputs_cache.pop(recv_req.rid)
++            else:
++                # Fallback: process locally if cache miss
++                # This can happen in single-rank mode or if batch processing failed
++                logger.warning(f"Cache miss for mm_inputs: {recv_req.rid}, processing locally")
++                image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
++            
++            # Expand a single image token into multiple dummy tokens for receiving image embeddings
+             req.origin_input_ids = self.pad_input_ids_func(
+                 req.origin_input_ids, image_inputs
+             )
+             req.extend_image_inputs(image_inputs)
+ 
+-            if len(req.origin_input_ids) >= self.max_req_input_len:
++            if image_inputs and len(req.origin_input_ids) >= self.max_req_input_len:
+                 req.set_finish_with_abort(
+                     FinishReason.LENGTH, text=EXCEED_PROMPT_LENGTH_MSG
+                 )
+                 self.send_to_tokenizer.send_output(
+@@ -1529,7 +1715,14 @@ class Scheduler(
+ 
+         # Handle multimodal inputs
+         if recv_req.image_inputs is not None:
+-            image_inputs = self._process_and_broadcast_mm_inputs(recv_req.image_inputs)
++            # Get from cache (should have been pre-processed in batch)
++            if recv_req.rid in self.mm_inputs_cache:
++                image_inputs = self.mm_inputs_cache.pop(recv_req.rid)
++            else:
++                # Fallback for backward compatibility
++                logger.warning(f"Cache miss for image_inputs: {recv_req.rid}")
++                image_inputs = MultimodalInputs.from_dict(recv_req.image_inputs) if isinstance(recv_req.image_inputs, dict) else recv_req.image_inputs
++            
+             # Expand a single image token into multiple dummy tokens for receiving image embeddings
+             req.origin_input_ids = self.pad_input_ids_func(
+                 req.origin_input_ids, image_inputs
+@@ -1145,70 +1328,6 @@ class Scheduler(
+             self.max_req_len - len(req.origin_input_ids) - 1,
+         )
+ 
+-    def _process_and_broadcast_mm_inputs(
+-        self,
+-        raw_mm_inputs: Optional[dict],
+-    ):
+-        """Materialize MultimodalInputs once on the entry rank and broadcast to others.
+-
+-        Entry rank:
+-        - constructs MultimodalInputs.from_dict(raw_mm_inputs) once
+-        - broadcasts to other ranks in self.cpu_group (if world_size > 1)
+-
+-        Non-entry ranks:
+-        - receive the object via broadcast (if world_size > 1)
+-        - otherwise (single-rank / no group) fall back to local from_dict
+-
+-        Returns:
+-            MultimodalInputs | None
+-        """
+-        if raw_mm_inputs is None:
+-            return None
+-
+-        group_world_size = 1
+-        try:
+-            if (
+-                torch.distributed.is_available()
+-                and torch.distributed.is_initialized()
+-                and self.cpu_group is not None
+-            ):
+-                group_world_size = torch.distributed.get_world_size(
+-                    group=self.cpu_group
+-                )
+-        except Exception as e:
+-            logger.warning(
+-                f"Failed to get world size in mm_inputs handling with {e}, fallback to 1."
+-            )
+-
+-        # In case tp size > 1, all the Scheduler TP ranks runs the duplicated computing
+-        # process in CPU which occupies the main thread CPU cycle. This computing logic
+-        # merely needs to be run on TP0 and be broadcast to other TP ranks.
+-        # Since the Scheduler is single-threaded, any large CPU cost will impact
+-        # handling of other messages. For example, CPU hits 99.9% can significantly
+-        # increase the CUDA kernel launch time.
+-        if self.is_entry_rank:
+-            # Only the entry rank materializes once from dict.
+-            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+-            # Broadcast to other TP ranks (use src=0 within the group).
+-            if group_world_size > 1:
+-                obj_list = [image_inputs]
+-                torch.distributed.broadcast_object_list(
+-                    obj_list, src=0, group=self.cpu_group
+-                )
+-                image_inputs = obj_list[0]
+-        else:
+-            # Non-entry ranks: receive if group size > 1; otherwise materialize locally.
+-            if group_world_size > 1:
+-                obj_list = [None]
+-                torch.distributed.broadcast_object_list(
+-                    obj_list, src=0, group=self.cpu_group
+-                )
+-                image_inputs = obj_list[0]
+-            else:
+-                image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+-
+-        return image_inputs
+-
+     def handle_generate_request(
+         self,
+         recv_req: TokenizedGenerateReqInput,
