@@ -1167,6 +1167,88 @@ class Scheduler(
         if raw_mm_inputs is None:
             return None
 
+        # Only the entry rank needs to broadcast metadata; others receive to avoid
+        # redundant hashing. Large payloads (feature tensors) stay local and are
+        # moved via CUDA IPC later in the pipeline.
+        mm_items = None
+        if isinstance(raw_mm_inputs, dict):
+            mm_items = raw_mm_inputs.get("mm_items")
+
+        group_world_size = 1
+        cpu_group = getattr(self, "cpu_group", None)
+        if (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and cpu_group is not None
+        ):
+            try:
+                group_world_size = torch.distributed.get_world_size(group=cpu_group)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch world size for mm metadata broadcast: %s",
+                    exc,
+                )
+                group_world_size = 1
+
+        num_items = len(mm_items) if isinstance(mm_items, list) else 0
+
+        if group_world_size > 1 and num_items > 0:
+            device = torch.device("cpu")
+
+            if self.is_entry_rank:
+                length_tensor = torch.tensor([num_items], dtype=torch.long, device=device)
+            else:
+                length_tensor = torch.empty(1, dtype=torch.long, device=device)
+
+            work = torch.distributed.broadcast(
+                length_tensor, src=0, group=cpu_group, async_op=True
+            )
+            work.wait()
+            broadcast_num_items = int(length_tensor.item())
+
+            if broadcast_num_items != num_items:
+                logger.warning(
+                    "Mismatch in multimodal item count (local=%d, broadcast=%d)."
+                    " Falling back to local parsing.",
+                    num_items,
+                    broadcast_num_items,
+                )
+                group_world_size = 1
+            else:
+                if self.is_entry_rank:
+                    flat_metadata: List[int] = []
+                    for item in mm_items:
+                        item_hash = getattr(item, "hash", None)
+                        item_pad = getattr(item, "pad_value", None)
+                        flat_metadata.extend(
+                            [item_hash if item_hash is not None else -1]
+                        )
+                        flat_metadata.extend(
+                            [item_pad if item_pad is not None else -1]
+                        )
+                    metadata_tensor = torch.tensor(
+                        flat_metadata, dtype=torch.long, device=device
+                    )
+                else:
+                    metadata_tensor = torch.empty(
+                        broadcast_num_items * 2, dtype=torch.long, device=device
+                    )
+
+                work = torch.distributed.broadcast(
+                    metadata_tensor, src=0, group=cpu_group, async_op=True
+                )
+                work.wait()
+
+                if not self.is_entry_rank:
+                    flat_metadata = metadata_tensor.tolist()
+                    for idx, item in enumerate(mm_items):
+                        hash_val = flat_metadata[2 * idx]
+                        pad_val = flat_metadata[2 * idx + 1]
+                        if hash_val != -1:
+                            item.hash = int(hash_val)
+                        if pad_val != -1:
+                            item.pad_value = int(pad_val)
+
         return MultimodalInputs.from_dict(raw_mm_inputs)
 
     def handle_generate_request(
