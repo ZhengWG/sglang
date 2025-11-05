@@ -24,7 +24,7 @@ from collections import deque
 from concurrent import futures
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Deque, Dict, List, Optional, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
 import psutil
 import setproctitle
@@ -1156,21 +1156,18 @@ class Scheduler(
         self,
         raw_mm_inputs: Optional[dict],
     ):
-        """Materialize MultimodalInputs once on the entry rank and broadcast to others.
+        """Materialize multimodal inputs while avoiding redundant heavy hashing.
 
-        Entry rank:
-        - constructs MultimodalInputs.from_dict(raw_mm_inputs) once
-        - broadcasts to other ranks in self.cpu_group (if world_size > 1)
-
-        Non-entry ranks:
-        - receive the object via broadcast (if world_size > 1)
-        - otherwise (single-rank / no group) fall back to local from_dict
+        We only share lightweight per-item hashes across ranks and keep the large
+        multimodal payload local (transported via CUDA IPC when available).
 
         Returns:
             MultimodalInputs | None
         """
         if raw_mm_inputs is None:
             return None
+
+        mm_items = raw_mm_inputs.get("mm_items") if isinstance(raw_mm_inputs, dict) else None
 
         group_world_size = 1
         try:
@@ -1187,32 +1184,64 @@ class Scheduler(
                 f"Failed to get world size in mm_inputs handling with {e}, fallback to 1."
             )
 
-        # In case tp size > 1, all the Scheduler TP ranks runs the duplicated computing
-        # process in CPU which occupies the main thread CPU cycle. This computing logic
-        # merely needs to be run on TP0 and be broadcast to other TP ranks.
-        # Since the Scheduler is single-threaded, any large CPU cost will impact
-        # handling of other messages. For example, CPU hits 99.9% can significantly
-        # increase the CUDA kernel launch time.
+        metadata_holder: List[Optional[List[Optional[int]]]] = [None]
+        image_inputs: Optional[MultimodalInputs] = None
+
+        # Entry rank materializes once to obtain metadata (hashes / pad values).
         if self.is_entry_rank:
-            # Only the entry rank materializes once from dict.
             image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
-            # Broadcast to other TP ranks (use src=0 within the group).
-            if group_world_size > 1:
-                obj_list = [image_inputs]
+            if image_inputs.mm_items:
+                metadata_holder[0] = [item.hash for item in image_inputs.mm_items]
+
+        # Share lightweight metadata only when there are peers to notify.
+        if (
+            group_world_size > 1
+            and self.cpu_group is not None
+            and (metadata_holder[0] is not None or mm_items)
+        ):
+            try:
                 torch.distributed.broadcast_object_list(
-                    obj_list, src=0, group=self.cpu_group
+                    metadata_holder, src=0, group=self.cpu_group
                 )
-                image_inputs = obj_list[0]
-        else:
-            # Non-entry ranks: receive if group size > 1; otherwise materialize locally.
-            if group_world_size > 1:
-                obj_list = [None]
-                torch.distributed.broadcast_object_list(
-                    obj_list, src=0, group=self.cpu_group
+            except Exception as e:
+                logger.warning(
+                    f"Failed to broadcast mm_inputs metadata with {e}, falling back to local parsing."
                 )
-                image_inputs = obj_list[0]
-            else:
-                image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+                metadata_holder[0] = None
+
+        metadata = metadata_holder[0]
+
+        if not self.is_entry_rank:
+            valid_mm_items: List[Any] = []
+            if mm_items:
+                for item in mm_items:
+                    if item is None:
+                        continue
+                    try:
+                        if not item.is_valid():
+                            continue
+                    except AttributeError:
+                        pass
+                    valid_mm_items.append(item)
+
+            if metadata is not None and len(metadata) != len(valid_mm_items):
+                logger.warning(
+                    "Mismatch between received mm hash metadata and valid mm_items; recomputing locally."
+                )
+                metadata = None
+
+            if metadata is not None:
+                pad_mod = 1 << 30
+                for item, hash_val in zip(valid_mm_items, metadata):
+                    if hash_val is None:
+                        continue
+                    item.hash = hash_val
+                    item.pad_value = hash_val % pad_mod
+
+            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+        elif image_inputs is None:
+            # Single-rank world or metadata broadcast failed; fall back to local.
+            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
 
         return image_inputs
 
