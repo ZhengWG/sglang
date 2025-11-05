@@ -666,36 +666,34 @@ class ForwardBatch:
 
                         missing_count = extend_seq_len - existing_count
                         if missing_count > 0:
+                            missing_start = extend_prefix_len + existing_count
+                            offsets = torch.arange(
+                                missing_start,
+                                missing_start + missing_count,
+                                device=device,
+                                dtype=dtype,
+                            ).unsqueeze(0)
+
                             if available > 0:
-                                # Use the last available column as the base.
                                 base_index = min(
-                                    max(existing_start, available) - 1, available - 1
+                                    max(existing_end - 1, 0), available - 1
                                 )
-                                base_tensor = stored_positions[
-                                    :, base_index : base_index + 1
-                                ]
+                                row_delta = (
+                                    stored_positions[:, base_index : base_index + 1]
+                                    - base_index
+                                )
                             else:
-                                base_scalar = extend_prefix_len - 1
-                                base_tensor = torch.full(
-                                    (rows, 1),
-                                    base_scalar,
-                                    device=device,
-                                    dtype=dtype,
+                                row_delta = torch.zeros(
+                                    (rows, 1), device=device, dtype=dtype
                                 )
                                 delta = getattr(mm_input, "mrope_position_delta", None)
                                 if delta is not None:
                                     delta = delta.to(device=device, dtype=dtype)
                                     if delta.ndim == 1:
                                         delta = delta.unsqueeze(-1)
-                                    base_tensor = base_tensor + delta[:, :1]
+                                    row_delta = row_delta + delta[:, :1]
 
-                            offsets = torch.arange(
-                                1,
-                                missing_count + 1,
-                                device=device,
-                                dtype=dtype,
-                            ).unsqueeze(0)
-                            new_positions = base_tensor + offsets
+                            new_positions = row_delta + offsets
                             pieces.append(new_positions)
 
                         if pieces:
