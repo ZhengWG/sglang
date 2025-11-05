@@ -1167,89 +1167,162 @@ class Scheduler(
         if raw_mm_inputs is None:
             return None
 
-        # Only the entry rank needs to broadcast metadata; others receive to avoid
-        # redundant hashing. Large payloads (feature tensors) stay local and are
-        # moved via CUDA IPC later in the pipeline.
-        mm_items = None
-        if isinstance(raw_mm_inputs, dict):
-            mm_items = raw_mm_inputs.get("mm_items")
+        # Only the entry rank needs to broadcast light metadata so other ranks can
+        # reconstruct without re-running costly hashing. Large payloads remain
+        # local and travel via CUDA IPC when consumed by the worker.
+        mm_items = raw_mm_inputs.get("mm_items") if isinstance(raw_mm_inputs, dict) else None
 
-        group_world_size = 1
         cpu_group = getattr(self, "cpu_group", None)
-        if (
-            torch.distributed.is_available()
-            and torch.distributed.is_initialized()
+        use_broadcast = (
+            mm_items
             and cpu_group is not None
-        ):
-            try:
-                group_world_size = torch.distributed.get_world_size(group=cpu_group)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to fetch world size for mm metadata broadcast: %s",
-                    exc,
-                )
-                group_world_size = 1
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
 
-        num_items = len(mm_items) if isinstance(mm_items, list) else 0
+        if not use_broadcast:
+            return MultimodalInputs.from_dict(raw_mm_inputs)
 
-        if group_world_size > 1 and num_items > 0:
-            device = torch.device("cpu")
-
-            if self.is_entry_rank:
-                length_tensor = torch.tensor([num_items], dtype=torch.long, device=device)
-            else:
-                length_tensor = torch.empty(1, dtype=torch.long, device=device)
-
-            work = torch.distributed.broadcast(
-                length_tensor, src=0, group=cpu_group, async_op=True
+        try:
+            group_world_size = torch.distributed.get_world_size(group=cpu_group)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch world size for mm metadata broadcast: %s",
+                exc,
             )
-            work.wait()
-            broadcast_num_items = int(length_tensor.item())
+            return MultimodalInputs.from_dict(raw_mm_inputs)
 
-            if broadcast_num_items != num_items:
+        if group_world_size <= 1:
+            return MultimodalInputs.from_dict(raw_mm_inputs)
+
+        # Determine which items are valid once so every rank filters identically.
+        valid_indices: List[int] = []
+        for idx, item in enumerate(mm_items):
+            if item is None:
+                continue
+            try:
+                if not item.is_valid():
+                    continue
+            except AttributeError:
+                continue
+            valid_indices.append(idx)
+
+        optional_fields = [
+            "image_pad_len",
+            "num_image_tokens",
+            "mrope_positions",
+            "mrope_position_delta",
+            "im_token_id",
+            "im_start_id",
+            "im_end_id",
+            "video_token_id",
+            "slice_start_id",
+            "slice_end_id",
+            "audio_start_id",
+            "audio_end_id",
+            "audio_token_id",
+        ]
+
+        hashes: List[int] = []
+        pads: List[int] = []
+        image_inputs: Optional[MultimodalInputs] = None
+
+        if self.is_entry_rank:
+            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+            if len(image_inputs.mm_items) != len(valid_indices):
                 logger.warning(
-                    "Mismatch in multimodal item count (local=%d, broadcast=%d)."
-                    " Falling back to local parsing.",
-                    num_items,
-                    broadcast_num_items,
+                    "Mismatch between valid multimodal items and processed items; using local result only."
                 )
-                group_world_size = 1
-            else:
-                if self.is_entry_rank:
-                    flat_metadata: List[int] = []
-                    for item in mm_items:
-                        item_hash = getattr(item, "hash", None)
-                        item_pad = getattr(item, "pad_value", None)
-                        flat_metadata.extend(
-                            [item_hash if item_hash is not None else -1]
-                        )
-                        flat_metadata.extend(
-                            [item_pad if item_pad is not None else -1]
-                        )
-                    metadata_tensor = torch.tensor(
-                        flat_metadata, dtype=torch.long, device=device
-                    )
-                else:
-                    metadata_tensor = torch.empty(
-                        broadcast_num_items * 2, dtype=torch.long, device=device
-                    )
+                return image_inputs
+            hashes = [int(item.hash) if item.hash is not None else -1 for item in image_inputs.mm_items]
+            pads = [int(item.pad_value) if item.pad_value is not None else -1 for item in image_inputs.mm_items]
 
-                work = torch.distributed.broadcast(
-                    metadata_tensor, src=0, group=cpu_group, async_op=True
-                )
-                work.wait()
+        device = torch.device("cpu")
+        local_valid_len = len(valid_indices)
+        len_tensor = (
+            torch.tensor([local_valid_len], dtype=torch.long, device=device)
+            if self.is_entry_rank
+            else torch.empty(1, dtype=torch.long, device=device)
+        )
 
-                if not self.is_entry_rank:
-                    flat_metadata = metadata_tensor.tolist()
-                    for idx, item in enumerate(mm_items):
-                        hash_val = flat_metadata[2 * idx]
-                        pad_val = flat_metadata[2 * idx + 1]
-                        if hash_val != -1:
-                            item.hash = int(hash_val)
-                        if pad_val != -1:
-                            item.pad_value = int(pad_val)
+        try:
+            torch.distributed.broadcast(len_tensor, src=0, group=cpu_group)
+        except Exception as exc:
+            logger.warning(
+                "Failed to broadcast multimodal metadata length; falling back to local parsing: %s",
+                exc,
+            )
+            return image_inputs if image_inputs is not None else MultimodalInputs.from_dict(raw_mm_inputs)
 
-        return MultimodalInputs.from_dict(raw_mm_inputs)
+        remote_valid_len = int(len_tensor.item())
+
+        if self.is_entry_rank and remote_valid_len != local_valid_len:
+            logger.warning(
+                "Broadcasted multimodal length mismatch (local=%d, remote=%d); skipping dedup broadcast.",
+                local_valid_len,
+                remote_valid_len,
+            )
+            return image_inputs
+
+        if remote_valid_len == 0:
+            if self.is_entry_rank:
+                return image_inputs
+
+            empty_inputs = MultimodalInputs(mm_items=[])
+            for field in optional_fields:
+                if field in raw_mm_inputs:
+                    setattr(empty_inputs, field, raw_mm_inputs[field])
+            return empty_inputs
+
+        if self.is_entry_rank:
+            indices_tensor = torch.tensor(valid_indices, dtype=torch.long, device=device)
+            hash_tensor = torch.tensor(hashes, dtype=torch.long, device=device)
+            pad_tensor = torch.tensor(pads, dtype=torch.long, device=device)
+        else:
+            indices_tensor = torch.empty(remote_valid_len, dtype=torch.long, device=device)
+            hash_tensor = torch.empty(remote_valid_len, dtype=torch.long, device=device)
+            pad_tensor = torch.empty(remote_valid_len, dtype=torch.long, device=device)
+
+        try:
+            torch.distributed.broadcast(indices_tensor, src=0, group=cpu_group)
+            torch.distributed.broadcast(hash_tensor, src=0, group=cpu_group)
+            torch.distributed.broadcast(pad_tensor, src=0, group=cpu_group)
+        except Exception as exc:
+            logger.warning(
+                "Failed to broadcast multimodal metadata tensors; falling back to local parsing: %s",
+                exc,
+            )
+            return image_inputs if image_inputs is not None else MultimodalInputs.from_dict(raw_mm_inputs)
+
+        if self.is_entry_rank:
+            return image_inputs
+
+        indices = indices_tensor.tolist()
+        hashes = hash_tensor.tolist()
+        pads = pad_tensor.tolist()
+
+        processed_items = []
+        for idx, hash_val, pad_val in zip(indices, hashes, pads):
+            if idx < 0 or idx >= len(mm_items):
+                logger.warning("Received invalid multimodal item index %d; skipping.", idx)
+                continue
+            item = mm_items[idx]
+            if item is None:
+                continue
+            if hash_val != -1:
+                item.hash = int(hash_val)
+            if pad_val != -1:
+                item.pad_value = int(pad_val)
+            elif getattr(item, "hash", None) is not None:
+                item.pad_value = item.hash % (1 << 30)
+            processed_items.append(item)
+
+        image_inputs = MultimodalInputs(mm_items=processed_items)
+        for field in optional_fields:
+            if field in raw_mm_inputs:
+                setattr(image_inputs, field, raw_mm_inputs[field])
+
+        return image_inputs
 
     def handle_generate_request(
         self,
