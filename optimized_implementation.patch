@@ -1,0 +1,196 @@
+# 优化方案实现：在Tokenizer阶段完成MultimodalInputs构造
+# 避免重复计算，同时保持并发性能
+
+# 应用此patch:
+# git apply optimized_implementation.patch
+
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -23,6 +23,7 @@ from sglang.srt.managers.io_struct import (
+     UpdateWeightReqInput,
+ )
+ from sglang.srt.managers.mm_data_processor import MMDataProcessor
++from sglang.srt.managers.schedule_batch import MultimodalInputs
+ from sglang.srt.model_config import ModelConfig
+ from sglang.srt.sampling.sampling_params import SamplingParams
+ from sglang.srt.server_args import PortArgs, ServerArgs
+@@ -618,7 +619,13 @@ class TokenizerManager:
+             if obj.image_data is not None and not isinstance(obj.image_data, list):
+                 obj.image_data = [obj.image_data]
+             if obj.audio_data is not None and not isinstance(obj.audio_data, list):
+                 obj.audio_data = [obj.audio_data]
+-            mm_inputs: Dict = await self.mm_data_processor.process(
++            mm_inputs_dict: Dict = await self.mm_data_processor.process(
+                 image_data=obj.image_data,
+                 audio_data=obj.audio_data,
+                 input_text_or_ids=(input_text or input_ids),
+                 request_obj=obj,
+                 max_req_input_len=self.max_req_input_len,
+             )
+-            if mm_inputs and "input_ids" in mm_inputs:
+-                input_ids = mm_inputs["input_ids"]
++            
++            # Optimization: construct MultimodalInputs object here (with hash computation)
++            # instead of passing dict and let every scheduler rank repeat the computation.
++            # This is especially beneficial for large tensors (high-res images, long videos).
++            if mm_inputs_dict:
++                if "input_ids" in mm_inputs_dict:
++                    input_ids = mm_inputs_dict["input_ids"]
++                # Construct the object once here, so hash computation happens only once
++                mm_inputs = MultimodalInputs.from_dict(mm_inputs_dict)
++            else:
++                mm_inputs = None
+         else:
+             mm_inputs = None
+
+--- a/python/sglang/srt/managers/io_struct.py
++++ b/python/sglang/srt/managers/io_struct.py
+@@ -14,6 +14,7 @@ from dataclasses import dataclass
+ from enum import Enum, auto
+ from typing import Dict, List, Optional, Union
+ 
++# Import will be added at runtime to avoid circular dependency
+ from sglang.srt.sampling.sampling_params import SamplingParams
+ from sglang.srt.trace.trace import trace_set_curr_context
+ 
+@@ -581,10 +582,13 @@ class BaseReq:
+ 
+ @dataclass
+ class TokenizedGenerateReqInput(BaseReq):
+     # The input text
+     input_text: str
+     # The input token ids
+     input_ids: List[int]
+-    # The multimodal inputs
+-    mm_inputs: dict
++    # The multimodal inputs (changed from dict to MultimodalInputs object)
++    # Using TYPE_CHECKING to avoid circular import
++    from typing import TYPE_CHECKING
++    if TYPE_CHECKING:
++        from sglang.srt.managers.schedule_batch import MultimodalInputs
++    mm_inputs: Optional['MultimodalInputs']
+     # The sampling parameters
+     sampling_params: SamplingParams
+     # Whether to return the logprobs
+
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -29,7 +29,6 @@ from typing import Deque, Dict, List, Optional, Tuple, Union
+ import psutil
+ import setproctitle
+ import torch
+-import torch.distributed
+ import zmq
+ from torch.cuda import Stream as CudaStream
+ from torch.cuda import StreamContext as CudaStreamContext
+@@ -378,17 +377,6 @@ class Scheduler(
+         self.pp_group = get_pp_group()
+         self.world_group = get_world_group()
+ 
+-        # With DP attention enabled, the entry rank is attn_tp_rank==0;
+-        # otherwise the entry rank is TP group local rank 0.
+-        # For #11910, use the CPU communication group to broadcast VLM Python objects,
+-        # avoiding any coupling with CUDA streams/devices.
+-        if self.server_args.enable_dp_attention:
+-            self.cpu_group = self.attn_tp_cpu_group
+-            self.is_entry_rank = self.attn_tp_rank == 0
+-        else:
+-            self.cpu_group = self.tp_cpu_group
+-            self.is_entry_rank = self.tp_group.rank == 0
+-
+         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
+         set_random_seed(self.random_seed)
+ 
+@@ -1145,70 +1133,6 @@ class Scheduler(
+             self.max_req_len - len(req.origin_input_ids) - 1,
+         )
+ 
+-    def _process_and_broadcast_mm_inputs(
+-        self,
+-        raw_mm_inputs: Optional[dict],
+-    ):
+-        """Materialize MultimodalInputs once on the entry rank and broadcast to others.
+-
+-        Entry rank:
+-        - constructs MultimodalInputs.from_dict(raw_mm_inputs) once
+-        - broadcasts to other ranks in self.cpu_group (if world_size > 1)
+-
+-        Non-entry ranks:
+-        - receive the object via broadcast (if world_size > 1)
+-        - otherwise (single-rank / no group) fall back to local from_dict
+-
+-        Returns:
+-            MultimodalInputs | None
+-        """
+-        if raw_mm_inputs is None:
+-            return None
+-
+-        group_world_size = 1
+-        try:
+-            if (
+-                torch.distributed.is_available()
+-                and torch.distributed.is_initialized()
+-                and self.cpu_group is not None
+-            ):
+-                group_world_size = torch.distributed.get_world_size(
+-                    group=self.cpu_group
+-                )
+-        except Exception as e:
+-            logger.warning(
+-                f"Failed to get world size in mm_inputs handling with {e}, fallback to 1."
+-            )
+-
+-        # In case tp size > 1, all the Scheduler TP ranks runs the duplicated computing
+-        # process in CPU which occupies the main thread CPU cycle. This computing logic
+-        # merely needs to be run on TP0 and be broadcast to other TP ranks.
+-        # Since the Scheduler is single-threaded, any large CPU cost will impact
+-        # handling of other messages. For example, CPU hits 99.9% can significantly
+-        # increase the CUDA kernel launch time.
+-        if self.is_entry_rank:
+-            # Only the entry rank materializes once from dict.
+-            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+-            # Broadcast to other TP ranks (use src=0 within the group).
+-            if group_world_size > 1:
+-                obj_list = [image_inputs]
+-                torch.distributed.broadcast_object_list(
+-                    obj_list, src=0, group=self.cpu_group
+-                )
+-                image_inputs = obj_list[0]
+-        else:
+-            # Non-entry ranks: receive if group size > 1; otherwise materialize locally.
+-            if group_world_size > 1:
+-                obj_list = [None]
+-                torch.distributed.broadcast_object_list(
+-                    obj_list, src=0, group=self.cpu_group
+-                )
+-                image_inputs = obj_list[0]
+-            else:
+-                image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+-
+-        return image_inputs
+-
+     def handle_generate_request(
+         self,
+         recv_req: TokenizedGenerateReqInput,
+@@ -1290,9 +1214,9 @@ class Scheduler(
+ 
+         # Handle multimodal inputs
++        # Now mm_inputs is already a MultimodalInputs object (constructed in tokenizer),
++        # no need to call from_dict again. This avoids repeated hash computation.
+         if recv_req.mm_inputs is not None:
+-            image_inputs = self._process_and_broadcast_mm_inputs(recv_req.mm_inputs)
+-
+-            # The following steps are already fast, execute locally on each rank.
++            image_inputs = recv_req.mm_inputs
+             # Expand a single image token into multiple dummy tokens for receiving image embeddings
+             req.origin_input_ids = self.pad_input_ids_func(
+                 req.origin_input_ids, image_inputs
+@@ -1522,7 +1446,7 @@ class Scheduler(
+ 
+         # Handle multimodal inputs
+         if recv_req.image_inputs is not None:
+-            image_inputs = self._process_and_broadcast_mm_inputs(recv_req.image_inputs)
++            image_inputs = recv_req.image_inputs
+             # Expand a single image token into multiple dummy tokens for receiving image embeddings
+             req.origin_input_ids = self.pad_input_ids_func(
+                 req.origin_input_ids, image_inputs
