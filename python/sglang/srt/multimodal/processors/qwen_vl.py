@@ -4,7 +4,6 @@ import os
 import re
 import time
 from typing import List, Union
-import numpy as np
 
 import numpy as np
 import torch

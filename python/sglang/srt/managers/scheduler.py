@@ -2614,7 +2614,7 @@ class Scheduler(
                 # Abort method 3: set `to_finish`
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
-                logger.info(f"Abort running request. {req.rid=}, {req.first_scheduled_time=}")
+                logger.info(f"Abort running request. {req.rid=}, queue_time={req.time_stats.get_queueing_time()}")
                 req.to_finish = FINISH_ABORT()
 
     def _pause_engine(self) -> Tuple[List[Req], int]:

@@ -974,8 +974,6 @@ class BatchTokenIDOutput(
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
 
-    # perf stats
-    first_scheduled_times: List[float] = None
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
@@ -1057,8 +1055,6 @@ class BatchStrOutput(
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
 
-    # perf stats
-    first_scheduled_times: List[float] = None
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 

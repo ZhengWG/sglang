@@ -678,10 +678,6 @@ class Req:
         self.dimensions = dimensions
 
     @property
-    def first_scheduled_time(self):
-        return self.time_stats.get_queueing_time()
-
-    @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
@@ -958,7 +954,7 @@ class Req:
         num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
         if num_new_tokens <= 0:
             return
-        
+
         reqTimeStats = self.time_stats
         log_time = time.time()
         for _ in range(num_new_tokens):
@@ -977,7 +973,7 @@ class Req:
         self.time_stats.tokens_iter_batch_size.append(0)
         self.time_stats.tokens_iter_total_token.append(0)
         self.time_stats.tokens_iter_waiting_size.append(self.time_stats.wait_queue_size)
-    
+
     def log_disaggregation_prefill_first_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0):
         num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
         if num_new_tokens <= 0 or self.time_stats.prefill_bootstrap_queue_entry_time <= 0.0:
@@ -1185,10 +1181,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def is_empty(self):
         return len(self.reqs) == 0
-    
+
     def mark_end_time(self):
         self.end_time = time.time()
-    
+
     def mark_start_time(self):
         self.create_time = time.time()
 

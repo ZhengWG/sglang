@@ -281,7 +281,6 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             forward_entry_time=recv_obj.forward_entry_time,
             prefill_delay=recv_obj.prefill_delay,
             prefill_latency=recv_obj.prefill_latency,
-            first_scheduled_times=recv_obj.first_scheduled_times,
             req_metrics=recv_obj.req_metrics,
         )
 

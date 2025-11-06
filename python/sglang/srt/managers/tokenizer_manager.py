@@ -1567,9 +1567,6 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     if state.first_token_time > 0.0 else time.time()
                 meta_info["ttft_latency"] = first_token_time - state.created_time
 
-                if getattr(recv_obj, "first_scheduled_times", None):
-                    meta_info["queue_latency"] = recv_obj.first_scheduled_times[i]
-
                 if getattr(recv_obj, "req_metrics", None):
                     state.scheduler_req_metric = recv_obj.req_metrics.get(rid, None)
 

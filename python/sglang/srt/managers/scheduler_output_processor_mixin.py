@@ -756,8 +756,6 @@ class SchedulerOutputProcessorMixin:
         http_worker_ipcs = []
         finished_reasons: List[BaseFinishReason] = []
 
-        first_scheduled_times = []
-
         req_metrics: dict[str, ReqMetric] = {}
 
         decoded_texts = []
@@ -856,7 +854,6 @@ class SchedulerOutputProcessorMixin:
                 finished_reasons.append(
                     req.finished_reason.to_json() if req.finished_reason else None
                 )
-                first_scheduled_times.append(req.first_scheduled_time)
                 decoded_texts.append(req.decoded_text)
                 decode_ids, read_offset = req.init_incremental_detokenize()
 
@@ -1061,7 +1058,6 @@ class SchedulerOutputProcessorMixin:
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
                     retraction_counts=retraction_counts,
-                    first_scheduled_times=first_scheduled_times,
                     req_metrics=req_metrics,
                 )
             )

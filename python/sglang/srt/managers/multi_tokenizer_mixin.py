@@ -225,11 +225,6 @@ def _handle_output_by_index(output, i):
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
             token_steps=([output.token_steps[i]] if output.token_steps else None),
-            first_scheduled_times=(
-                [output.first_scheduled_times[i]]
-                if len(output.first_scheduled_times) > i
-                else None
-            ),
             req_metrics={output.rids[i]: output.req_metrics[output.rids[i]]}
                 if output.req_metrics and output.rids[i] in output.req_metrics
                 else {},
@@ -367,11 +362,6 @@ def _handle_output_by_index(output, i):
             output_hidden_states=(
                 [output.output_hidden_states[i]]
                 if output.output_hidden_states
-                else None
-            ),
-            first_scheduled_times=(
-                [output.first_scheduled_times[i]]
-                if len(output.first_scheduled_times) > i
                 else None
             ),
             placeholder_tokens_idx=None,
