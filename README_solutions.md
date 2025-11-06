@@ -13,38 +13,36 @@ Commit 17a57fd86 引入的优化在高并发下导致QPS降低，主要原因：
 
 ### 🎯 方案2：延迟物化（推荐优先实施）
 
-**核心改进**：只广播原始dict，各rank独立执行 `from_dict`
+**核心发现**：各rank已经通过 `recv_requests()` 的 `broadcast_pyobj` 收到了 `raw_mm_inputs`（dict），**无需再次broadcast**！
+
+**核心改进**：移除broadcast逻辑，各rank直接使用已收到的dict执行 `from_dict`
 
 **关键代码修改**：
 ```python
-# 修改前：物化后广播
+# 修改前（commit 17a57fd86）：物化后broadcast
 if self.is_entry_rank:
     image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)  # 物化
-    obj_list = [image_inputs]  # 序列化物化对象（大）
-    torch.distributed.broadcast_object_list(...)
+    obj_list = [image_inputs]  # 序列化物化对象（大，数百毫秒）
+    torch.distributed.broadcast_object_list(...)  # 同步阻塞
+else:
+    obj_list = [None]
+    torch.distributed.broadcast_object_list(...)  # 等待接收
+    image_inputs = obj_list[0]
 
-# 修改后：只广播dict
-if group_world_size > 1:
-    if self.is_entry_rank:
-        obj_list = [raw_mm_inputs]  # 只广播dict（小）
-        torch.distributed.broadcast_object_list(...)
-    else:
-        obj_list = [None]
-        torch.distributed.broadcast_object_list(...)  # 接收dict
-        raw_mm_inputs = obj_list[0]
-
-# 所有ranks并行执行from_dict
-image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+# 修改后：直接使用已收到的dict
+# 各rank已经通过 recv_requests() -> broadcast_pyobj() 收到了 raw_mm_inputs
+image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)  # 并行执行，无阻塞
 ```
 
 **优点**：
-- ✅ 实现简单，修改量小（~20行代码）
-- ✅ 序列化开销从数百毫秒降低到几十毫秒
-- ✅ 高并发下QPS显著提升
+- ✅ **实现最简单**：只需移除broadcast逻辑（~5行代码）
+- ✅ **完全无阻塞**：没有同步broadcast操作
+- ✅ **并行执行**：各rank并行执行from_dict，充分利用CPU
+- ✅ **零序列化开销**：完全避免了序列化大型对象
 
 **预期效果**：
-- 序列化时间：500ms → 50ms（10倍提升）
-- 高并发QPS：提升2-3倍
+- 阻塞时间：500ms → 0ms（完全消除）
+- 高并发QPS：提升3-5倍
 
 ---
 
@@ -132,28 +130,23 @@ image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
 
 ```python
 def _process_and_broadcast_mm_inputs(self, raw_mm_inputs: Optional[dict]):
+    """各rank独立物化，无需broadcast（因为recv_requests已经broadcast了dict）"""
     if raw_mm_inputs is None:
         return None
     
-    # ... 获取group_world_size ...
-    
-    # 只广播原始dict
-    if group_world_size > 1:
-        if self.is_entry_rank:
-            obj_list = [raw_mm_inputs]
-            torch.distributed.broadcast_object_list(
-                obj_list, src=0, group=self.cpu_group
-            )
-            raw_mm_inputs = obj_list[0]
-        else:
-            obj_list = [None]
-            torch.distributed.broadcast_object_list(
-                obj_list, src=0, group=self.cpu_group
-            )
-            raw_mm_inputs = obj_list[0]
-    
-    # 所有ranks并行执行from_dict
+    # 直接执行from_dict，无需broadcast
+    # 因为 recv_requests() 中的 broadcast_pyobj 已经将 recv_req.mm_inputs (dict)
+    # 广播到所有ranks了
     return MultimodalInputs.from_dict(raw_mm_inputs)
+```
+
+**或者更简单**：直接在 `handle_generate_request` 中内联：
+
+```python
+# Handle multimodal inputs
+if recv_req.mm_inputs is not None:
+    # 直接使用已收到的dict，各rank并行执行from_dict
+    image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
 ```
 
 详细实现请参考 `code_implementation.md`。

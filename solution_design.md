@@ -259,86 +259,82 @@ def handle_generate_request(self, recv_req: TokenizedGenerateReqInput):
 
 ---
 
-## 方案2：延迟物化 - 只广播原始dict，各rank独立物化
+## 方案2：延迟物化 - 各rank独立物化（无需broadcast）
 
 ### 2.1 设计思路
 
-**核心思想**：避免序列化已物化的对象，只广播原始的dict数据，让各rank独立执行 `from_dict`。
+**核心发现**：在 `recv_requests()` 中，各个rank已经通过 `broadcast_pyobj` 接收到了 `raw_mm_inputs`（dict），所以**不需要再次broadcast**！
 
 **关键改进**：
-- Entry rank：只广播 `raw_mm_inputs`（dict），不执行 `from_dict`
-- Non-entry ranks：接收dict后，本地执行 `from_dict`
-- 这样避免了序列化大型numpy数组/PIL.Image的开销
+- 移除 `_process_and_broadcast_mm_inputs` 中的broadcast逻辑
+- 各rank直接使用已收到的 `raw_mm_inputs` 执行 `from_dict`
+- 完全避免序列化大型numpy数组/PIL.Image的开销
+- 各rank并行执行 `from_dict`，充分利用CPU资源
 
 ### 2.2 实现架构
 
+**关键发现**：`recv_requests()` 中的 `broadcast_pyobj` 已经将 `recv_req`（包含 `mm_inputs` dict）广播到所有ranks了！
+
 ```
-Entry Rank                          Non-entry Ranks
-──────────                          ───────────────
-raw_mm_inputs (dict)                
-  ↓                                 
-broadcast dict (小体积) ───────────→ 接收 dict
-  ↓                                 ↓
-本地 from_dict()                    本地 from_dict()
-  ↓                                 ↓
-MultimodalInputs                    MultimodalInputs
+recv_requests() 流程：
+─────────────────────
+Rank 0: ZMQ接收 recv_req (包含 raw_mm_inputs dict)
+  ↓
+broadcast_pyobj() ──────────→ Rank 1, 2, 3... 都收到 recv_req (包含 raw_mm_inputs dict)
+  ↓
+所有ranks都有 raw_mm_inputs (dict)
+
+handle_generate_request() 流程（修改后）：
+─────────────────────────────────────────
+所有ranks：
+  raw_mm_inputs (dict) ← 已经通过 broadcast_pyobj 收到
+  ↓
+  直接执行 from_dict() ← 并行执行，无需broadcast
+  ↓
+  MultimodalInputs
 ```
 
 **优势**：
-- 广播的是原始dict（base64字符串），体积小，序列化快
+- **无需broadcast**：各rank已经通过 `broadcast_pyobj` 收到了dict
 - 各rank并行执行 `from_dict`，充分利用CPU
-- 避免了序列化大型numpy数组的开销
+- 完全避免了序列化大型numpy数组的开销
+- 实现最简单：只需要移除broadcast逻辑
 
 ### 2.3 代码实现
 
 #### 2.3.1 修改 `_process_and_broadcast_mm_inputs`
+
+**关键发现**：各rank已经通过 `recv_requests()` 中的 `broadcast_pyobj` 收到了 `raw_mm_inputs`，所以**完全不需要broadcast**！
 
 ```python
 def _process_and_broadcast_mm_inputs(
     self,
     raw_mm_inputs: Optional[dict],
 ):
-    """只广播原始dict，各rank独立物化"""
+    """各rank独立物化，无需broadcast（因为recv_requests已经broadcast了dict）"""
     if raw_mm_inputs is None:
         return None
 
-    group_world_size = 1
-    try:
-        if (
-            torch.distributed.is_available()
-            and torch.distributed.is_initialized()
-            and self.cpu_group is not None
-        ):
-            group_world_size = torch.distributed.get_world_size(
-                group=self.cpu_group
-            )
-    except Exception as e:
-        logger.warning(
-            f"Failed to get world size in mm_inputs handling with {e}, fallback to 1."
-        )
-
-    # 关键改进：只广播原始dict，不物化
-    if group_world_size > 1:
-        if self.is_entry_rank:
-            # Entry rank: 广播原始dict
-            obj_list = [raw_mm_inputs]
-            torch.distributed.broadcast_object_list(
-                obj_list, src=0, group=self.cpu_group
-            )
-            # Entry rank也使用广播后的dict（保持一致）
-            raw_mm_inputs = obj_list[0]
-        else:
-            # Non-entry ranks: 接收dict
-            obj_list = [None]
-            torch.distributed.broadcast_object_list(
-                obj_list, src=0, group=self.cpu_group
-            )
-            raw_mm_inputs = obj_list[0]
-    
-    # 所有ranks独立执行from_dict（并行）
+    # 关键改进：直接执行from_dict，无需broadcast
+    # 因为 recv_requests() 中的 broadcast_pyobj 已经将 recv_req.mm_inputs (dict)
+    # 广播到所有ranks了，所以各rank都有 raw_mm_inputs
     image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
     
     return image_inputs
+```
+
+**或者更简单**：直接内联，移除这个方法：
+
+```python
+def handle_generate_request(self, recv_req: TokenizedGenerateReqInput):
+    # ... 前面的代码 ...
+    
+    # Handle multimodal inputs
+    if recv_req.mm_inputs is not None:
+        # 直接使用已收到的dict，各rank并行执行from_dict
+        image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
+        
+        # ... 后续处理 ...
 ```
 
 #### 2.3.2 进一步优化：条件物化
