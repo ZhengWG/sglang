@@ -259,7 +259,7 @@ async def preprocess_video(
         "height": resized_height,
     }
     torchvision_resize_time = time.perf_counter()
-    logger.debug(
+    logger.info(
         f"[preprocess_video Perf], "
         f"get_batch_time: {(get_batch_time - entry_time) * 1000:.2f} ms, "
         f"smart_resize_time: {(smart_resize_time - get_batch_time) * 1000:.2f} ms, "
@@ -434,7 +434,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         )
         mrope_positions = mrope_positions.squeeze(1)
         get_rope_index_time = time.perf_counter()
-        logger.debug(
+        logger.info(
             f"[QwenVLProcessor Perf] {rid=}, "
             f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
             f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "

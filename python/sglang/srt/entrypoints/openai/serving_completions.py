@@ -369,8 +369,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     metadata={
                         "weight_version": content["meta_info"]["weight_version"],
                         "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
-                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
-                        "queue_time": content["meta_info"].get("queue_time", 0.0) * 1000,
+                        "ttft_latency": content["meta_info"].get("prefill_latency", 0.0) * 1000,
+                        "queue_latency": content["meta_info"].get("queue_time", 0.0) * 1000,
                     },
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(exclude_none=True)
@@ -486,8 +486,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
             metadata={
                 "weight_version": ret[0]["meta_info"]["weight_version"],
                 "e2e_latency": ret[0]["meta_info"]["e2e_latency"] * 1000,
-                "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
-                "queue_time": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
+                "ttft_latency": ret[0]["meta_info"].get("prefill_latency", 0.0) * 1000,
+                "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
             },
         )
 
