@@ -47,6 +47,8 @@ class TimeStats:
     # TODO: correct set them
     bootstrap_duration: float = 0.0
     alloc_waiting_duration: float = 0.0
+    prefill_start_time: float = 0.0
+    prefill_end_time: float = 0.0
 
     arrive_time_ts: float = 0.0
     arrive_time: float = 0.0

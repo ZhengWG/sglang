@@ -6,6 +6,7 @@ import time
 from typing import List, Union
 import numpy as np
 
+import numpy as np
 import torch
 import torchvision
 from PIL import Image
@@ -183,6 +184,7 @@ async def preprocess_video(
     mm_sampling_kwargs: dict = {},
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
+    entry_time = time.perf_counter()
     ele = {}
     if mm_sampling_kwargs:
         ele.update(mm_sampling_kwargs)
@@ -199,8 +201,10 @@ async def preprocess_video(
             default_fps_min_frames=default_fps_min_frames,
             default_fps_max_frames=default_fps_max_frames,
         )
-        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-        video = vr.get_batch(idx).asnumpy()
+        idx = np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)
+        idx = np.unique(idx)
+        video_np = vr.get_batch(idx).asnumpy()
+        video = torch.from_numpy(video_np).pin_memory()
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
     min_pixels = ele.get("min_pixels", video_min_pixels)
@@ -209,6 +213,9 @@ async def preprocess_video(
         min(video_max_pixels, total_pixels / nframes * FRAME_FACTOR),
         int(min_pixels * 1.05),
     )
+
+    get_batch_time = time.perf_counter()
+
     max_pixels_supposed = ele.get("max_pixels", max_pixels)
     if max_pixels_supposed > max_pixels:
         logger.warning(
@@ -231,18 +238,18 @@ async def preprocess_video(
             min_pixels=min_pixels,
             max_pixels=max_pixels,
         )
+    smart_resize_time = time.perf_counter()
     video = torchvision.transforms.functional.resize(
         video,
         [resized_height, resized_width],
-        interpolation=InterpolationMode.BICUBIC,
-        antialias=True,
-    ).float()
+        interpolation=InterpolationMode.BILINEAR,
+    )
+    video = video.pin_memory()
 
     if total_frames is None and video_fps is None and idx is None:
         total_frames = nframes
         video_fps = ele.get("fps", default_fps)
         idx = list(range(nframes))
-
     video_metadata = {
         "fps": video_fps,
         "duration": total_frames / video_fps,
@@ -252,6 +259,14 @@ async def preprocess_video(
         "width": resized_width,
         "height": resized_height,
     }
+    torchvision_resize_time = time.perf_counter()
+    logger.debug(
+        f"[preprocess_video Perf], "
+        f"get_batch_time: {(get_batch_time - entry_time) * 1000:.2f} ms, "
+        f"smart_resize_time: {(smart_resize_time - get_batch_time) * 1000:.2f} ms, "
+        f"torchvision_resize_time: {(torchvision_resize_time - smart_resize_time) * 1000:.2f} ms, "
+        f"total_time: {(torchvision_resize_time - entry_time) * 1000:.2f} ms"
+    )
     return video, video_metadata
 
 
@@ -333,7 +348,6 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             multimodal_tokens=self.mm_tokens,
         )
         load_time = time.perf_counter()
-
         rid = getattr(request_obj, "rid", "anonymous_rid")
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
@@ -395,13 +409,6 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         )
 
         process_time = time.perf_counter()
-        logger.info(
-            f"[QwenVLProcessor Perf] {rid=}, "
-            f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
-            f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
-            f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
-            f"total_time: {(process_time - entry_time) * 1000:.2f} ms"
-        )
 
         input_ids = input_ids.flatten()
 
@@ -427,6 +434,15 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             ),
         )
         mrope_positions = mrope_positions.squeeze(1)
+        get_rope_index_time = time.perf_counter()
+        logger.debug(
+            f"[QwenVLProcessor Perf] {rid=}, "
+            f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
+            f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
+            f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
+            f"get_rope_index_time: {(get_rope_index_time - process_time) * 1000:.2f} ms, "
+            f"total_time: {(get_rope_index_time - entry_time) * 1000:.2f} ms"
+        )
 
         return {
             "input_ids": input_ids.tolist(),
