@@ -4,3 +4,10 @@ from sglang.srt.disaggregation.mooncake.conn import (
     MooncakeKVReceiver,
     MooncakeKVSender,
 )
+from sglang.srt.disaggregation.mooncake.conn_mm import (
+    EmbeddingTransferError,
+    MooncakeEmbeddingBootstrapServer,
+    MooncakeEmbeddingManager,
+    MooncakeEmbeddingReceiver,
+    MooncakeEmbeddingSender,
+)

@@ -230,7 +230,14 @@ class MultimodalDataBuffers:
 - `aux_datas`: auxiliary metadata such as `embedding_length` and `mrope_position_delta`.
 - `deepstack_embeddings`: optional Deepstack embeddings for Qwen3-VL models.
 
-### 2. Resume Transfer
+### 2. Dedicated Multimodal Connection Module
+
+- File: `python/sglang/srt/disaggregation/mooncake/conn_mm.py`
+- Purpose: isolates multimodal transfer logic (bootstrapping, status tracking, resume handling) from the general KV connection implementation.
+- Rationale: keeps `conn.py` focused on language KV cache semantics while the encoder/language embedding bridge remains lightweight and CPU-friendly, matching the new design direction.
+- Bonus: future integrations (e.g., Mooncake Store retrieval) can plug in at the module boundary without perturbing KV code paths.
+
+### 3. Resume Transfer
 
 #### Motivation
 
