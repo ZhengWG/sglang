@@ -9,40 +9,60 @@ Commit 17a57fd86 引入的优化在高并发下导致QPS降低，主要原因：
 3. **串行化瓶颈**：Entry rank串行处理，非entry ranks大量时间在等待
 4. **单线程阻塞**：Scheduler是单线程，广播阻塞主线程，影响其他消息处理
 
-## 解决方案
+## 重新理解：平衡方案
 
-### 🎯 方案2：延迟物化（推荐优先实施）
+### 问题重新分析
 
-**核心发现**：各rank已经通过 `recv_requests()` 的 `broadcast_pyobj` 收到了 `raw_mm_inputs`（dict），**无需再次broadcast**！
+**PR的优化目标（需要保留）**：
+- 减少重复计算：`from_dict` 包含解码base64、size检查、normalization等，CPU开销大
+- 降低CPU占用：对于2MB视频文件，from_dict需要~500ms CPU时间
+- 避免CPU-overload：在TP8场景下，如果所有ranks都执行from_dict，CPU占用会很高
 
-**核心改进**：移除broadcast逻辑，各rank直接使用已收到的dict执行 `from_dict`
+**PR引入的问题**：
+- 序列化开销巨大：broadcast物化后的对象需要数百毫秒
+- 同步阻塞：broadcast_object_list是同步的，阻塞主线程
+- 高并发QPS下降：阻塞导致吞吐量下降
+
+### 🎯 平衡方案：条件优化 + 异步通信（推荐）
+
+**核心思路**：
+1. **小文件**：各rank并行执行from_dict（避免broadcast开销）
+2. **大文件**：只在entry rank执行from_dict，异步broadcast dict（保留PR优化，避免重复计算）
+3. **使用异步通信**：避免阻塞主线程
 
 **关键代码修改**：
 ```python
-# 修改前（commit 17a57fd86）：物化后broadcast
-if self.is_entry_rank:
-    image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)  # 物化
-    obj_list = [image_inputs]  # 序列化物化对象（大，数百毫秒）
-    torch.distributed.broadcast_object_list(...)  # 同步阻塞
-else:
-    obj_list = [None]
-    torch.distributed.broadcast_object_list(...)  # 等待接收
-    image_inputs = obj_list[0]
-
-# 修改后：直接使用已收到的dict
-# 各rank已经通过 recv_requests() -> broadcast_pyobj() 收到了 raw_mm_inputs
-image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)  # 并行执行，无阻塞
+def _process_and_broadcast_mm_inputs(self, raw_mm_inputs: Optional[dict], req_id: Optional[str] = None):
+    if raw_mm_inputs is None:
+        return None
+    
+    # 估算数据大小
+    estimated_size = self._estimate_mm_inputs_size(raw_mm_inputs)
+    size_threshold = 1 * 1024 * 1024  # 1MB阈值
+    
+    if estimated_size <= size_threshold:
+        # 小文件：各rank并行from_dict（避免broadcast开销）
+        return MultimodalInputs.from_dict(raw_mm_inputs)
+    else:
+        # 大文件：entry rank from_dict + 异步broadcast dict（保留PR优化）
+        if use_async and req_id:
+            return self._async_process_large_mm_inputs(raw_mm_inputs, req_id)
+        else:
+            return self._sync_process_large_mm_inputs(raw_mm_inputs)
 ```
 
 **优点**：
-- ✅ **实现最简单**：只需移除broadcast逻辑（~5行代码）
-- ✅ **完全无阻塞**：没有同步broadcast操作
-- ✅ **并行执行**：各rank并行执行from_dict，充分利用CPU
-- ✅ **零序列化开销**：完全避免了序列化大型对象
+- ✅ **保留PR优化**：大文件时避免重复计算，降低CPU占用
+- ✅ **解决QPS问题**：使用异步通信，避免阻塞主线程
+- ✅ **智能选择**：根据数据大小自动选择最优策略
+- ✅ **向后兼容**：可以配置阈值和是否使用异步
 
 **预期效果**：
-- 阻塞时间：500ms → 0ms（完全消除）
+- CPU占用：大文件时降低（只entry rank计算）
+- 阻塞时间：大文件时从500ms → 0ms（异步）
 - 高并发QPS：提升3-5倍
+
+详细实现请参考 `balanced_solution.md`。
 
 ---
 
@@ -124,29 +144,40 @@ image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)  # 并行执行，无�
 
 ## 快速开始
 
-### 最小修改（方案2）
+### 快速实施（平衡方案）
 
-修改 `python/sglang/srt/managers/scheduler.py` 中的 `_process_and_broadcast_mm_inputs` 方法：
+**阶段1：条件优化（同步版本）**
+
+修改 `python/sglang/srt/managers/scheduler.py`：
 
 ```python
 def _process_and_broadcast_mm_inputs(self, raw_mm_inputs: Optional[dict]):
-    """各rank独立物化，无需broadcast（因为recv_requests已经broadcast了dict）"""
     if raw_mm_inputs is None:
         return None
     
-    # 直接执行from_dict，无需broadcast
-    # 因为 recv_requests() 中的 broadcast_pyobj 已经将 recv_req.mm_inputs (dict)
-    # 广播到所有ranks了
-    return MultimodalInputs.from_dict(raw_mm_inputs)
+    # 估算数据大小
+    estimated_size = self._estimate_mm_inputs_size(raw_mm_inputs)
+    size_threshold = 1 * 1024 * 1024  # 1MB
+    
+    group_world_size = 1
+    # ... 获取group_world_size ...
+    
+    if estimated_size <= size_threshold or group_world_size == 1:
+        # 小文件：各rank并行from_dict
+        return MultimodalInputs.from_dict(raw_mm_inputs)
+    else:
+        # 大文件：entry rank from_dict + broadcast dict（保留PR优化）
+        if self.is_entry_rank:
+            image_inputs = MultimodalInputs.from_dict(raw_mm_inputs)
+            obj_list = [raw_mm_inputs]  # broadcast dict（小体积）
+            torch.distributed.broadcast_object_list(...)
+            return image_inputs
+        else:
+            obj_list = [None]
+            torch.distributed.broadcast_object_list(...)  # 接收dict
+            return MultimodalInputs.from_dict(obj_list[0])
 ```
 
-**或者更简单**：直接在 `handle_generate_request` 中内联：
+**阶段2：添加异步支持**（可选，进一步优化）
 
-```python
-# Handle multimodal inputs
-if recv_req.mm_inputs is not None:
-    # 直接使用已收到的dict，各rank并行执行from_dict
-    image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
-```
-
-详细实现请参考 `code_implementation.md`。
+详细实现请参考 `balanced_solution.md`。
