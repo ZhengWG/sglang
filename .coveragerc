@@ -1,0 +1,34 @@
+[run]
+# Track the installed sglang package (this is what actually gets imported during tests)
+# Use wildcard pattern to match the installed location
+source =
+    /home/jenkins/agent/aci/codeWorkspace/SGLang/python/
+    /home/local/workspace/SGLang/python/
+    */site-packages/sglang/
+    */dist-packages/sglang/
+
+patch = subprocess
+parallel = True
+concurrency = multiprocessing
+data_suffix = True
+branch = True
+
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */build/*
+    */dist/*
+    */sglang.egg-info/*
+    */third_party/*
+    */examples/*
+    */benchmarks/*
+    */docs/*
+
+[report]
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

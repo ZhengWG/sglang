@@ -1432,7 +1432,9 @@ class Scheduler(
             trace_slice_end(RequestStage.REQUEST_PROCESS, req.rid, auto_next_anon=True)
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
-            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(self.disagg_prefill_bootstrap_queue.queue)
+            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(
+                self.disagg_prefill_bootstrap_queue.queue
+            )
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
             )
@@ -1440,7 +1442,9 @@ class Scheduler(
             req.time_stats.arrive_time_ts = time.time()
             req.time_stats.arrive_time = time.perf_counter()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(self.disagg_decode_prealloc_queue.queue)
+            req.time_stats.wait_queue_size = len(self.waiting_queue) + len(
+                self.disagg_decode_prealloc_queue.queue
+            )
             self.disagg_decode_prealloc_queue.add(req, is_retracted=is_retracted)
             if not is_retracted:
                 req.time_stats.decode_prealloc_queue_entry_time = time.perf_counter()
@@ -1934,8 +1938,23 @@ class Scheduler(
                 f"#new_token_ratio: {old_ratio:.4f} -> {new_token_ratio:.4f}"
             )
 
+            aborted_mm_reqs = []
             for req in retracted_reqs:
-                self._add_request_to_queue(req, is_retracted=True)
+                # NOTE: abort req with mm_inputs currently
+                # to avoid mrope shape not matching issue
+                if req.multimodal_inputs is not None:
+                    req.set_finish_with_abort(
+                        error_msg=(
+                            "Request with multimodal inputs cannot be retracted due to implementation limitation. "
+                            "Please reduce the input length or set smaller max_new_tokens."
+                        )
+                    )
+                    aborted_mm_reqs.append(req)
+                else:
+                    self._add_request_to_queue(req, is_retracted=True)
+
+            if aborted_mm_reqs:
+                self.stream_output(aborted_mm_reqs, return_logprob=False)
         else:
             self.new_token_ratio = max(
                 self.new_token_ratio - self.new_token_ratio_decay,
