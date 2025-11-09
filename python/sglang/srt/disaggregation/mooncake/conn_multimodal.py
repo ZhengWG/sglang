@@ -630,16 +630,28 @@ class MooncakeEmbeddingManager(BaseKVManager):
         self.server_socket.bind(f"tcp://{get_local_ip_by_remote()}:{self.rank_port}")
 
         def language_thread():
+            """
+            For epd mode, the extra_info contains req-info for multimodal-req
+            """
+            import json
+
             while True:
-                (bootstrap_room, status) = self.server_socket.recv_multipart()
+                (bootstrap_room, status, extra_info) = (
+                    self.server_socket.recv_multipart()
+                )
                 status = int(status.decode("ascii"))
                 bootstrap_room = int(bootstrap_room.decode("ascii"))
+                extra_info = json.loads(extra_info.decode("ascii"))
                 if status == KVPoll.Failed:
                     self.record_failure(
                         bootstrap_room,
                         f"Failed to get embedding data from embedding instance, it might be dead",
                     )
                 self.update_status(bootstrap_room, status)
+
+                if extra_info is not None:
+                    seq_len = extra_info.get("seq_len", None)
+                    self.update_req_info(bootstrap_room, seq_len)
 
         def heartbeat_checker():
             while True:
@@ -773,6 +785,12 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 self.request_status[bootstrap_room] = max(
                     self.request_status[bootstrap_room], status
                 )
+
+    def update_req_info(self, bootstrap_room: int, seq_len: int):
+        if bootstrap_room not in self.request_info:
+            self.request_info[bootstrap_room] = {"seq_len": seq_len}
+        else:
+            self.request_info[bootstrap_room]["seq_len"] = seq_len
 
     def record_failure(self, bootstrap_room: int, failure_reason: str):
         with self.failure_lock:

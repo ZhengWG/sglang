@@ -173,14 +173,18 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
 
     @torch.no_grad()
     def event_loop_normal_disagg_multimodal_embedding(self: Scheduler):
+        """
+        mainly follow the norma loop as scheduler.py
+        """
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_embedding_bootstrap_queue.pop_bootstrapped()
-            )
             self.process_embedding_chunk()
             batch = self.get_new_batch_prefill()
+
+            # notify the language instance that the batch is ready
+            # language instance will allocate the embedding cache for the batch
+            self.kv_manager.notify_language_instance(batch)
 
             self.cur_batch = batch
 
@@ -231,7 +235,7 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 # in order to speed up for batch forward
                 self.tree_cache.cache_finished_req(req)
                 self.disagg_embedding_inflight_queue.append(req)
-                self.send_embedding_chunk(req, last_chunk=True)
+                # self.send_embedding_chunk(req, last_chunk=True)
             else:
                 req.is_chunked -= 1
 
@@ -260,7 +264,16 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         undone_reqs: List[Req] = []
         # Check .poll() for the reqs in disagg_embedding_inflight_queue. If Success, respond to the client and remove it from the queue
         for req, poll in zip(self.disagg_embedding_inflight_queue, polls):
-            if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
+            if poll == KVPoll.Bootstrapping:
+                continue
+            elif (
+                poll == KVPoll.WaitingForInput
+                and not req.disagg_embedding_sender.send_transfer
+            ):
+                # NOTE: need to trigger transfer only when the language instance is ready
+                req.send_embedding_chunk(last_chunk=True)
+                req.disagg_embedding_sender.send_transfer = True
+            elif poll == KVPoll.Transferring:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
                 req.finished_reason = FINISH_LENGTH(length=0)
