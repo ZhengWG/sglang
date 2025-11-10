@@ -65,14 +65,6 @@ class TransferEmbeddingInfo:
     mooncake_session_id: str
     dst_embedding_indices: List[int]
     required_dst_info_num: int
-    sent_tokens: int = 0  # Number of tokens already sent (for resume transfer)
-    allocated_tokens: int = 0  # Number of tokens allocated by Language side
-    # For resume: need to store original embedding data to retrigger transfer
-    src_embedding_indices: List[int] = (
-        None  # Source embedding indices (from Embedding side)
-    )
-    total_tokens: int = 0  # Total tokens to transfer (from Embedding side)
-    resume_ready: bool = False  # Whether ready for resume transfer
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
@@ -88,21 +80,6 @@ class TransferEmbeddingInfo:
 
         required_dst_info_num = int(msg[5].decode("ascii"))
 
-        # Parse allocated_tokens (always present in init message, msg[6])
-        # For resume messages, msg[6] is sent_tokens, msg[7] is allocated_tokens
-        allocated_tokens = 0
-        sent_tokens = 0
-
-        if len(msg) >= 7:
-            # Check if this is a resume message (has 8 fields) or init message (has 7 fields)
-            if len(msg) >= 8:
-                # Resume message: msg[6] = sent_tokens, msg[7] = allocated_tokens
-                sent_tokens = int(msg[6].decode("ascii"))
-                allocated_tokens = int(msg[7].decode("ascii"))
-            else:
-                # Init message: msg[6] = allocated_tokens
-                allocated_tokens = int(msg[6].decode("ascii"))
-
         return cls(
             room=int(msg[0].decode("ascii")),
             endpoint=msg[1].decode("ascii"),
@@ -110,8 +87,6 @@ class TransferEmbeddingInfo:
             mooncake_session_id=msg[3].decode("ascii"),
             dst_embedding_indices=dst_embedding_indices,
             required_dst_info_num=required_dst_info_num,
-            sent_tokens=sent_tokens,
-            allocated_tokens=allocated_tokens,
         )
 
 
@@ -132,6 +107,12 @@ class EmbeddingArgsRegisterInfo:
             mooncake_session_id=msg[3].decode("ascii"),
             dst_embedding_ptrs=list(struct.unpack(f"{len(msg[4])//8}Q", msg[4])),
         )
+
+
+@dataclasses.dataclass
+class AllocationWaiter:
+    future: concurrent.futures.Future
+    expected: int
 
 
 class MooncakeEmbeddingManager(BaseKVManager):
@@ -161,6 +142,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
         if self.disaggregation_mode == DisaggregationMode.ENCODE:
             self.transfer_infos: Dict[int, Dict[str, TransferEmbeddingInfo]] = {}
             self.language_args_table: Dict[str, EmbeddingArgsRegisterInfo] = {}
+            self.allocation_waiters: Dict[int, AllocationWaiter] = {}
+            self.allocation_waiter_lock = threading.Lock()
             self.start_embedding_thread()
             self._register_to_bootstrap()
             self.session_failures = defaultdict(int)
@@ -195,6 +178,9 @@ class MooncakeEmbeddingManager(BaseKVManager):
             self.bootstrap_time_out = get_int_env_var(
                 "SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT", 30
             )
+            self.allocation_timeout = float(
+                os.getenv("SGLANG_DISAGGREGATION_ALLOC_TIMEOUT", 600.0)
+            )
         elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
             self.heartbeat_failures = {}
             self.session_pool = defaultdict(requests.Session)
@@ -209,7 +195,15 @@ class MooncakeEmbeddingManager(BaseKVManager):
             self.max_failures = max(
                 get_int_env_var("SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE", 2), 1
             )
+            self.alloc_port = get_free_port()
+            self.allocation_socket = zmq.Context().socket(zmq.PULL)
+            self.allocation_socket.bind(
+                f"tcp://{get_local_ip_by_remote()}:{self.alloc_port}"
+            )
+            self.remote_allocation_queue: "queue.Queue[Dict[str, int]]" = queue.Queue()
             self.start_language_thread()
+            self._register_language_to_bootstrap()
+            threading.Thread(target=self._allocation_listener, daemon=True).start()
             self.connection_pool: Dict[str, Dict[str, Union[str, int]]] = {}
             self.embedding_tp_size_table: Dict[str, int] = {}
             self.embedding_dp_size_table: Dict[str, int] = {}
@@ -228,6 +222,73 @@ class MooncakeEmbeddingManager(BaseKVManager):
         ):
             self.engine.register(aux_data_ptr, aux_data_len)
 
+    def request_remote_allocation(
+        self,
+        bootstrap_server_url: str,
+        bootstrap_room: int,
+        seq_len: int,
+        block_size: int,
+        dest_tp_ranks: List[int],
+        target_dp_group: Optional[int],
+    ) -> concurrent.futures.Future:
+        assert self.disaggregation_mode == DisaggregationMode.ENCODE
+        expected = max(len(dest_tp_ranks), 1)
+        with self.allocation_waiter_lock:
+            if bootstrap_room in self.allocation_waiters:
+                waiter = self.allocation_waiters[bootstrap_room]
+                return waiter.future
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            self.allocation_waiters[bootstrap_room] = AllocationWaiter(
+                future=future, expected=expected
+            )
+
+        payload = {
+            "room": bootstrap_room,
+            "seq_len": seq_len,
+            "block_size": block_size,
+            "target_tp_ranks": dest_tp_ranks,
+            "target_dp_group": target_dp_group,
+            "engine_rank": self.data_args.engine_rank,
+        }
+        url = f"http://{bootstrap_server_url}/allocate"
+
+        try:
+            response = requests.post(url, json=payload, timeout=5)
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Failed remote allocation for room={bootstrap_room}: "
+                    f"{response.status_code} {response.text}"
+                )
+        except Exception as exc:
+            self._fail_allocation(bootstrap_room, exc)
+            raise
+
+        return future
+
+    def _resolve_allocation_waiter(self, bootstrap_room: int):
+        with self.allocation_waiter_lock:
+            waiter = self.allocation_waiters.pop(bootstrap_room, None)
+        if waiter and not waiter.future.done():
+            waiter.future.set_result(True)
+
+    def _fail_allocation(self, bootstrap_room: int, exc: Exception):
+        with self.allocation_waiter_lock:
+            waiter = self.allocation_waiters.pop(bootstrap_room, None)
+        if waiter and not waiter.future.done():
+            waiter.future.set_exception(exc)
+        self.record_failure(
+            bootstrap_room,
+            f"Remote allocation failed: {exc}",
+        )
+        self.update_status(bootstrap_room, KVPoll.Failed)
+
+    def allocation_timed_out(self, bootstrap_room: int) -> TimeoutError:
+        exc = TimeoutError(
+            f"Remote allocation timed out after {self.allocation_timeout}s for room={bootstrap_room}"
+        )
+        self._fail_allocation(bootstrap_room, exc)
+        return exc
+
     @cache
     def _connect(self, endpoint: str):
         socket = zmq.Context().socket(zmq.PUSH)
@@ -242,8 +303,6 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_embedding_indices: List[int],
         total_tokens: int,
         block_size: int,
-        sent_tokens: int = 0,
-        allocated_tokens: int = None,
     ):
         """Send embedding data using block-based transfer.
 
@@ -254,44 +313,16 @@ class MooncakeEmbeddingManager(BaseKVManager):
             dst_embedding_indices: Destination embedding indices
             total_tokens: Total number of tokens to transfer
             block_size: Number of tokens per block
-            sent_tokens: Number of tokens already sent (for resume transfer)
-            allocated_tokens: Number of tokens allocated by Language side
 
         Returns:
             Tuple of (ret, is_partial):
                 ret: 0 if all transfers succeed, 1 otherwise
                 is_partial: True if this is a partial transfer (more data remaining)
         """
-        # Validate block_size consistency
-        if allocated_tokens is not None:
-            expected_block_size = allocated_tokens // len(dst_embedding_indices)
-            if expected_block_size != block_size:
-                raise ValueError(
-                    f"Block size mismatch: Embedding side uses {block_size}, "
-                    f"but Language side allocated {allocated_tokens} tokens "
-                    f"for {len(dst_embedding_indices)} blocks "
-                    f"(implies block_size={expected_block_size})"
-                )
-        else:
-            # Backward compatibility: if no allocated_tokens, calculate from block count
-            allocated_tokens = len(dst_embedding_indices) * block_size
-
         # Calculate remaining tokens and determine if this is a partial transfer
-        remaining_tokens = total_tokens - sent_tokens
-
-        if remaining_tokens > allocated_tokens:
-            # Need partial transfer
-            logger.info(
-                f"Partial transfer: remaining={remaining_tokens} > "
-                f"allocated={allocated_tokens}. Will transfer {allocated_tokens} tokens."
-            )
-            tokens_to_send = allocated_tokens
-            is_partial = True
-        else:
-            # Can transfer all remaining tokens
-            tokens_to_send = remaining_tokens
-            is_partial = False
-
+        remaining_tokens = total_tokens
+        tokens_to_send = remaining_tokens
+        is_partial = False
         # Calculate required dst blocks
         dst_blocks_needed = (tokens_to_send + block_size - 1) // block_size
 
@@ -302,11 +333,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 f"for {tokens_to_send} tokens, but only have {len(dst_embedding_indices)} blocks"
             )
 
-        # Calculate source block range based on sent_tokens
-        start_block = sent_tokens // block_size
-        embedding_indices_to_send = embedding_indices[
-            start_block : start_block + dst_blocks_needed
-        ]
+        # Calculate source block range
+        embedding_indices_to_send = embedding_indices[:dst_blocks_needed]
         dst_embedding_indices = dst_embedding_indices[:dst_blocks_needed]
 
         src_addrs = []
@@ -332,10 +360,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 # Calculate chunk size based on buffer type and tokens_in_block
                 # For aux_datas, only transfer in first block of initial transfer
                 if buffer_type_idx == 3:  # aux_datas
-                    if sent_tokens == 0 and block_idx == 0:
+                    if block_idx == 0:
                         chunk_size = embedding_item_len  # Transfer full aux_datas
                     else:
-                        continue  # Skip aux_datas for resume or other blocks
+                        continue
                 else:
                     # For embeddings, fill_ids, mrope_positions: scale by tokens_in_block
                     # embedding_item_len already contains the full block size
@@ -389,11 +417,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
                     if embedding_chunk.room in self.transfer_infos
                     else []
                 )
-                polls = []
                 dst_ranks_infos = []
+                success = True
 
                 for req in reqs_to_be_processed:
-                    # Early exit if the request has failed
                     with self.session_lock:
                         if req.mooncake_session_id in self.failed_sessions:
                             self.record_failure(
@@ -402,31 +429,14 @@ class MooncakeEmbeddingManager(BaseKVManager):
                             )
                             self.update_status(embedding_chunk.room, KVPoll.Failed)
                             self.sync_status_to_language_endpoint(
-                                req.endpoint,
-                                req.dst_port,
-                                req.room,
-                                KVPoll.Failed,
+                                req.endpoint, req.dst_port, req.room, KVPoll.Failed
                             )
+                            success = False
                             break
 
-                    # Save source embedding info for potential resume
-                    if req.src_embedding_indices is None:
-                        req.src_embedding_indices = embedding_chunk.embedding_indices
-                        req.total_tokens = embedding_chunk.total_tokens
-
-                    # Block-based transfer
-                    # Calculate block_size from aux_item_lens
-                    # aux_item_lens[0] is for embeddings per block
-                    # aux_item_lens[1] is for fill_ids per block
-                    # block_size = aux_item_lens[1] / fill_ids.itemsize
-                    # Assuming fill_ids is int32 (4 bytes)
                     block_size = self.data_args.aux_item_lens[1] // 4
 
-                    # Get sent_tokens and allocated_tokens from transfer_info
-                    sent_tokens = req.sent_tokens
-                    allocated_tokens = req.allocated_tokens
-
-                    ret, is_partial = self.send_embedding(
+                    ret, _ = self.send_embedding(
                         req.mooncake_session_id,
                         embedding_chunk.embedding_indices,
                         self.language_args_table[
@@ -435,13 +445,10 @@ class MooncakeEmbeddingManager(BaseKVManager):
                         req.dst_embedding_indices,
                         embedding_chunk.total_tokens,
                         block_size,
-                        sent_tokens,
-                        allocated_tokens,
                     )
                     if ret != 0:
                         with self.session_lock:
                             self.session_failures[req.mooncake_session_id] += 1
-                            # Failures should never happen if the session is not dead, if the session fails once, mark it as failed
                             if self.session_failures[req.mooncake_session_id] >= 1:
                                 self.failed_sessions.add(req.mooncake_session_id)
                                 logger.error(
@@ -458,33 +465,17 @@ class MooncakeEmbeddingManager(BaseKVManager):
                         self.sync_status_to_language_endpoint(
                             req.endpoint, req.dst_port, req.room, KVPoll.Failed
                         )
+                        success = False
                         break
 
-                    # Update sent_tokens after successful transfer
-                    tokens_sent = min(
-                        embedding_chunk.total_tokens - sent_tokens, allocated_tokens
-                    )
-                    req.sent_tokens += tokens_sent
-
-                    polls.append(True if ret == 0 else False)
                     dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
 
-                    # Only sync status when all the dst ranks have received the embedding data
-                    if len(polls) == req.required_dst_info_num:
-                        if is_partial:
-                            # Partial transfer complete, waiting for resume
-                            status = (
-                                KVPoll.Transferring if all(polls) else KVPoll.Failed
-                            )
-                        else:
-                            # Complete transfer done
-                            status = KVPoll.Success if all(polls) else KVPoll.Failed
-
-                        self.update_status(req.room, status)
-                        for endpoint, dst_port, room in dst_ranks_infos:
-                            self.sync_status_to_language_endpoint(
-                                endpoint, dst_port, room, status
-                            )
+                if success and dst_ranks_infos:
+                    self.update_status(embedding_chunk.room, KVPoll.Success)
+                    for endpoint, dst_port, room in dst_ranks_infos:
+                        self.sync_status_to_language_endpoint(
+                            endpoint, dst_port, room, KVPoll.Success
+                        )
 
                 if (
                     embedding_chunk.room not in self.request_status
@@ -521,107 +512,17 @@ class MooncakeEmbeddingManager(BaseKVManager):
                     continue
                 else:
                     room = int(room)
+                    required_dst_info_num = int(waiting_req_bytes[5].decode("ascii"))
 
-                    # Check if this is a resume request (8 fields) or init request (7 fields)
-                    is_resume = len(waiting_req_bytes) >= 8
+                    if room not in self.transfer_infos:
+                        self.transfer_infos[room] = {}
 
-                    if is_resume:
-                        # Resume request: update existing transfer_info and trigger transfer
-                        if (
-                            room in self.transfer_infos
-                            and mooncake_session_id in self.transfer_infos[room]
-                        ):
-                            transfer_info = TransferEmbeddingInfo.from_zmq(
-                                waiting_req_bytes
-                            )
-                            req = self.transfer_infos[room][mooncake_session_id]
-
-                            # Update the existing transfer_info with resume data
-                            req.sent_tokens = transfer_info.sent_tokens
-                            req.allocated_tokens = transfer_info.allocated_tokens
-                            req.dst_embedding_indices = (
-                                transfer_info.dst_embedding_indices
-                            )
-
-                            logger.debug(
-                                f"Resume transfer for room={room}, sent_tokens={transfer_info.sent_tokens}, "
-                                f"sent_tokens={transfer_info.sent_tokens}, "
-                                f"allocated_tokens={transfer_info.allocated_tokens}"
-                            )
-
-                            # Don't reset status - it should remain in current state (Transferring)
-
-                            req.resume_ready = True
-                            # Check if all sessions are ready for resume (similar to init logic)
-                            all_dst_ranks_ready = all(
-                                dst_req.resume_ready
-                                for dst_req in self.transfer_infos[room].values()
-                            )
-
-                            # Only trigger resume transfer when all dst ranks are ready
-                            if all_dst_ranks_ready:
-                                if (
-                                    req.src_embedding_indices is not None
-                                    and req.total_tokens > 0
-                                ):
-                                    # Calculate which queue to use (same as add_transfer_request)
-                                    dst_infos = self.transfer_infos[room].keys()
-                                    session_port_sum = sum(
-                                        int(session.split(":")[1])
-                                        for session in dst_infos
-                                    )
-                                    shard_idx = session_port_sum % len(
-                                        self.transfer_queues
-                                    )
-
-                                    # Add resume transfer chunk to queue (only once for all sessions)
-                                    self.transfer_queues[shard_idx].put(
-                                        TransferEmbeddingChunk(
-                                            room=room,
-                                            embedding_indices=req.src_embedding_indices,
-                                            is_last=True,  # Resume is always the last part
-                                            total_tokens=req.total_tokens,
-                                        )
-                                    )
-
-                                    logger.debug(
-                                        f"Resume transfer triggered: room={room}, "
-                                        f"queue_idx={shard_idx}, src_blocks={len(req.src_embedding_indices)}, "
-                                        f"all {len(self.transfer_infos[room])} sessions ready"
-                                    )
-                                    for dst_req in self.transfer_infos[room].values():
-                                        dst_req.resume_ready = (
-                                            False  # Reset for potential future resumes
-                                        )
-                                else:
-                                    logger.error(
-                                        f"Cannot trigger resume: missing src_embedding_indices or total_tokens "
-                                        f"for room={room} session={mooncake_session_id}"
-                                    )
-                            else:
-                                logger.debug(
-                                    f"Waiting for all dst ranks to be ready for resume: room={room}, "
-                                    f"ready={sum(dst_req.resume_ready for dst_req in self.transfer_infos[room].values())}/{len(self.transfer_infos[room])}"
-                                )
-                        else:
-                            logger.error(
-                                f"Cannot resume: room={room} session={mooncake_session_id} not found in transfer_infos"
-                            )
-                    else:
-                        # Init request: create new transfer_info
-                        required_dst_info_num = int(
-                            waiting_req_bytes[5].decode("ascii")
-                        )
-
-                        if room not in self.transfer_infos:
-                            self.transfer_infos[room] = {}
-
-                        self.transfer_infos[room][mooncake_session_id] = (
-                            TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
-                        )
-                        # NOTE: after bootstrapping we can mark the req as waiting for input
-                        if len(self.transfer_infos[room]) == required_dst_info_num:
-                            self.update_status(room, KVPoll.WaitingForInput)
+                    transfer_info = TransferEmbeddingInfo.from_zmq(waiting_req_bytes)
+                    self.transfer_infos[room][mooncake_session_id] = transfer_info
+                    current = len(self.transfer_infos[room])
+                    if current == required_dst_info_num:
+                        self.update_status(room, KVPoll.WaitingForInput)
+                        self._resolve_allocation_waiter(room)
 
         threading.Thread(target=embedding_thread).start()
 
@@ -718,20 +619,7 @@ class MooncakeEmbeddingManager(BaseKVManager):
         total_tokens: int,
         block_size: int,
     ):
-        """Add block-based transfer request to queue.
-
-        Note:
-            - This method is only called for initial transfer (by send_embedding)
-            - Resume transfers are triggered by Language side sending resume messages
-            - sent_tokens information is maintained in transfer_infos
-
-        Args:
-            bootstrap_room: Room ID for the request
-            embedding_indices: List of source embedding indices
-            is_last: Whether this is the last chunk
-            total_tokens: Total number of tokens to transfer
-            block_size: Number of tokens per block
-        """
+        """Add block-based transfer request to queue."""
         assert self.disaggregation_mode == DisaggregationMode.ENCODE
         assert is_last  # For embedding data, we only send once at the end
 
@@ -761,6 +649,8 @@ class MooncakeEmbeddingManager(BaseKVManager):
         dst_infos = self.transfer_infos[bootstrap_room].keys()
         session_port_sum = sum(int(session.split(":")[1]) for session in dst_infos)
         shard_idx = session_port_sum % len(self.transfer_queues)
+
+        self.update_status(bootstrap_room, KVPoll.Transferring)
 
         self.transfer_queues[shard_idx].put(
             TransferEmbeddingChunk(
@@ -825,6 +715,61 @@ class MooncakeEmbeddingManager(BaseKVManager):
                 f"Embedding instance failed to register to bootstrap server: {e}"
             )
 
+    def _register_language_to_bootstrap(self):
+        bootstrap_server_url = f"{get_local_ip_by_remote()}:{self.bootstrap_port}"
+        url = f"http://{bootstrap_server_url}/route"
+        payload = {
+            "role": "Language",
+            "tp_size": self.tp_size,
+            "dp_size": self.dp_size,
+            "rank_ip": get_local_ip_by_remote(),
+            "rank_port": self.rank_port,
+            "alloc_port": self.alloc_port,
+            "engine_rank": self.data_args.engine_rank,
+        }
+
+        try:
+            response = requests.put(url, json=payload, timeout=5)
+            if response.status_code == 200:
+                logger.debug("Language successfully registered to bootstrap server.")
+            else:
+                logger.error(
+                    f"Language instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Language instance failed to register to bootstrap server: {e}"
+            )
+
+    def _allocation_listener(self):
+        while True:
+            try:
+                msg = self.allocation_socket.recv_multipart()
+                if not msg:
+                    continue
+                if msg[0] != b"ALLOCATE":
+                    logger.debug(f"Unknown allocation message type: {msg[0]!r}")
+                    continue
+                event = {
+                    "room": int(msg[1].decode("ascii")),
+                    "seq_len": int(msg[2].decode("ascii")),
+                    "block_size": int(msg[3].decode("ascii")),
+                    "tp_rank": int(msg[4].decode("ascii")),
+                    "dp_group": int(msg[5].decode("ascii")),
+                }
+                self.remote_allocation_queue.put(event)
+            except Exception as exc:
+                logger.error(f"Allocation listener encountered error: {exc}")
+
+    def drain_remote_allocations(self) -> List[Dict[str, int]]:
+        events = []
+        while True:
+            try:
+                events.append(self.remote_allocation_queue.get_nowait())
+            except queue.Empty:
+                break
+        return events
+
     def _handle_node_failure(self, failed_bootstrap_addr):
         with self.connection_lock:
             keys_to_remove = [
@@ -877,6 +822,9 @@ class MooncakeEmbeddingSender(BaseKVSender):
         self.init_time = None
         self.dest_tp_ranks = dest_tp_ranks
         self.pp_rank = pp_rank
+        self.remote_allocation_future: Optional[concurrent.futures.Future] = None
+        self.remote_allocation_requested = False
+        self.target_dp_group: Optional[int] = None
 
     def init(
         self,
@@ -898,6 +846,42 @@ class MooncakeEmbeddingSender(BaseKVSender):
         # We only send embedding data once at the end
         pass
 
+    def ensure_remote_allocation(
+        self,
+        seq_len: int,
+        block_size: int,
+        target_dp_group: Optional[int],
+    ):
+        if self.remote_allocation_requested:
+            return
+        self.target_dp_group = target_dp_group
+        self.remote_allocation_future = self.embedding_mgr.request_remote_allocation(
+            bootstrap_server_url=self.bootstrap_server_url,
+            bootstrap_room=self.bootstrap_room,
+            seq_len=seq_len,
+            block_size=block_size,
+            dest_tp_ranks=self.dest_tp_ranks,
+            target_dp_group=target_dp_group,
+        )
+        self.remote_allocation_requested = True
+
+    def _wait_for_remote_allocation(self):
+        if not self.remote_allocation_requested or self.remote_allocation_future is None:
+            return
+        try:
+            self.remote_allocation_future.result(
+                timeout=self.embedding_mgr.allocation_timeout
+            )
+        except TimeoutError as exc:
+            timeout_exc = self.embedding_mgr.allocation_timed_out(self.bootstrap_room)
+            self.conclude_state = KVPoll.Failed
+            raise EmbeddingTransferError(
+                self.bootstrap_room, str(timeout_exc)
+            ) from timeout_exc
+        except Exception as exc:
+            self.conclude_state = KVPoll.Failed
+            raise EmbeddingTransferError(self.bootstrap_room, str(exc)) from exc
+
     def send_embedding(
         self,
         embedding_indices: List[int] = None,
@@ -913,6 +897,7 @@ class MooncakeEmbeddingSender(BaseKVSender):
             total_tokens: Total number of tokens to transfer
             block_size: Number of tokens per block
         """
+        self._wait_for_remote_allocation()
         self.embedding_mgr.add_transfer_request(
             self.bootstrap_room, embedding_indices, last_chunk, total_tokens, block_size
         )
@@ -1259,6 +1244,10 @@ class MooncakeEmbeddingBootstrapServer(BaseKVBootstrapServer):
         self.tp_size = None
         self.dp_size = None
         self.embedding_port_table: Dict[int, Dict[int, Dict[str, Union[str, int]]]] = {}
+        self.language_port_table: Dict[int, Dict[int, Dict[str, Union[str, int]]]] = {}
+        self._ctx = zmq.Context.instance()
+        self._allocate_socket_cache: Dict[str, zmq.Socket] = {}
+        self._allocate_socket_lock = threading.Lock()
 
         # Start bootstrap server
         self.thread = threading.Thread(target=self._run_server, daemon=True)
@@ -1270,6 +1259,7 @@ class MooncakeEmbeddingBootstrapServer(BaseKVBootstrapServer):
     def _setup_routes(self):
         self.app.router.add_route("*", "/route", self._handle_route)
         self.app.router.add_get("/health", self._handle_health_check)
+        self.app.router.add_post("/allocate", self._handle_allocate)
 
     async def _handle_health_check(self, request):
         return web.Response(text="OK", status=200)
@@ -1313,6 +1303,19 @@ class MooncakeEmbeddingBootstrapServer(BaseKVBootstrapServer):
                 "rank_ip": rank_ip,
                 "rank_port": rank_port,
             }
+        elif role == "Language":
+            alloc_port = int(data["alloc_port"])
+            dp_group = engine_rank // self.tp_size
+            tp_rank_in_dp_group = engine_rank % self.tp_size
+
+            async with self.lock:
+                if dp_group not in self.language_port_table:
+                    self.language_port_table[dp_group] = {}
+            self.language_port_table[dp_group][tp_rank_in_dp_group] = {
+                "rank_ip": rank_ip,
+                "rank_port": rank_port,
+                "alloc_port": alloc_port,
+            }
 
         return web.Response(text="OK", status=200)
 
@@ -1340,6 +1343,68 @@ class MooncakeEmbeddingBootstrapServer(BaseKVBootstrapServer):
             return web.json_response(bootstrap_info, status=200)
         else:
             return web.Response(text="Bootstrap info not Found", status=404)
+
+    async def _handle_allocate(self, request: web.Request):
+        data = await request.json()
+        room = int(data["room"])
+        seq_len = int(data["seq_len"])
+        block_size = int(data["block_size"])
+        target_tp_ranks = data.get("target_tp_ranks") or []
+        target_dp_group = data.get("target_dp_group")
+        if target_dp_group is None:
+            if self.dp_size is None:
+                return web.Response(
+                    text="dp_size unknown; cannot infer target_dp_group", status=400
+                )
+            target_dp_group = room % self.dp_size
+        target_dp_group = int(target_dp_group)
+
+        if not target_tp_ranks:
+            if self.tp_size is None:
+                return web.Response(
+                    text="tp_size unknown; cannot infer target_tp_ranks", status=400
+                )
+            target_tp_ranks = [int(room % self.tp_size)]
+        else:
+            target_tp_ranks = [int(tp) for tp in target_tp_ranks]
+
+        extra_payload = {
+            "room": room,
+            "seq_len": seq_len,
+            "block_size": block_size,
+            "target_dp_group": target_dp_group,
+        }
+
+        try:
+            for tp_rank in target_tp_ranks:
+                language_info = self.language_port_table[target_dp_group][tp_rank]
+                endpoint = f"tcp://{language_info['rank_ip']}:{language_info['alloc_port']}"
+                sock = self._get_allocate_socket(endpoint)
+                sock.send_multipart(
+                    [
+                        b"ALLOCATE",
+                        str(room).encode("ascii"),
+                        str(seq_len).encode("ascii"),
+                        str(block_size).encode("ascii"),
+                        str(tp_rank).encode("ascii"),
+                        str(target_dp_group).encode("ascii"),
+                    ]
+                )
+        except KeyError as exc:
+            return web.Response(
+                text=f"Missing language endpoint for {target_dp_group=}, tp_rank={exc}",
+                status=404,
+            )
+
+        return web.json_response({"status": "accepted", **extra_payload}, status=200)
+
+    def _get_allocate_socket(self, endpoint: str) -> zmq.Socket:
+        with self._allocate_socket_lock:
+            if endpoint not in self._allocate_socket_cache:
+                sock = self._ctx.socket(zmq.PUSH)
+                sock.connect(endpoint)
+                self._allocate_socket_cache[endpoint] = sock
+            return self._allocate_socket_cache[endpoint]
 
     def _run_server(self):
         try:

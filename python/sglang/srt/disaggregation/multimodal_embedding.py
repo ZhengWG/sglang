@@ -124,6 +124,37 @@ class MultimodalEmbeddingBootstrapQueue:
         )
 
         for i, (req, poll) in enumerate(zip(self.queue, polls)):
+            block_size = self.metadata_buffers.block_size
+            actual_seq_len = (
+                len(req.origin_input_ids) if hasattr(req, "origin_input_ids") else None
+            )
+
+            if (
+                actual_seq_len is not None
+                and hasattr(req.disagg_embedding_sender, "ensure_remote_allocation")
+            ):
+                try:
+                    target_dp_group = getattr(req, "data_parallel_rank", None)
+                    req.disagg_embedding_sender.ensure_remote_allocation(
+                        seq_len=actual_seq_len,
+                        block_size=block_size,
+                        target_dp_group=target_dp_group,
+                    )
+                except Exception as exc:
+                    error_message = (
+                        f"Remote allocation failed for request rank={self.tp_rank} "
+                        f"{req.rid=} {req.bootstrap_room=} with error {exc}"
+                    )
+                    logger.error(error_message)
+                    prepare_abort(
+                        req,
+                        error_message,
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    self.scheduler.stream_output([req], req.return_logprob)
+                    indices_to_remove.add(i)
+                    continue
+
             if poll == KVPoll.Bootstrapping:
                 continue
             elif poll == KVPoll.Failed:
@@ -140,11 +171,6 @@ class MultimodalEmbeddingBootstrapQueue:
                 self.scheduler.stream_output([req], req.return_logprob)
                 indices_to_remove.add(i)
                 continue
-
-            # Calculate actual sequence length from origin_input_ids
-            actual_seq_len = (
-                len(req.origin_input_ids) if hasattr(req, "origin_input_ids") else None
-            )
 
             # Allocate blocks based on actual length
             allocated_indices = self.req_to_metadata_buffer_idx_allocator.alloc(
@@ -179,12 +205,11 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+            self.waiting_queue.extend(
+                self.disagg_embedding_bootstrap_queue.pop_bootstrapped()
+            )
             self.process_embedding_chunk()
             batch = self.get_new_batch_prefill()
-
-            # notify the language instance that the batch is ready
-            # language instance will allocate the embedding cache for the batch
-            self.kv_manager.notify_language_instance(batch)
 
             self.cur_batch = batch
 
@@ -235,7 +260,7 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
                 # in order to speed up for batch forward
                 self.tree_cache.cache_finished_req(req)
                 self.disagg_embedding_inflight_queue.append(req)
-                # self.send_embedding_chunk(req, last_chunk=True)
+                self.send_embedding_chunk(req, last_chunk=True)
             else:
                 req.is_chunked -= 1
 
@@ -266,14 +291,7 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         for req, poll in zip(self.disagg_embedding_inflight_queue, polls):
             if poll == KVPoll.Bootstrapping:
                 continue
-            elif (
-                poll == KVPoll.WaitingForInput
-                and not req.disagg_embedding_sender.send_transfer
-            ):
-                # NOTE: need to trigger transfer only when the language instance is ready
-                req.send_embedding_chunk(last_chunk=True)
-                req.disagg_embedding_sender.send_transfer = True
-            elif poll == KVPoll.Transferring:
+            elif poll in (KVPoll.WaitingForInput, KVPoll.Transferring):
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
                 req.finished_reason = FINISH_LENGTH(length=0)
