@@ -77,19 +77,6 @@ class MultimodalEmbeddingBootstrapQueue:
         )
         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         kv_args.gpu_id = self.scheduler.gpu_id
-
-        # Set required fields for multimodal (embedding mode doesn't use KV cache)
-        kv_args.kv_data_ptrs = []
-        kv_args.kv_data_lens = []
-        kv_args.kv_item_lens = []
-        kv_args.decode_tp_size = 0
-        kv_args.kv_head_num = 0
-        kv_args.page_size = 0
-        kv_args.prefill_pp_size = 1
-        kv_args.pp_rank = 0
-        kv_args.prefill_start_layer = 0
-        kv_args.system_dp_rank = 0
-
         data_manager_class = get_kv_class(
             self.transfer_backend, KVClassType.MANAGER, is_multimodal=True
         )
@@ -97,7 +84,6 @@ class MultimodalEmbeddingBootstrapQueue:
             kv_args,
             DisaggregationMode.ENCODE,
             self.scheduler.server_args,
-            is_multimodal=True,
         )
         return data_manager
 
@@ -138,6 +124,37 @@ class MultimodalEmbeddingBootstrapQueue:
         )
 
         for i, (req, poll) in enumerate(zip(self.queue, polls)):
+            block_size = self.metadata_buffers.block_size
+            actual_seq_len = (
+                len(req.origin_input_ids) if hasattr(req, "origin_input_ids") else None
+            )
+
+            if (
+                actual_seq_len is not None
+                and hasattr(req.disagg_embedding_sender, "ensure_remote_allocation")
+            ):
+                try:
+                    target_dp_group = getattr(req, "data_parallel_rank", None)
+                    req.disagg_embedding_sender.ensure_remote_allocation(
+                        seq_len=actual_seq_len,
+                        block_size=block_size,
+                        target_dp_group=target_dp_group,
+                    )
+                except Exception as exc:
+                    error_message = (
+                        f"Remote allocation failed for request rank={self.tp_rank} "
+                        f"{req.rid=} {req.bootstrap_room=} with error {exc}"
+                    )
+                    logger.error(error_message)
+                    prepare_abort(
+                        req,
+                        error_message,
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    self.scheduler.stream_output([req], req.return_logprob)
+                    indices_to_remove.add(i)
+                    continue
+
             if poll == KVPoll.Bootstrapping:
                 continue
             elif poll == KVPoll.Failed:
@@ -154,11 +171,6 @@ class MultimodalEmbeddingBootstrapQueue:
                 self.scheduler.stream_output([req], req.return_logprob)
                 indices_to_remove.add(i)
                 continue
-
-            # Calculate actual sequence length from origin_input_ids
-            actual_seq_len = (
-                len(req.origin_input_ids) if hasattr(req, "origin_input_ids") else None
-            )
 
             # Allocate blocks based on actual length
             allocated_indices = self.req_to_metadata_buffer_idx_allocator.alloc(
@@ -187,6 +199,9 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
 
     @torch.no_grad()
     def event_loop_normal_disagg_multimodal_embedding(self: Scheduler):
+        """
+        mainly follow the norma loop as scheduler.py
+        """
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -274,7 +289,9 @@ class SchedulerDisaggregationMultimodalEmbeddingMixin:
         undone_reqs: List[Req] = []
         # Check .poll() for the reqs in disagg_embedding_inflight_queue. If Success, respond to the client and remove it from the queue
         for req, poll in zip(self.disagg_embedding_inflight_queue, polls):
-            if poll in [KVPoll.WaitingForInput, KVPoll.Transferring]:
+            if poll == KVPoll.Bootstrapping:
+                continue
+            elif poll in (KVPoll.WaitingForInput, KVPoll.Transferring):
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
                 req.finished_reason = FINISH_LENGTH(length=0)

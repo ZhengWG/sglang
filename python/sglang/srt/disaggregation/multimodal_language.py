@@ -18,7 +18,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Deque, List, Tuple
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -59,16 +59,10 @@ logger = logging.getLogger(__name__)
 class MultimodalLanguageRequest:
     req: Req
     embedding_receiver: BaseKVReceiver
-    waiting_for_input: bool = False
     embedding_indices: List[int] = None
-
-    # for resumed transfer
-    partial_input_embeds: torch.Tensor = None
-    partial_mrope_positions: torch.Tensor = None
-    partial_fill_ids: List[int] = None
-    partial_sent_tokens: int = None
-    partial_aux_datas: torch.Tensor = None
-    partial_deepstack_embedding: torch.Tensor = None
+    requested_seq_len: Optional[int] = None
+    requested_block_size: Optional[int] = None
+    allocation_received: bool = False
 
 
 class MultimodalLanguagePreallocQueue:
@@ -89,10 +83,11 @@ class MultimodalLanguagePreallocQueue:
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.transfer_backend = transfer_backend
-
         self.data_manager = self._init_data_manager()
         self.bootstrap_port = bootstrap_port
         self.queue: List[MultimodalLanguageRequest] = []
+        self.requests_by_room: Dict[int, MultimodalLanguageRequest] = {}
+        self.pending_remote_events: Dict[int, Dict[str, int]] = {}
         self.gloo_group = gloo_group
 
         # Get default buffer size from environment variable
@@ -113,19 +108,6 @@ class MultimodalLanguagePreallocQueue:
         )
         kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
         kv_args.gpu_id = self.scheduler.gpu_id
-
-        # Set required fields for multimodal (language mode doesn't use KV cache)
-        kv_args.kv_data_ptrs = []
-        kv_args.kv_data_lens = []
-        kv_args.kv_item_lens = []
-        kv_args.decode_tp_size = 0
-        kv_args.kv_head_num = 0
-        kv_args.page_size = 0
-        kv_args.prefill_pp_size = 1
-        kv_args.pp_rank = 0
-        kv_args.prefill_start_layer = 0
-        kv_args.system_dp_rank = 0
-
         data_manager_class = get_kv_class(
             self.transfer_backend, KVClassType.MANAGER, is_multimodal=True
         )
@@ -133,7 +115,6 @@ class MultimodalLanguagePreallocQueue:
             kv_args,
             DisaggregationMode.LANGUAGE,
             self.scheduler.server_args,
-            is_multimodal=True,
         )
         return data_manager
 
@@ -153,32 +134,45 @@ class MultimodalLanguagePreallocQueue:
             bootstrap_room=req.bootstrap_room,
             prefill_dp_rank=req.data_parallel_rank,
         )
-        self.queue.append(
-            MultimodalLanguageRequest(req=req, embedding_receiver=embedding_receiver)
+        language_req = MultimodalLanguageRequest(
+            req=req, embedding_receiver=embedding_receiver
         )
+        self.queue.append(language_req)
+        self.requests_by_room[req.bootstrap_room] = language_req
+        if req.bootstrap_room in self.pending_remote_events:
+            event = self.pending_remote_events.pop(req.bootstrap_room)
+            language_req.requested_seq_len = event["seq_len"]
+            language_req.requested_block_size = event["block_size"]
+            language_req.allocation_received = True
 
     def extend(self, reqs: List[Req]):
         for req in reqs:
             self.add(req)
 
-    def _update_handshake_waiters(self) -> None:
-        if not self.queue:
-            return
+    def pop_preallocated(self):
+        self._drain_remote_allocations()
 
-        if all(decode_req.waiting_for_input for decode_req in self.queue):
-            return
+        preallocated_reqs = []
+        indices_to_remove = set()
+
+        if not self.queue:
+            return preallocated_reqs
 
         polls = poll_and_all_reduce(
             [language_req.embedding_receiver for language_req in self.queue],
             self.gloo_group,
         )
 
-        for i, (language_req, poll) in enumerate(zip(self.queue, polls)):
-            if poll == KVPoll.Bootstrapping:
-                pass
-            elif poll == KVPoll.WaitingForInput:
-                language_req.waiting_for_input = True
-            elif poll == KVPoll.Failed:
+        for idx, (language_req, poll) in enumerate(zip(self.queue, polls)):
+            if isinstance(language_req.req.finished_reason, FINISH_ABORT):
+                self.scheduler.stream_output(
+                    [language_req.req], language_req.req.return_logprob
+                )
+                indices_to_remove.add(idx)
+                self.requests_by_room.pop(language_req.req.bootstrap_room, None)
+                continue
+
+            if poll == KVPoll.Failed:
                 error_message = f"MultimodalLanguage handshake failed for request rank={self.tp_rank} {language_req.req.rid=} {language_req.req.bootstrap_room=}"
                 try:
                     language_req.embedding_receiver.failure_exception()
@@ -190,60 +184,63 @@ class MultimodalLanguagePreallocQueue:
                     error_message,
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
-
-    def pop_preallocated(self):
-        self._update_handshake_waiters()
-
-        preallocated_reqs = []
-        indices_to_remove = set()
-
-        for i, language_req in enumerate(self.queue):
-            if isinstance(language_req.req.finished_reason, FINISH_ABORT):
-                self.scheduler.stream_output(
-                    [language_req.req], language_req.req.return_logprob
-                )
-                indices_to_remove.add(i)
-
-        for i, language_req in enumerate(self.queue):
-            if i in indices_to_remove:
+                indices_to_remove.add(idx)
+                self.requests_by_room.pop(language_req.req.bootstrap_room, None)
                 continue
 
-            if not language_req.waiting_for_input:
+            if not language_req.allocation_received:
                 continue
 
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
                 break
 
-            # Language side: allocate blocks based on default buffer size
-            # Since we only have text here, not the full embedding from encode side
+            requested_tokens = (
+                language_req.requested_seq_len
+                if language_req.requested_seq_len is not None
+                else self.default_allocate_tokens
+            )
+
             language_req.embedding_indices = (
                 self.req_to_metadata_buffer_idx_allocator.alloc(
-                    num_tokens=self.default_allocate_tokens,
+                    num_tokens=requested_tokens,
                     req_id=language_req.req.rid,
                     fake=isinstance(language_req.embedding_receiver, FakeKVReceiver),
                 )
             )
 
             if language_req.embedding_indices is None:
-                break
+                # Not enough blocks, wait for next iteration
+                continue
 
-            # Calculate actual allocated tokens from allocated blocks
             actual_allocated_tokens = (
                 len(language_req.embedding_indices) * self.metadata_buffers.block_size
             )
-            # Initialize receiver with block_indices and allocated_tokens
             language_req.embedding_receiver.init(
                 embedding_indices=language_req.embedding_indices,
                 allocated_tokens=actual_allocated_tokens,
             )
+            language_req.allocation_received = False
             preallocated_reqs.append(language_req)
-            indices_to_remove.add(i)
+            indices_to_remove.add(idx)
+            self.requests_by_room.pop(language_req.req.bootstrap_room, None)
 
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
 
         return preallocated_reqs
+
+    def _drain_remote_allocations(self):
+        events = self.data_manager.drain_remote_allocations()
+        for event in events:
+            room = event["room"]
+            language_req = self.requests_by_room.get(room)
+            if language_req is None:
+                self.pending_remote_events[room] = event
+                continue
+            language_req.requested_seq_len = event["seq_len"]
+            language_req.requested_block_size = event["block_size"]
+            language_req.allocation_received = True
 
 
 class MultimodalLanguageTransferQueue:
@@ -313,67 +310,13 @@ class MultimodalLanguageTransferQueue:
                 # Use block_indices instead of single index
                 block_indices = language_req.embedding_indices
                 if not isinstance(language_req.embedding_receiver, FakeKVReceiver):
-                    # Check if this is a resumed transfer (has partial data)
-                    if language_req.partial_input_embeds is not None:
-                        # For resumed transfer, get the remaining data based on actual total length
-                        actual_total_length = (
-                            language_req.partial_aux_datas[0].item()
-                            - language_req.partial_sent_tokens
-                        )
-                        (
-                            embedding_data,
-                            fill_ids,
-                            mrope_positions,
-                            aux_datas,
-                            deepstack_embedding,
-                        ) = self.metadata_buffers.get_buf(
-                            block_indices=block_indices,
-                            actual_total_length=actual_total_length,
-                        )
-                        # Merge partial data with new data
-                        logger.debug(
-                            f"Merging resumed transfer data for rid={language_req.req.rid}"
-                        )
-
-                        # Concatenate embeddings
-                        embedding_data = torch.cat(
-                            [language_req.partial_input_embeds, embedding_data]
-                        )
-                        if deepstack_embedding is not None:
-                            deepstack_embedding = torch.cat(
-                                [
-                                    language_req.partial_deepstack_embedding,
-                                    deepstack_embedding,
-                                ]
-                            )
-
-                        # Concatenate fill_ids
-                        fill_ids = torch.cat(
-                            [torch.tensor(language_req.partial_fill_ids), fill_ids]
-                        )
-
-                        # Concatenate mrope_positions
-                        mrope_positions = torch.cat(
-                            [language_req.partial_mrope_positions, mrope_positions],
-                            dim=-1,
-                        )
-
-                        aux_datas = language_req.partial_aux_datas.clone()
-
-                        # Clean up partial data
-                        del language_req.partial_input_embeds
-                        del language_req.partial_fill_ids
-                        del language_req.partial_mrope_positions
-                        del language_req.partial_sent_tokens
-                        del language_req.partial_deepstack_embedding
-                    else:
-                        (
-                            embedding_data,
-                            fill_ids,
-                            mrope_positions,
-                            aux_datas,
-                            deepstack_embedding,
-                        ) = self.metadata_buffers.get_buf(block_indices=block_indices)
+                    (
+                        embedding_data,
+                        fill_ids,
+                        mrope_positions,
+                        aux_datas,
+                        deepstack_embedding,
+                    ) = self.metadata_buffers.get_buf(block_indices=block_indices)
 
                     embedding_length = int(aux_datas[0])
                     mrope_position_delta = aux_datas[1]
@@ -424,97 +367,8 @@ class MultimodalLanguageTransferQueue:
                 transferred_reqs.append(language_req.req)
                 indices_to_remove.add(i)
             elif poll == KVPoll.Transferring:
-                # Partial transfer complete, need to resume with remaining data
-                block_indices = language_req.embedding_indices
-                if (
-                    not isinstance(language_req.embedding_receiver, FakeKVReceiver)
-                    and language_req.partial_input_embeds is None
-                ):
-                    # Get partial data and actual total length from aux_datas
-                    (
-                        embedding_data,
-                        fill_ids,
-                        mrope_positions,
-                        aux_datas,
-                        deepstack_embedding,
-                    ) = self.metadata_buffers.get_buf(block_indices=block_indices)
-                    actual_total_length = int(aux_datas[0])  # Actual total length
-                    sent_tokens = len(fill_ids)  # Tokens already sent
-
-                    if actual_total_length > sent_tokens:
-                        # Need to resume transfer
-                        remaining_tokens = actual_total_length - sent_tokens
-
-                        logger.debug(
-                            f"Partial transfer detected for rid={language_req.req.rid}: "
-                            f"received {sent_tokens}/{actual_total_length} tokens, "
-                            f"need to resume for {remaining_tokens} more tokens"
-                        )
-
-                        # Allocate new space for remaining tokens first
-                        new_allocation = (
-                            self.req_to_metadata_buffer_idx_allocator.alloc(
-                                num_tokens=remaining_tokens,
-                                req_id=language_req.req.rid,
-                                fake=isinstance(
-                                    language_req.embedding_receiver, FakeKVReceiver
-                                ),
-                            )
-                        )
-
-                        if new_allocation is None:
-                            # Not enough memory to resume now, wait for next iteration
-                            logger.debug(
-                                f"Waiting for memory to resume transfer for rid={language_req.req.rid}, "
-                                f"need {remaining_tokens} tokens"
-                            )
-                            # Keep request in queue, will retry in next pop_transferred call
-                            # Don't cache partial data or free old allocation yet
-                            continue
-
-                        # Only after successful allocation, cache partial data and free old allocation
-                        language_req.partial_input_embeds = embedding_data
-                        language_req.partial_fill_ids = fill_ids.tolist()
-                        language_req.partial_mrope_positions = mrope_positions
-                        language_req.partial_aux_datas = aux_datas
-                        language_req.partial_sent_tokens = sent_tokens
-                        language_req.partial_deepstack_embedding = deepstack_embedding
-
-                        # Free old allocation
-                        self.req_to_metadata_buffer_idx_allocator.free(
-                            block_indices=block_indices,
-                            req_id=language_req.req.rid,
-                            fake=isinstance(
-                                language_req.embedding_receiver, FakeKVReceiver
-                            ),
-                        )
-
-                        # Update embedding_indices
-                        language_req.embedding_indices = new_allocation
-
-                        # Calculate allocated_tokens from new allocation
-                        block_size = self.metadata_buffers.block_size
-                        allocated_tokens = len(new_allocation) * block_size
-
-                        # Send resume request
-                        language_req.embedding_receiver.resume_transfer(
-                            embedding_indices=new_allocation,
-                            sent_tokens=sent_tokens,
-                            allocated_tokens=allocated_tokens,
-                        )
-
-                        logger.debug(
-                            f"Resume transfer initiated for rid={language_req.req.rid}: "
-                            f"allocated {len(new_allocation)} blocks ({allocated_tokens} tokens)"
-                        )
-                    else:
-                        # This shouldn't happen - Transferring status but all data received
-                        logger.warning(
-                            f"Unexpected: Transferring status but sent_tokens={sent_tokens} >= "
-                            f"actual_total_length={actual_total_length}"
-                        )
-                # Continue waiting for transfer to complete
-                pass
+                # Still transferring; wait for next iteration
+                continue
             elif poll in [
                 KVPoll.Bootstrapping,
                 KVPoll.WaitingForInput,
