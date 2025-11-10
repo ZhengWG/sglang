@@ -403,6 +403,11 @@ class ModelRunner:
             if self.server_args.elastic_ep_backend
             else None
         )
+
+        # lora mode does not support post loading
+        if server_args.enable_lora:
+            self.model_config.is_post_loading_model = False
+
         # Load the model
         self.sampler = Sampler()
         self.load_model()
