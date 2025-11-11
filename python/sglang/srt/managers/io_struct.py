@@ -978,7 +978,7 @@ class BatchTokenIDOutput(
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
 @dataclass
-class BatchMultimodalDecodeReq(BaseBatchReq, RequestTimingMetricsMixin):
+class BatchMultimodalDecodeReq(BaseBatchReq):
     decoded_ids: List[int]
     input_token_logprobs_val: List[float]
     input_token_logprobs_idx: List[int]
@@ -1059,7 +1059,7 @@ class BatchStrOutput(
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
 @dataclass
-class BatchMultimodalOutput(BaseBatchReq, RequestTimingMetricsMixin):
+class BatchMultimodalOutput(BaseBatchReq):
     # The finish reason
     finished_reasons: List[dict]
     decoded_ids: List[List[int]]
