@@ -447,6 +447,7 @@ class PrefillAdder:
         self.log_input_tokens += extend_input_len
 
     def add_chunked_req(self, req: Req):
+        self.budget_state()
         _rem_tokens = min(self.rem_chunk_tokens, int(self.rem_total_tokens))
         truncated = req.extend_input_len > _rem_tokens
         req.extend_input_len = min(req.extend_input_len, _rem_tokens)
