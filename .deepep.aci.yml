@@ -24,7 +24,7 @@ jobs:
     component: docker-image-build
     id: build-image
     inputs:
-      imageName: reg.docker.alibaba-inc.com/augusto/deepep-base # 构建产物镜像名称(不含tag), 如: reg.docker.alibaba-inc.com/antcodebuild/test-image-build
+      imageName: reg.docker.alibaba-inc.com/sglang/deepep-base # 构建产物镜像名称(不含tag), 如: reg.docker.alibaba-inc.com/antcodebuild/test-image-build
       imageTag: ${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}} # 构建产物镜像 tag
       dockerfile: ./docker/ant/Dockerfile.deepep # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
       contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
@@ -53,7 +53,7 @@ jobs:
     component: stc
     inputs:
       appName: sglang
-      image: reg.docker.alibaba-inc.com/augusto/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      image: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       projectType: AIDC
   镜像扫描:
     stage: Image-Scan
@@ -61,7 +61,7 @@ jobs:
     component: image-scan
     inputs:
       appName: sglang
-      image: reg.docker.alibaba-inc.com/augusto/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      image: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像同步组件的租户一致
 
   推送sglang镜像:
@@ -74,7 +74,7 @@ jobs:
           buttonName: 确认推送
     inputs:
       checkImageAndStc: false
-      sourceImage: reg.docker.alibaba-inc.com/augusto/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       targetImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       appName: sglang
       tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
@@ -86,5 +86,5 @@ jobs:
     component: push-image-to-keeper
     id: push-image-to-keeper
     inputs:
-      mainSiteImage: reg.docker.alibaba-inc.com/augusto/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      mainSiteImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       aidcSiteImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
