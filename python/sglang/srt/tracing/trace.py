@@ -46,7 +46,15 @@ TRACE_HEADERS = ["traceparent", "tracestate", "SOFA-TraceId", "SOFA-RpcId", "X-R
 try:
     from opentelemetry import context, propagate, trace
     from opentelemetry.context.context import Context
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+        OTLPSpanExporter as GRPCSpanExporter,
+    )
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+        OTLPSpanExporter as HTTPSpanExporter,
+    )
+    from opentelemetry.sdk.environment_variables import (
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+    )
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider, id_generator
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -231,7 +239,7 @@ def process_tracing_init(otlp_endpoint, server_name):
         )
 
         processor = BatchSpanProcessor(
-            OTLPSpanExporter(endpoint=otlp_endpoint),
+            span_exporter=get_otlp_span_exporter(otlp_endpoint),
             schedule_delay_millis=schedule_delay_millis,
             max_export_batch_size=max_export_batch_size,
         )
@@ -247,6 +255,22 @@ def process_tracing_init(otlp_endpoint, server_name):
         __get_cur_time_ns = lambda: int(time.time_ns())
 
     tracing_enabled = True
+
+
+def get_otlp_span_exporter(endpoint):
+    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
+    supported_protocols = {"grpc", "http/protobuf"}
+
+    if protocol not in supported_protocols:
+        raise ValueError(
+            f"Unsupported OTLP protocol '{protocol}' configured. "
+            f"Supported protocols are: {', '.join(sorted(supported_protocols))}"
+        )
+
+    if protocol == "grpc":
+        return GRPCSpanExporter(endpoint=endpoint, insecure=True)
+    elif protocol == "http/protobuf":
+        return HTTPSpanExporter(endpoint=endpoint)
 
 
 # Should be called by each tracked thread.
@@ -379,7 +403,7 @@ def trace_set_proc_propagate_context(rid, trace_context: Optional[Dict[str, Any]
 def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
     if not tracing_enabled:
         return ""
-    
+
     if not tracing_multispan_enabled:
         return ""
 
@@ -403,7 +427,7 @@ def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
 def trace_set_remote_propagate_context(base64_str):
     if not tracing_enabled:
         return
-    
+
     if not tracing_multispan_enabled:
         return
 
