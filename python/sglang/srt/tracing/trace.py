@@ -878,6 +878,8 @@ def trace_slice_batch(
             auto_next_anon=not req.finished(),
             thread_finish_flag=req.finished(),
         )
+
+
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
     if tracing_enabled:
