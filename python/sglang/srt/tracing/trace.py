@@ -36,11 +36,13 @@ from sglang.utils import run_once
 logger = logging.getLogger(__name__)
 opentelemetry_imported = False
 tracing_enabled = False
+_trace_context_propagator = None
 tracing_multispan_enabled = False
 
 NORMAL_TRACE_LEVEL = 1
 ENHANCED_TRACE_LEVEL = 2
 APP_NAME = 'sglang'
+
 TRACE_HEADERS = ["traceparent", "tracestate", "SOFA-TraceId", "SOFA-RpcId", "X-Request-ID", "X-AIGW-APP-KeyId"]
 
 try:
@@ -60,6 +62,8 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
+
+    _trace_context_propagator = TraceContextTextMapPropagator()
 
     opentelemetry_imported = True
 except ImportError:
@@ -454,7 +458,7 @@ def trace_req_start(
     bootstrap_room: Optional[int] = None,
     ts: Optional[int] = None,
     role: Optional[str] = "null",
-    trace_headers: Optional[Dict[str, str]] = None,
+    external_trace_header: Optional[Dict[str, str]] = None,
 ):
     if not tracing_enabled:
         return
@@ -477,10 +481,12 @@ def trace_req_start(
         is_copy=False,
     )
 
-    trace_context = extract_trace_context(trace_headers)
-
     tracer = threads_info[pid].tracer
     bootstrap_room_span_context = None
+
+    external_trace_context = _trace_context_propagator.extract(
+        external_trace_header
+    )
     # create bootstrap room span
     if tracing_multispan_enabled:
         if str(bootstrap_room) not in remote_trace_contexts:
@@ -489,7 +495,7 @@ def trace_req_start(
                 name=f"Bootstrap Room {hex(bootstrap_room)}",
                 start_time=ts,
                 attributes=attrs,
-                context=trace_context
+                context=external_trace_context
             )
             reqs_context[rid].bootstrap_room_span = bootstrap_room_span
             bootstrap_room_span_context = trace.set_span_in_context(bootstrap_room_span)
@@ -505,7 +511,7 @@ def trace_req_start(
     root_span = tracer.start_span(
         name="llm_request",
         start_time=ts,
-        context=bootstrap_room_span_context if tracing_multispan_enabled else trace_context,
+        context=bootstrap_room_span_context if tracing_multispan_enabled else external_trace_context,
         attributes=attrs,
         kind=trace.SpanKind.SERVER,
     )

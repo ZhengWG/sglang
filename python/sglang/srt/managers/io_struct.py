@@ -233,7 +233,7 @@ class GenerateReqInput(BaseReq):
     mm_sampling_kwargs: Optional[Dict] = None
 
     # Opentelemetry trace headers
-    trace_headers: Optional[Dict[str, str]] = None
+    external_trace_headers: Optional[Dict[str, str]] = None
 
     def contains_mm_input(self) -> bool:
         return (

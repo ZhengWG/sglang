@@ -111,8 +111,8 @@ class OpenAIServingBase(ABC):
             if hasattr(adapted_request, "validation_time"):
                 adapted_request.validation_time = validation_time
 
-            if hasattr(adapted_request, "trace_headers"):
-                adapted_request.trace_headers = (
+            if hasattr(adapted_request, "external_trace_headers"):
+                adapted_request.external_trace_headers = (
                     None
                     if raw_request is None
                     else await self._get_trace_headers(raw_request.headers)

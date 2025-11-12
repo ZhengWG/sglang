@@ -87,6 +87,7 @@ from sglang.srt.tracing.trace import (
     ENHANCED_TRACE_LEVEL,
     NORMAL_TRACE_LEVEL,
     SpanAttributes,
+    extract_trace_headers,
     get_env_info,
     get_sofa_trace_info,
     trace_get_proc_propagate_context,
@@ -436,14 +437,18 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
-        if request and "trace_context" in request.headers:
-            trace_set_remote_propagate_context(request.headers["trace_context"])
+        external_trace_header = None
+        if request:
+            if "trace_context" in request.headers:
+                trace_set_remote_propagate_context(request.headers["trace_context"])
+            else:
+                external_trace_header = extract_trace_headers(request.headers)
 
         if self.server_args.tokenizer_worker_num > 1:
             self._attach_multi_http_worker_info(obj)
 
         if self.enable_trace:
-            self._trace_request_start(obj, created_time)
+            self._trace_request_start(obj, created_time, external_trace_header)
 
         if self.log_requests:
             max_length, skip_names, _ = self.log_request_metadata
@@ -2400,6 +2405,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         created_time: Optional[float] = None,
+        external_trace_header: Optional[Dict] = None,
     ):
         if obj.is_single:
             bootstrap_room = (
@@ -2410,7 +2416,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 bootstrap_room,
                 ts=int(created_time * 1e9),
                 role=self.server_args.disaggregation_mode,
-                trace_headers=getattr(obj, "trace_headers", None),
+                external_trace_header=external_trace_header,
             )
             trace_slice_start("", obj.rid, ts=int(created_time * 1e9), anonymous=True)
         else:
@@ -2425,7 +2431,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     bootstrap_room,
                     ts=int(created_time * 1e9),
                     role=self.server_args.disaggregation_mode,
-                    trace_headers=getattr(obj, "trace_headers", None),
+                    external_trace_header=external_trace_header,
                 )
                 trace_slice_start(
                     "", obj.rid[i], ts=int(created_time * 1e9), anonymous=True
@@ -2580,7 +2586,7 @@ def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
             span_attrs[SpanAttributes.POD_NAME] = pod_name
         if hostname := env_info.hostname:
             span_attrs[SpanAttributes.HOSTNAME] = hostname
-    if trace_headers := getattr(state.obj, "trace_headers", None):
+    if trace_headers := getattr(state.obj, "external_trace_headers", None):
         sofa_trace_info = get_sofa_trace_info(trace_headers)
         if sofa_trace_id := sofa_trace_info.sofa_trace_id:
             span_attrs[SpanAttributes.SOFA_TRACE_ID] = sofa_trace_id
