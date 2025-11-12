@@ -5,9 +5,15 @@ import os
 import sys
 
 from sglang.srt.server_args import prepare_server_args
-from sglang.srt.utils import kill_process_tree
+from sglang.srt.utils import (
+    kill_process_tree,
+    COMPILE_CACHE_DIRS,
+    COMPILE_CACHE_ROOT,
+)
+from sglang.srt.utils.compile_cache import prepare_compile_cache
 
 if __name__ == "__main__":
+    prepare_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     server_args = prepare_server_args(sys.argv[1:])
 
     try:

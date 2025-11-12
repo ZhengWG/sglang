@@ -32,6 +32,11 @@ from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 import zmq
 
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
+from sglang.srt.utils import (
+    COMPILE_CACHE_DIRS,
+    COMPILE_CACHE_ROOT,
+)
+from sglang.srt.utils.compile_cache import save_compile_cache
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -848,6 +853,7 @@ def _launch_subprocesses(
             data = reader.recv()
             assert data["status"] == "ready"
 
+        save_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
         if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
             # When using `Engine` as a Python API, we don't want to block here.
             return None, None, None, port_args
@@ -902,6 +908,7 @@ def _launch_subprocesses(
             )
         scheduler_infos.append(data)
 
+    save_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
 
