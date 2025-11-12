@@ -70,26 +70,6 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def resize_image(
-    image,
-    min_pixels: int,
-    max_pixels: int,
-    size_factor: int,
-) -> Image.Image:
-    width, height = image.size
-    min_pixels = min_pixels
-    max_pixels = max_pixels
-    resized_height, resized_width = smart_resize(
-        height,
-        width,
-        factor=size_factor,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-    )
-    image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
-    return image
-
-
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
@@ -103,15 +83,6 @@ def ceil_by_factor(number: int, factor: int) -> int:
 def floor_by_factor(number: int, factor: int) -> int:
     """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
     return math.floor(number / factor) * factor
-
-
-async def resize_image_async(
-    image,
-    min_pixels: int,
-    max_pixels: int,
-    size_factor: int,
-):
-    return resize_image(image, min_pixels, max_pixels, size_factor)
 
 
 def smart_nframes(
@@ -294,11 +265,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.audio_start_token_id = getattr(hf_config, "audio_start_token_id", None)
         self.audio_token_id = getattr(hf_config, "audio_token_id", None)
 
-        self.NUM_TOKEN_PER_FRAME = 770
         self.IMAGE_FACTOR = 28
-        self.MIN_PIXELS = 4 * 28 * 28
-        self.MAX_PIXELS = envs.SGLANG_IMAGE_MAX_PIXELS.get()
-        self.MAX_RATIO = 200
 
         self.VIDEO_MIN_PIXELS = 128 * 28 * 28
         self.VIDEO_MAX_PIXELS = 768 * 28 * 28
@@ -309,8 +276,6 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
             image_processor = getattr(_processor, "image_processor", None)
             self.IMAGE_FACTOR = image_processor.patch_size * image_processor.merge_size
-            self.MIN_PIXELS = image_processor.size["shortest_edge"]
-            self.MAX_PIXELS = image_processor.size["longest_edge"]
 
             video_processor = getattr(_processor, "video_processor", None)
             self.VIDEO_MIN_PIXELS = video_processor.size["shortest_edge"]
@@ -349,16 +314,6 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         load_time = time.perf_counter()
         rid = getattr(request_obj, "rid", "anonymous_rid")
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
-
-        # Qwen-specific: resize images if they are raw Image objects
-        if base_output.images and isinstance(base_output.images[0], Image.Image):
-            resize_tasks = [
-                resize_image_async(
-                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR
-                )
-                for image in base_output.images
-            ]
-            base_output.images = await asyncio.gather(*resize_tasks)
 
         video_metadata = None
         if base_output.videos:
