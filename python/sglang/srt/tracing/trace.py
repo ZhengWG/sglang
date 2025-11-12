@@ -258,7 +258,7 @@ def process_tracing_init(otlp_endpoint, server_name):
 
 
 def get_otlp_span_exporter(endpoint):
-    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
+    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "http/protobuf")
     supported_protocols = {"grpc", "http/protobuf"}
 
     if protocol not in supported_protocols:
