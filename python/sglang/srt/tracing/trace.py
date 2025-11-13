@@ -490,7 +490,8 @@ def trace_req_start(
     bootstrap_room_span_context = None
 
     external_trace_context = _trace_context_propagator.extract(
-        external_trace_header)
+        external_trace_header if external_trace_header is not None else {}
+    )
 
     # create bootstrap room span
     if tracing_multispan_enabled:
