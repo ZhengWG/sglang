@@ -927,7 +927,7 @@ class SchedulerOutputProcessorMixin:
 
             if (
                 req.finished()
-                and self.tp_rank == 0
+                and self.attn_tp_rank == 0
                 and self.server_args.enable_request_time_stats_logging
             ):
                 req.log_time_stats()
@@ -935,7 +935,7 @@ class SchedulerOutputProcessorMixin:
             # req trace metric stats
             if (
                 req.finished()
-                and self.tp_rank == 0
+                and self.attn_tp_rank == 0
                 and self.enable_metrics
                 and self.enable_trace
             ):
@@ -957,7 +957,6 @@ class SchedulerOutputProcessorMixin:
 
                 )
                 req_metrics[req.rid] = req_metric
-
 
             if req.finished():
                 req.release_mm_resources()
