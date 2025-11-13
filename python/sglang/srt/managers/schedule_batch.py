@@ -1954,6 +1954,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             seq_lens_cpu=self.seq_lens_cpu,
             enable_overlap=self.enable_overlap,
             waiting_size = self.waiting_size,
+            create_time=self.create_time,
         )
 
     def _is_available_size_sufficient(self, num_tokens: int) -> bool:

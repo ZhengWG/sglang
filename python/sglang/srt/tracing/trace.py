@@ -489,13 +489,14 @@ def trace_req_start(
     tracer = threads_info[pid].tracer
     bootstrap_room_span_context = None
 
+    external_trace_context = _trace_context_propagator.extract(
+                external_trace_header
+            )
+
     # create bootstrap room span
     if tracing_multispan_enabled:
         if str(bootstrap_room) not in remote_trace_contexts:
             attrs = {"bootstrap_room": str(hex(bootstrap_room))}
-            external_trace_context = _trace_context_propagator.extract(
-                external_trace_header
-            )
             bootstrap_room_span = tracer.start_span(
                 name=f"Bootstrap Room {hex(bootstrap_room)}",
                 start_time=ts,
