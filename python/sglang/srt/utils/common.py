@@ -1188,7 +1188,7 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     import concurrent_log_handler  # noqa: F401
-    _FORMAT = f"%(asctime)s %(levelname)s %(process)d [{prefix} %(filename)s:%(lineno)d] %(message)s"
+    _FORMAT = f"%(asctime)s.%(msecs)03d %(levelname)s %(process)d [{prefix} %(filename)s:%(lineno)d] %(message)s"
     _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
     DEFAULT_LOGGING_CONFIG = {
         "formatters": {
@@ -2327,11 +2327,11 @@ def set_uvicorn_logging_configs():
 
     LOGGING_CONFIG["formatters"]["default"][
         "fmt"
-    ] = "[%(asctime)s] %(levelprefix)s %(message)s"
+    ] = "[%(asctime)s.%(msecs)03d] %(levelprefix)s %(message)s"
     LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
     LOGGING_CONFIG["formatters"]["access"][
         "fmt"
-    ] = '[%(asctime)s] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    ] = '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
     LOGGING_CONFIG["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
     # handler
     LOGGING_CONFIG["handlers"] = {
