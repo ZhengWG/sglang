@@ -74,7 +74,7 @@ except ImportError:
         class IdGenerator:
             pass
 
-    logger.info("opentelemetry package is not installed, tracing disabled")
+    logger.debug("opentelemetry package is not installed, tracing disabled")
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
