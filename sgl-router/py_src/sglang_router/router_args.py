@@ -21,6 +21,8 @@ class RouterArgs:
         default_factory=list
     )  # List of (url, bootstrap_port)
     decode_urls: List[str] = dataclasses.field(default_factory=list)
+    enable_multimodal_disagg: bool = False
+    vision_urls: List[tuple] = dataclasses.field(default_factory=list)
 
     # Routing policy
     policy: str = "cache_aware"
@@ -203,6 +205,18 @@ class RouterArgs:
             action="append",
             metavar=("URL",),
             help="Decode server URL. Can be specified multiple times.",
+        )
+        parser.add_argument(
+            f"--{prefix}enable-multimodal-disagg",
+            action="store_true",
+            help="Enable multimodal (vision-language) disaggregated mode. Requires --vision servers.",
+        )
+        parser.add_argument(
+            f"--{prefix}vision",
+            nargs="+",
+            action="append",
+            help="Vision server URL and optional bootstrap port (same format as --prefill). "
+            "Specify multiple times for multiple vision servers.",
         )
         parser.add_argument(
             f"--{prefix}worker-startup-timeout-secs",
@@ -661,6 +675,9 @@ class RouterArgs:
         args_dict["decode_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}decode_selector", None)
         )
+        args_dict["vision_urls"] = cls._parse_vision_urls(
+            cli_args_dict.get(f"{prefix}vision", None)
+        )
 
         # Mooncake-specific annotation
         args_dict["bootstrap_port_annotation"] = "sglang.ai/bootstrap-port"
@@ -674,8 +691,13 @@ class RouterArgs:
             if not self.service_discovery:
                 if not self.prefill_urls:
                     raise ValueError("PD disaggregation mode requires --prefill")
-                if not self.decode_urls:
-                    raise ValueError("PD disaggregation mode requires --decode")
+                if (
+                    not self.enable_multimodal_disagg
+                    and not self.decode_urls
+                ):
+                    raise ValueError(
+                        "PD disaggregation mode requires --decode unless --enable-multimodal-disagg is used"
+                    )
 
             # Warn about policy usage in PD mode
             if self.prefill_policy and self.decode_policy and self.policy:
@@ -692,6 +714,21 @@ class RouterArgs:
                 logger.info(
                     f"Using --policy '{self.policy}' for prefill nodes "
                     f"and --decode-policy '{self.decode_policy}' for decode nodes."
+                )
+
+        if self.enable_multimodal_disagg:
+            if not self.pd_disaggregation:
+                logger.warning(
+                    "--enable-multimodal-disagg is set without --pd-disaggregation; enabling PD mode automatically."
+                )
+                self.pd_disaggregation = True
+            if not self.vision_urls:
+                raise ValueError(
+                    "Multimodal disaggregation requires at least one --vision server"
+                )
+            if not self.prefill_urls:
+                raise ValueError(
+                    "Multimodal disaggregation requires at least one --prefill server"
                 )
 
     @staticmethod
@@ -744,6 +781,12 @@ class RouterArgs:
             prefill_urls.append((url, bootstrap_port))
 
         return prefill_urls
+
+    @staticmethod
+    def _parse_vision_urls(vision_list):
+        if not vision_list:
+            return []
+        return RouterArgs._parse_prefill_urls(vision_list)
 
     @staticmethod
     def _parse_decode_urls(decode_list):
