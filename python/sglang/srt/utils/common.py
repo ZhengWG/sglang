@@ -3726,6 +3726,16 @@ def get_current_device_stream_fast():
     return torch.get_device_module().current_stream(cached_device_index)
 
 
+def raise_error_or_warn(obj, strict, counter_name, message, log_interval=1000):
+    if strict:
+        raise ValueError(message)
+    else:
+        count = getattr(obj, counter_name, 0)
+        if count % log_interval == 0:
+            logger.warning(message)
+        setattr(obj, counter_name, count + 1)
+
+
 def extract_numa_id(device_id):
     return device_id.split(':')[0]
 
