@@ -21,6 +21,8 @@ class RouterArgs:
         default_factory=list
     )  # List of (url, bootstrap_port)
     decode_urls: List[str] = dataclasses.field(default_factory=list)
+    enable_multimodal_disagg: bool = False
+    vision_urls: List[str] = dataclasses.field(default_factory=list)
 
     # Routing policy
     policy: str = "cache_aware"
@@ -203,6 +205,24 @@ class RouterArgs:
             action="append",
             metavar=("URL",),
             help="Decode server URL. Can be specified multiple times.",
+        )
+        parser.add_argument(
+            f"--{prefix}vision",
+            nargs=1,
+            action="append",
+            metavar=("URL",),
+            help="Vision server URL. Can be specified multiple times.",
+        )
+        parser.add_argument(
+            f"--{prefix}enable-multimodal-disagg",
+            action="store_true",
+            help="Enable multimodal disaggregation (vision and language). Requires --vision and --prefill.",
+        )
+        parser.add_argument(
+            f"--{prefix}vision-bootstrap-ports",
+            type=int,
+            nargs="+",
+            help="Bootstrap ports for vision servers",
         )
         parser.add_argument(
             f"--{prefix}worker-startup-timeout-secs",
@@ -652,6 +672,9 @@ class RouterArgs:
         args_dict["decode_urls"] = cls._parse_decode_urls(
             cli_args_dict.get(f"{prefix}decode", None)
         )
+        args_dict["vision_urls"] = cls._parse_vision_urls(
+            cli_args_dict.get(f"{prefix}vision", None)
+        )
         args_dict["selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}selector", None)
         )
@@ -692,6 +715,15 @@ class RouterArgs:
                 logger.info(
                     f"Using --policy '{self.policy}' for prefill nodes "
                     f"and --decode-policy '{self.decode_policy}' for decode nodes."
+                )
+        if self.enable_multimodal_disagg:
+            if not self.service_discovery and not self.vision_urls:
+                raise ValueError(
+                    "Multimodal disaggregation mode requires at least one --vision endpoint"
+                )
+            if not self.service_discovery and not self.prefill_urls:
+                raise ValueError(
+                    "Multimodal disaggregation mode requires at least one --prefill endpoint"
                 )
 
     @staticmethod
