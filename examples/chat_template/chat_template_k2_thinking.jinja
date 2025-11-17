@@ -1,40 +1,40 @@
 {%- macro render_content(msg) -%}
-    {%- set role_name =  msg.get('name') or  msg['role'] -%}
-    {%- set c = msg.get('content') -%}
-    {%- if c is string -%}
-      {%- set content = c -%}
-      {%- if msg['role'] == 'assistant' %}
-        {% if '</think>' in content %}
-          {% set content = content.split('</think>')[-1] %}
-        {% endif %}
+  {%- set role_name =  msg.get('name') or  msg['role'] -%}
+  {%- set c = msg.get('content') -%}
+  {%- if c is string -%}
+    {%- set content = c -%}
+    {%- if msg['role'] == 'assistant' %}
+      {% if '</think>' in content %}
+        {% set content = content.split('</think>')[-1] %}
       {% endif %}
-{{ content }}
-    {%- elif c is not none -%}
-      {% for content in c -%}
-        {% if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}
-          <|media_start|>image<|media_content|><|media_pad|><|media_end|>
-        {% else -%}
-          {%- set content = content['text'] -%}
-          {%- if msg['role'] == 'assistant' %}
-            {% if '</think>' in content %}
-                {% set content = content.split('</think>')[-1] %}
-            {% endif %}
+    {% endif %}
+{{content}}
+  {%- elif c is not none -%}
+    {% for content in c -%}
+      {% if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}
+<|media_start|>image<|media_content|><|media_pad|><|media_end|>
+      {% else -%}
+        {%- set text_content = content['text'] -%}
+        {%- if msg['role'] == 'assistant' %}
+          {% if '</think>' in text_content %}
+            {% set text_content = text_content.split('</think>')[-1] %}
           {% endif %}
-{{ content }}
-        {%- endif -%}
-      {%- endfor -%}
-    {%- endif -%}
+        {% endif %}
+{{text_content}}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
 {%- endmacro -%}
 
 {%- macro extract_reasoning_content(msg) -%}
-    {%- set content = msg.get('content', '') -%}
-    {%- set rc = msg.get('reasoning_content', '') -%}
-    {% if '</think>' in content %}
-        {% set rc = content.split('</think>', 1)[0] %}
-        {% if '<think>' in rc %}
-            {% set rc = content.split('<think>', 1)[-1] %}
-        {% endif %}
+  {%- set content = msg.get('content', '') -%}
+  {%- set rc = msg.get('reasoning_content', '') -%}
+  {% if '</think>' in content %}
+    {% set rc = content.split('</think>', 1)[0] %}
+    {% if '<think>' in rc %}
+      {% set rc = content.split('<think>', 1)[-1] %}
     {% endif %}
+  {% endif %}
 {{rc}}
 {%- endmacro -%}
 
