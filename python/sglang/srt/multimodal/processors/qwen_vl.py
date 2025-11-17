@@ -31,18 +31,16 @@ if envs.SGLANG_RESIZE_RESAMPLE.is_set() and RESIZE_RESAMPLE is None:
         f"Invalid RESIZE_RESAMPLE value: '{envs.SGLANG_RESIZE_RESAMPLE.get()}'. "
         f"Ignoring and using default."
     )
-VIDEO_TOTAL_PIXELS = int(
-    float(os.environ.get("VIDEO_MAX_PIXELS", 128000 * 28 * 28 * 0.9))
-)
-FRAME_FACTOR = 2
 
 
-def smart_resize(
+def smart_resize_for_video(
+    num_frames: int,
     height: int,
     width: int,
-    factor: int,
-    min_pixels: int,
-    max_pixels: int,
+    temporal_factor: int = 2,
+    factor: int = 32,
+    min_pixels: int = 128 * 128,
+    max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
 ) -> tuple[int, int]:
     """
     Rescales the image so that the following conditions are met:
@@ -53,18 +51,25 @@ def smart_resize(
 
     3. The aspect ratio of the image is maintained as closely as possible.
     """
-    if max(height, width) / min(height, width) > MAX_RATIO:
+    if num_frames < temporal_factor:
+        raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
+    if height < factor or width < factor:
+        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+    elif max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
             f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
         )
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = floor_by_factor(height / beta, factor)
-        w_bar = floor_by_factor(width / beta, factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
+
+    h_bar = round_by_factor(height, factor)
+    w_bar = round_by_factor(width, factor)
+    t_bar = round_by_factor(num_frames, temporal_factor)
+
+    if t_bar * h_bar * w_bar > max_pixels:
+        beta = math.sqrt((num_frames * height * width) / max_pixels)
+        h_bar = max(factor, floor_by_factor(height / beta, factor))
+        w_bar = max(factor, floor_by_factor(width / beta, factor))
+    elif t_bar * h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (num_frames * height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
     return h_bar, w_bar
@@ -88,6 +93,7 @@ def floor_by_factor(number: int, factor: int) -> int:
 def smart_nframes(
     ele: dict,
     total_frames: int,
+    temporal_factor: int,
     video_fps: int | float,
     default_fps: int | float,
     default_fps_min_frames: int,
@@ -103,13 +109,14 @@ def smart_nframes(
                     - min_frames: the minimum number of frames of the video, only used when fps is provided.
                     - max_frames: the maximum number of frames of the video, only used when fps is provided.
         total_frames (int): the original total number of frames of the video.
+        temporal_factor (int): the original temporal factor.
         video_fps (int | float): the original fps of the video.
         default_fps (int | float): the target fps of the video.
         default_fps_min_frames (int): the min frames of the video.
         default_fps_max_frames (int): the max frames of the video.
 
     Raises:
-        ValueError: nframes should in interval [FRAME_FACTOR, total_frames].
+        ValueError: nframes should in interval [temporal_factor, total_frames].
 
     Returns:
         int: the number of frames for video used for model inputs.
@@ -118,15 +125,15 @@ def smart_nframes(
         "fps" in ele and "nframes" in ele
     ), "Only accept either `fps` or `nframes`"
     if "nframes" in ele:
-        nframes = round_by_factor(ele["nframes"], FRAME_FACTOR)
+        nframes = round_by_factor(ele["nframes"], temporal_factor)
     else:
         fps = ele.get("fps", default_fps)
         min_frames = ceil_by_factor(
-            ele.get("min_frames", default_fps_min_frames), FRAME_FACTOR
+            ele.get("min_frames", default_fps_min_frames), temporal_factor
         )
         max_frames = floor_by_factor(
             ele.get("max_frames", min(default_fps_max_frames, total_frames)),
-            FRAME_FACTOR,
+            temporal_factor,
         )
         nframes = total_frames / video_fps * fps
         if nframes > total_frames:
@@ -134,10 +141,10 @@ def smart_nframes(
                 f"smart_nframes: nframes[{nframes}] > total_frames[{total_frames}]"
             )
         nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
-        nframes = floor_by_factor(nframes, FRAME_FACTOR)
-    if not (FRAME_FACTOR <= nframes and nframes <= total_frames):
+        nframes = floor_by_factor(nframes, temporal_factor)
+    if not (temporal_factor <= nframes and nframes <= total_frames):
         raise ValueError(
-            f"nframes should in interval [{FRAME_FACTOR}, {total_frames}], but got {nframes}."
+            f"nframes should in interval [{temporal_factor}, {total_frames}], but got {nframes}."
         )
     return nframes
 
@@ -148,6 +155,7 @@ async def preprocess_video(
     image_factor: int,
     video_min_pixels: int,
     video_max_pixels: int,
+    temporal_factor: int,
     default_fps: int | float,
     default_fps_min_frames: int,
     default_fps_max_frames: int,
@@ -166,6 +174,7 @@ async def preprocess_video(
         nframes = smart_nframes(
             ele,
             total_frames=total_frames,
+            temporal_factor=temporal_factor,
             video_fps=video_fps,
             default_fps=default_fps,
             default_fps_min_frames=default_fps_min_frames,
@@ -178,32 +187,32 @@ async def preprocess_video(
     video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
     min_pixels = ele.get("min_pixels", video_min_pixels)
-    total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
-    max_pixels = max(
-        min(video_max_pixels, total_pixels / nframes * FRAME_FACTOR),
-        int(min_pixels * 1.05),
-    )
+    max_pixels = ele.get("max_pixels", video_max_pixels)
+    max_pixels = max(max_pixels, int(min_pixels * 1.05))
 
     get_batch_time = time.perf_counter()
 
-    max_pixels_supposed = ele.get("max_pixels", max_pixels)
-    if max_pixels_supposed > max_pixels:
+    if max_pixels > video_max_pixels:
         logger.warning(
-            f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}]."
+            f"The given max_pixels[{max_pixels}] exceeds limit[{video_max_pixels}]."
         )
-    max_pixels = min(max_pixels_supposed, max_pixels)
+    max_pixels = min(max_pixels, video_max_pixels)
     if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize(
+        resized_height, resized_width = smart_resize_for_video(
+            nframes,
             ele["resized_height"],
             ele["resized_width"],
+            temporal_factor=temporal_factor,
             factor=image_factor,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
         )
     else:
-        resized_height, resized_width = smart_resize(
+        resized_height, resized_width = smart_resize_for_video(
+            nframes,
             height,
             width,
+            temporal_factor=temporal_factor,
             factor=image_factor,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
@@ -267,11 +276,12 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         self.IMAGE_FACTOR = 28
 
-        self.VIDEO_MIN_PIXELS = 128 * 28 * 28
-        self.VIDEO_MAX_PIXELS = 768 * 28 * 28
+        self.VIDEO_MIN_PIXELS = 4 * 28 * 28 # 3136
+        self.VIDEO_MAX_PIXELS = 16384 * 28 * 28 # 12845056
         self.FPS = 2.0
         self.FPS_MIN_FRAMES = 4
         self.FPS_MAX_FRAMES = 768
+        self.TEMPORAL_PATCH_SIZE = 2
 
         if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
             image_processor = getattr(_processor, "image_processor", None)
@@ -283,6 +293,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             self.FPS = video_processor.fps
             self.FPS_MIN_FRAMES = video_processor.min_frames
             self.FPS_MAX_FRAMES = video_processor.max_frames
+            self.TEMPORAL_PATCH_SIZE = video_processor.temporal_patch_size
 
         self.mm_tokens = MultimodalSpecialTokens(
             image_token="<|vision_start|><|image_pad|><|vision_end|>",
@@ -324,6 +335,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                         image_factor=self.IMAGE_FACTOR,
                         video_min_pixels=self.VIDEO_MIN_PIXELS,
                         video_max_pixels=self.VIDEO_MAX_PIXELS,
+                        temporal_factor=self.TEMPORAL_PATCH_SIZE,
                         default_fps=self.FPS,
                         default_fps_min_frames=self.FPS_MIN_FRAMES,
                         default_fps_max_frames=self.FPS_MAX_FRAMES,
