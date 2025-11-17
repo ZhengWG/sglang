@@ -101,7 +101,7 @@ time_infos = {}
 # Root of compile cache dirs.
 COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 # List of compile cache dirs for save/load to speed up engine launch.
-COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm_ffi"]
+COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
