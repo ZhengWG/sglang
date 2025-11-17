@@ -573,8 +573,8 @@ class Req:
 
         # For retraction
         self.is_retracted = False
-        # indicate the req ever been retracted
-        self.has_retracted = False
+        # Indicates if the req has ever been retracted.
+        self.retracted_stain = False
 
         # Incremental streamining
         self.send_token_offset: int = 0
@@ -950,7 +950,7 @@ class Req:
         self.swa_uuid_for_lock = None
         self.extend_input_len = 0
         self.is_retracted = True
-        self.has_retracted = True
+        self.retracted_stain = True
         self.input_token_logprobs = None
         self.temp_input_top_logprobs_val = None
         self.temp_input_top_logprobs_idx = None
@@ -1377,9 +1377,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
             multimodal_inputs.append(req.multimodal_inputs)
 
-            # Only caculate cached_tokens once, once retracted, the 'has_retracted'
+            # Only calculate cached_tokens once. Once retracted, the 'retracted_stain'
             # flag will always True
-            if req.has_retracted is False:
+            if not req.retracted_stain:
                 req.cached_tokens += pre_len - req.already_computed
                 req.already_computed = seq_len
             req.is_retracted = False
