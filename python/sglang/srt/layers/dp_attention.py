@@ -291,6 +291,10 @@ def initialize_dp_attention(
         _LOCAL_ATTN_DP_SIZE = 1
 
     tp_group = get_tp_group()
+    # Trick to solve circular references
+    from sglang.srt.layers.attention.nsa.utils import is_nsa_enable_prefill_cp
+
+    use_pynccl = True if is_nsa_enable_prefill_cp() else SYNC_TOKEN_IDS_ACROSS_TP
     _ATTN_TP_ENABLE_ALL_REDUCE = enable_dp_attention and _ATTN_TP_SIZE != 1
     _ATTN_TP_GROUP = GroupCoordinator(
         [
@@ -299,7 +303,7 @@ def initialize_dp_attention(
         ],
         tp_group.local_rank,
         torch.distributed.get_backend(tp_group.device_group),
-        use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
+        use_pynccl=use_pynccl,
         use_pymscclpp=False,
         use_custom_allreduce=_ATTN_TP_ENABLE_ALL_REDUCE,
         use_torch_symm_mem_all_reduce=False,
