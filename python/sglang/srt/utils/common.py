@@ -94,6 +94,10 @@ from typing_extensions import Literal
 from sglang.srt.environ import envs
 from sglang.srt.metrics.func_timer import enable_func_timer
 
+if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+    from model_manager.apis import get_model_path_from_manager
+
+
 logger = logging.getLogger(__name__)
 
 show_time_cost = False
@@ -102,7 +106,7 @@ time_infos = {}
 # Root of compile cache dirs.
 COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 # List of compile cache dirs for save/load to speed up engine launch.
-COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm_ffi"]
+COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
 
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
@@ -3779,3 +3783,52 @@ def check_device_cross_numa_node(visible_device_idx=None) -> bool:
 def get_process_uptime() -> float:
     current_process = psutil.Process()
     return time.time() - current_process.create_time()
+
+
+# Get model path from model-manager.
+def get_model_path(with_weights: bool) -> str:
+    if not envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+        logger.warn("get_model_path() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return.")
+        return ""
+
+    return get_model_path_from_manager(with_weights)
+
+
+# Get model path from model-manager and link the given
+# model_path to it.
+def link_model_at(link_path: str, with_weights: bool) -> None:
+    if not envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+        logger.warn("link_model_at() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return.")
+        return
+
+    model_path = get_model_path_from_manager(with_weights)
+
+    if model_path == "":
+        logger.error("Failed to get model path from model-manager.")
+        return
+
+    target = Path(model_path).resolve()
+    link_name = Path(link_path)
+
+    # Early return if the symlink already points to the correct target
+    if link_name.is_symlink() and link_name.readlink() == target:
+        logger.info(
+            f"Symlink already exists and points to correct target: {link_name} -> {target} (with_weights={with_weights})"
+        )
+        return
+
+    # Remove existing file or broken symlink if present
+    if link_name.exists() or link_name.is_symlink():
+        link_name.unlink(
+            missing_ok=True
+        )  # missing_ok is safe here and available in Python 3.8+
+        logger.info(f"Removed existing path/symlink: {link_name}")
+
+    # Only operations that can actually raise OSError related to symlink creation are inside try
+    try:
+        link_name.symlink_to(target)
+        logger.info(
+            f"Created symlink: {link_name} -> {target} (with_weights={with_weights})"
+        )
+    except OSError as e:
+        logger.error(f"Failed to create symlink {link_name} -> {target}: {e}")
