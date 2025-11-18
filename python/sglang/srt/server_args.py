@@ -58,6 +58,7 @@ from sglang.srt.utils.common import (
     nullable_str,
     parse_connector_type,
     xpu_has_xmx_support,
+    link_model_at,
 )
 from sglang.srt.utils.hf_transformers_utils import check_gguf_file, get_config
 from sglang.utils import is_in_ci
@@ -546,6 +547,10 @@ class ServerArgs:
         if self.model_path.lower() in ["none", "dummy"]:
             # Skip for dummy models
             return
+
+        if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+            # to avoid changing model path, we create symlink instead of updating it
+            link_model_at(self.model_path, with_weights=False)
 
         # Handle deprecated arguments.
         self._handle_deprecated_args()

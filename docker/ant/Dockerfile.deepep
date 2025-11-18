@@ -114,6 +114,10 @@ RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
 RUN yum install -y gdb && \
     pip install pystack-debugger py-spy concurrent_log_handler
 
+# support async model mount, refer: https://yuque.antfin.com/deepxpu/uiwv6l/ri1gufqzy4g8fdob
+ARG MODEL_MANAGER_VERSION="0.0.2"
+RUN pip3 install --no-cache-dir https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/model-manager/model-manager-${MODEL_MANAGER_VERSION}.tar.gz
+
 ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
     ENGINE_TYPE=sglang

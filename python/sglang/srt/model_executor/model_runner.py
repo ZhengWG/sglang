@@ -53,6 +53,7 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
 from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
+from sglang.srt.environ import envs
 from sglang.srt.eplb.eplb_manager import EPLBManager
 from sglang.srt.eplb.expert_distribution import (
     ExpertDistributionRecorder,
@@ -138,6 +139,7 @@ from sglang.srt.utils import (
     set_cuda_arch,
     slow_rank_detector,
     xpu_has_xmx_support,
+    get_model_path,
 )
 from sglang.srt.utils.offloader import (
     create_offloader_from_server_args,
@@ -391,6 +393,9 @@ class ModelRunner:
         if server_args.enable_lora:
             self.model_config.is_post_loading_model = False
 
+        if envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model):
+            self.model_config.model_path = get_model_path(with_weights=True)
+
         # Load the model
         self.sampler = Sampler()
         self.load_model()
@@ -418,6 +423,8 @@ class ModelRunner:
         is_default_loader = isinstance(loader, DefaultModelLoader)
         if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
             def get_weights(config):
+                if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+                    config.model_path = get_model_path(with_weights=True)
                 return loader._get_weights_iterator(
                     DefaultModelLoader.Source.init_new(config, self.model)
                 )
