@@ -4,7 +4,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Union
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from sglang.srt.entrypoints.openai.protocol import (
@@ -374,6 +374,16 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 final_usage_data = final_usage_chunk.model_dump_json(exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
 
+        except HTTPException as e:
+            error = self.create_streaming_error_response(
+                message=e.detail,
+                err_type=str(e.status_code),
+                status_code=e.status_code,
+            )
+            yield f"data: {error}\n\n"
+        except ValueError as e:
+            error = self.create_streaming_error_response(str(e))
+            yield f"data: {error}\n\n"
         except Exception as e:
             error_code = getattr(e, "error_code", 400)
             error = self.create_streaming_error_response(str(e), status_code=error_code,)
