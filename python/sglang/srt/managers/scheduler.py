@@ -1813,11 +1813,11 @@ class Scheduler(
         )
 
         if self.chunked_req is not None:
-            self.chunked_req.init_next_round_input()
             # currently, `add_chunked_req` will not handle budget(rem_total_tokens etc.)
             # like `add_one_req`, which may lead to negative _rem_tokens in `add_chunked_req`
             if adder.budget_state() != AddReqResult.CONTINUE:
                 return None
+            self.chunked_req.init_next_round_input()
             self.chunked_req = adder.add_chunked_req(self.chunked_req)
 
         if self.enable_lora:
@@ -2547,7 +2547,9 @@ class Scheduler(
                 # Abort method 3: set `to_finish`
                 # The request will still run one decode forward pass.
                 # Then we reuse all existing code to clean up the KV cache allocation.
-                logger.info(f"Abort running request. {req.rid=}, queue_time={req.time_stats.get_queueing_time()}")
+                logger.info(
+                    f"Abort running request. {req.rid=}, queue_time={req.time_stats.get_queueing_time()}"
+                )
                 req.to_finish = FINISH_ABORT()
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
