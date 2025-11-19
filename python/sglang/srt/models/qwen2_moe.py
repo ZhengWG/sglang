@@ -564,6 +564,20 @@ class Qwen2MoeModel(nn.Module):
         for layer_id in self.layers_to_capture:
             setattr(self.layers[layer_id], "_is_layer_to_capture", True)
 
+    def _process_layer_output(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Hook for subclasses to process layer output.
+
+        Can be overridden by subclasses (e.g., for deepstack processing).
+        Default implementation does nothing.
+        """
+        return hidden_states, residual
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -571,6 +585,7 @@ class Qwen2MoeModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        **kwargs,  # For subclass extensions (e.g., input_deepstack_embeds)
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
@@ -613,6 +628,10 @@ class Qwen2MoeModel(nn.Module):
                             if getattr(layer, "_is_layer_to_capture", False)
                             else None
                         ),
+                    )
+                    # Allow subclasses to process layer output (e.g., add deepstack)
+                    hidden_states, residual = self._process_layer_output(
+                        i, hidden_states, residual
                     )
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(

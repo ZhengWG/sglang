@@ -18,7 +18,7 @@
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -658,6 +658,57 @@ class Qwen3MoeModel(Qwen2MoeModel):
             decoder_layer_type=decoder_layer_type,
             alt_stream=alt_stream,
         )
+        # For deepstack support (VL and disaggregation)
+        self.hidden_size = config.hidden_size
+        self._input_deepstack_embeds = None
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
+
+    def _process_layer_output(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process deepstack embeddings for first 3 layers (if provided)."""
+        if (
+            self._input_deepstack_embeds is not None
+            and self._input_deepstack_embeds.numel() > 0
+            and layer_idx in range(3)
+        ):
+            sep = self.hidden_size * layer_idx
+            hidden_states.add_(
+                self._input_deepstack_embeds[:, sep : sep + self.hidden_size]
+            )
+        return hidden_states, residual
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[torch.Tensor, PPProxyTensors]:
+        """Forward with optional deepstack support.
+
+        Args:
+            input_deepstack_embeds: Optional deepstack embeddings for VL models.
+                If None, behaves as standard text model.
+        """
+        # Store deepstack for _process_layer_output hook
+        self._input_deepstack_embeds = input_deepstack_embeds
+        try:
+            return super().forward(
+                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
+            )
+        finally:
+            # clean up
+            self._input_deepstack_embeds = None
 
 
 class Qwen3MoeForCausalLM(nn.Module):
@@ -685,6 +736,9 @@ class Qwen3MoeForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
         self.capture_aux_hidden_states = False
+        self.is_mrope_enabled = (
+            hasattr(config, "rope_scaling") and config.rope_scaling is not None
+        )
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -697,13 +751,26 @@ class Qwen3MoeForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        input_deepstack_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
+        if self.is_mrope_enabled:
+            positions = forward_batch.mrope_positions
+        # TODO: remove here from modeling
+        if (
+            not forward_batch.forward_mode.is_decode()
+            and forward_batch.contains_mm_inputs()
+        ):
+            # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
+            # just being defensive here
+            forward_batch.mm_inputs = None
+
         hidden_states = self.model(
             input_ids,
             positions,
             forward_batch,
             input_embeds,
             pp_proxy_tensors=pp_proxy_tensors,
+            input_deepstack_embeds=input_deepstack_embeds,
         )
 
         aux_hidden_states = None
@@ -788,6 +855,53 @@ class Qwen3MoeForCausalLM(nn.Module):
         else:
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 
+    def load_fused_expert_weights(
+        self,
+        name: str,
+        params_dict: dict,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        num_experts: int,
+    ):
+        """Load fused expert weights for MoE layers.
+
+        This method handles loading of expert weights when they are fused together,
+        distributing them across expert parallel ranks if needed.
+        """
+        param = params_dict[name]
+        weight_loader = param.weight_loader
+        ep_rank = get_tensor_model_parallel_rank()
+        ep_size = get_moe_expert_parallel_world_size()
+        if ep_size == 1:
+            for expert_id in range(num_experts):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    expert_id,
+                )
+        else:
+            experts_per_ep = num_experts // ep_size
+            start_expert = ep_rank * experts_per_ep
+            end_expert = (
+                (ep_rank + 1) * experts_per_ep
+                if ep_rank != ep_size - 1
+                else num_experts
+            )
+
+            for idx, expert_id in enumerate(range(start_expert, end_expert)):
+                curr_expert_weight = loaded_weight[expert_id]
+                weight_loader(
+                    param,
+                    curr_expert_weight,
+                    name,
+                    shard_id,
+                    idx,
+                )
+        return True
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -805,11 +919,23 @@ class Qwen3MoeForCausalLM(nn.Module):
             num_experts=self.config.num_experts,
         )
 
+        # Fused expert format detection for qwen3-vl
+        is_fused_expert = False
+        fused_expert_params_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        num_experts = self.config.num_experts
+
         # Cache params_dict to avoid repeated expensive traversal of model parameters
         if not hasattr(self, "_cached_params_dict"):
             self._cached_params_dict = dict(self.named_parameters())
         params_dict = self._cached_params_dict
         for name, loaded_weight in weights:
+            # adapt name for disaggregated mode
+            if "language_model" in name:
+                name = name.replace(r"model.language_model.", r"model.")
+
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None
@@ -824,6 +950,11 @@ class Qwen3MoeForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
+                # Detect fused expert format
+                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
+                    is_fused_expert = True
+                    expert_params_mapping = fused_expert_params_mapping
+
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -858,20 +989,51 @@ class Qwen3MoeForCausalLM(nn.Module):
                     # Mark as expert weight regardless of whether we can process it
                     is_expert_weight = True
 
-                    name = name.replace(weight_name, param_name)
-                    if name not in params_dict:
-                        # Expert weight not on this rank, will be skipped below
-                        continue
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_fused_expert:
+                        if name_mapped not in params_dict:
+                            continue
+                        loaded_weight = loaded_weight.transpose(-1, -2)  # no bias
+                        if "experts.gate_up_proj" in name:
+                            loaded_weight = loaded_weight.chunk(2, dim=-2)
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[0],
+                                "w1",
+                                num_experts,
+                            )
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight[1],
+                                "w3",
+                                num_experts,
+                            )
+                        else:
+                            self.load_fused_expert_weights(
+                                name_mapped,
+                                params_dict,
+                                loaded_weight,
+                                shard_id,
+                                num_experts,
+                            )
+                    else:
+                        # Standard expert loading path
+                        if name_mapped not in params_dict:
+                            # Expert weight not on this rank, will be skipped below
+                            continue
 
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
+                        param = params_dict[name_mapped]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
+                    name = name_mapped
                     break
                 else:
                     if is_expert_weight:

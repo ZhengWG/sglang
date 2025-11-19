@@ -134,8 +134,11 @@ class SchedulerMetricsMixin:
 
         iter_msg = f" [{self.forward_ct + 1}]" if LOG_FORWARD_ITERS else ""
 
-        f = (
-            f"Prefill batch{iter_msg}, "
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            f = f"Encode batch. "
+        else:
+            f = f"Prefill batch{iter_msg}, "
+        f += (
             f"#new-seq: {len(can_run_list)}, "
             f"#new-token: {adder.log_input_tokens}, "
             f"#cached-token: {adder.log_hit_tokens}, "
@@ -148,6 +151,24 @@ class SchedulerMetricsMixin:
             f += f"#prealloc-req: {len(self.disagg_prefill_bootstrap_queue.queue)}, "
             f += f"#inflight-req: {len(self.disagg_prefill_inflight_queue)}, "
             f += f"input throughput (token/s): {self.last_input_throughput:.2f}, "
+        elif self.disaggregation_mode == DisaggregationMode.LANGUAGE:
+            f += f"#unbootstrapped-req: {len(self.disagg_language_prealloc_queue.queue)}, "
+            f += f"#queue-req: {len(self.waiting_queue)}, "
+            f += (
+                f"#transferring-req: {len(self.disagg_language_transfer_queue.queue)}, "
+            )
+            f += f"#avaliable-slots: {self.req_to_metadata_buffer_idx_allocator.available_size()}, "
+            f += f"input throughput (token/s): {self.last_input_throughput:.2f}, "
+        elif self.disaggregation_mode == DisaggregationMode.ENCODE:
+            f += f"#running-req: {running_bs}, "
+            f += f"#queue-req: {len(self.waiting_queue)}, "
+            f += f"#unbootstrapped-req: {len(self.disagg_embedding_bootstrap_queue.queue)}, "
+            f += f"#transferring-req: {len(self.disagg_embedding_inflight_queue)}, "
+            f += f"#avaliable-slots: {self.req_to_metadata_buffer_idx_allocator.available_size()}, "
+            f += f"input throughput (token/s): {self.last_input_throughput:.2f}, "
+        else:
+            f += f"#running-req: {running_bs}, "
+            f += f"#queue-req: {len(self.waiting_queue)}, "
 
         logger.info(f)
 

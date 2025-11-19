@@ -118,8 +118,9 @@ def _determine_tensor_transport_mode(server_args: ServerArgs) -> TensorTransport
         return "default"
     else:
         return "cuda_ipc"
-
-
+import uuid
+import joblib
+import ctypes
 @dataclasses.dataclass
 class ReqState:
     """Store the state a request."""
@@ -813,6 +814,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 mm_inputs,
                 token_type_ids,
                 sampling_params,
+                bootstrap_host=obj.bootstrap_host,
+                bootstrap_port=obj.bootstrap_port,
+                bootstrap_room=obj.bootstrap_room,
                 rid=obj.rid,
                 priority=obj.priority,
                 dimensions=obj.dimensions,
@@ -920,7 +924,35 @@ class TokenizerManager(TokenizerCommunicatorMixin):
     ):
         trace_slice_start(RequestStage.TOKENIZER_DISPATCH, obj.rid)
         tokenized_obj.trace_context = trace_get_proc_propagate_context(obj.rid)
-        self.send_to_scheduler.send_pyobj(tokenized_obj)
+        tokenized_obj.send_time = time.time()
+        if hasattr(tokenized_obj, 'mm_inputs') and tokenized_obj.mm_inputs:
+            mm_items = tokenized_obj.mm_inputs.get('mm_items', [])
+            if mm_items and hasattr(mm_items[0], 'feature'):
+                tensor = mm_items[0].feature
+                
+                if tensor.is_cuda:
+                    tensor = tensor.cpu()
+                
+                if not tensor.is_contiguous():
+                    tensor = tensor.contiguous()
+                
+                tensor_info = {
+                    'shape': list(tensor.shape),
+                    'dtype': str(tensor.dtype),
+                }
+                
+                np_array = tensor.detach().numpy()
+                
+                original_tensor = mm_items[0].feature
+                mm_items[0].feature = None  
+                
+                self.send_to_scheduler.send_multipart([
+                    pickle.dumps(tokenized_obj),
+                    pickle.dumps(tensor_info),
+                    np_array  
+                ], copy=False)
+        else:
+            self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
         state.request_scheduled_ts = time.time()
         self.rid_to_state[obj.rid] = state

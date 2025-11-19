@@ -266,6 +266,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         continue
                     if "visual" in name:
                         continue
+                    if self.is_multimodal_embedding and name not in params_dict:
+                        continue
                     # Anyway, this is an expert weight and should not be
                     # attempted to load as other weights later
                     is_expert_weight = True

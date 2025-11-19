@@ -272,6 +272,18 @@ class ModelRunner:
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
+        self.multimodal_encode_disaggregated = (
+            server_args.disaggregation_mode == "encode"
+        )
+        self.multimodal_language_disaggregated = (
+            server_args.disaggregation_mode == "language"
+        )
+        vision_config = getattr(self.model_config.hf_config, "vision_config", None)
+        self.enable_deepstack_input = (
+            vision_config is not None
+            and getattr(vision_config, "deepstack_visual_indexes", None)
+            and len(vision_config.deepstack_visual_indexes) > 0
+        )
         self.is_multimodal = model_config.is_multimodal
         self.is_multimodal_chunked_prefill_supported = (
             model_config.is_multimodal_chunked_prefill_supported
@@ -1828,6 +1840,9 @@ class ModelRunner:
                     start_layer=self.start_layer,
                     end_layer=self.end_layer,
                     enable_alt_stream=not self.server_args.enable_pdmux,
+                    disable_allocate_kvcache=(
+                        self.server_args.disaggregation_mode == "encode"
+                    ),
                     enable_kv_cache_copy=(
                         self.server_args.speculative_algorithm is not None
                     ),
@@ -1985,6 +2000,9 @@ class ModelRunner:
             # TODO: Currently, cuda graph only captures decode steps, which only exists for generation models
             return
 
+        if self.multimodal_encode_disaggregated:
+            return
+
         if self.device != "cpu" and self.server_args.disable_cuda_graph:
             return
 
@@ -2089,9 +2107,20 @@ class ModelRunner:
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
         if forward_batch.input_embeds is not None:
-            kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
+            if self.enable_deepstack_input:
+                # Separate input_embeds into language and deepstack parts (Qwen3-VL with deepstack)
+                separate_index = self.model_config.hidden_size
+                emb = forward_batch.input_embeds
+                kwargs["input_embeds"] = emb[:, :separate_index].bfloat16().contiguous()
+                kwargs["input_deepstack_embeds"] = (
+                    emb[:, separate_index:].bfloat16().contiguous()
+                )
+            else:
+                kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
         if not self.is_generation:
             kwargs["get_embedding"] = True
+        if self.multimodal_encode_disaggregated:
+            kwargs["get_multimodal_embedding"] = True
 
         if (
             self.piecewise_cuda_graph_runner is not None
