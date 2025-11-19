@@ -949,7 +949,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 self.send_to_scheduler.send_multipart([
                     pickle.dumps(tokenized_obj),
                     pickle.dumps(tensor_info),
-                    np_array  # ZMQ 会自动用 buffer protocol
+                    np_array  
                 ], copy=False)
         else:
             self.send_to_scheduler.send_pyobj(tokenized_obj)
