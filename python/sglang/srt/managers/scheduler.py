@@ -203,7 +203,9 @@ from sglang.srt.utils.hf_transformers_utils import (
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
-
+import joblib
+import pickle
+import numpy as np
 logger = logging.getLogger(__name__)
 
 # Test retract decode for debugging purposes
@@ -1120,10 +1122,40 @@ class Scheduler(
 
                 while True:
                     try:
-                        recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                        parts = self.recv_from_tokenizer.recv_multipart(flags=zmq.NOBLOCK, copy=False)
+                        if len(parts) == 3:
+                            recv_req = pickle.loads(parts[0])
+                            tensor_info = pickle.loads(parts[1])
+                            buffer = parts[2].buffer if hasattr(parts[2], 'buffer') else parts[2]
+                            dtype_map = {
+                                'torch.float32': np.float32,
+                                'torch.float64': np.float64,
+                                'torch.int32': np.int32,
+                                'torch.int64': np.int64,
+                            }
+                            np_dtype = dtype_map.get(tensor_info['dtype'], np.float32)
+                            np_array = np.frombuffer(buffer, dtype=np_dtype).reshape(tensor_info['shape'])
+                            tensor = torch.from_numpy(np_array)
+                            
+                            if hasattr(recv_req, 'mm_inputs') and recv_req.mm_inputs and 'mm_items' in recv_req.mm_inputs:
+                                if recv_req.mm_inputs['mm_items'] and hasattr(recv_req.mm_inputs['mm_items'][0], 'feature'):
+                                    recv_req.mm_inputs['mm_items'][0].feature = tensor
+                            
+                            recv_reqs.append(recv_req)
+                            
+                            if hasattr(recv_req, 'send_time'):
+                                logger.info(f"Receiving time (optimized): {(time.time() - recv_req.send_time)*1000:.2f} ms")
+                            
+                        elif len(parts) == 1:
+                            recv_req = pickle.loads(parts[0])
+                            recv_reqs.append(recv_req)
+                            
                     except zmq.ZMQError:
-                        break
-                    recv_reqs.append(recv_req)
+                        try:
+                            recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                            recv_reqs.append(recv_req)
+                        except zmq.ZMQError:
+                            break
 
                 while True:
                     try:
@@ -1311,6 +1343,7 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        
         # Create a new request
         if (
             recv_req.session_params is None
