@@ -33,14 +33,17 @@ class FutureMap:
     def __init__(
         self,
         max_running_requests: int,
+        chunked_prefill_size: int,
+        context_len: int,
         device: torch.device,
         spec_algo: Optional[SpeculativeAlgorithm] = None,
     ):
         self.future_ct = 0
-        # A factor of 3 is used to avoid collision in the circular buffer.
-        self.future_limit = max_running_requests * 3
-        # A factor of 5 is used to ensure the buffer is large enough.
-        self.future_buffer_len = max_running_requests * 5
+        # A factor of 3 is used to avoid collision in the circular buffer. 
+        # In case chunked_prefill's res overlap prefill's res, we increase the factor when chunked_prefill_size is set.
+        self.future_limit = max_running_requests * max(3, (context_len + chunked_prefill_size -1)//chunked_prefill_size) if chunked_prefill_size else 3 * max_running_requests
+        # A factor 2 * max_running_requests larger than future_limit is enough
+        self.future_buffer_len = self.future_limit + 2 * max_running_requests
         self.device = device
         self.spec_algo = spec_algo
         self.buf_initialized = False
