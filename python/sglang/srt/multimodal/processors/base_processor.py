@@ -185,6 +185,14 @@ class BaseMultimodalProcessor(ABC):
             mp_context=mp.get_context("fork"),
             max_workers=int(os.environ.get("SGLANG_CPU_WORKERS", os.cpu_count())),
         )
+        self.load_mm_data_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=int(
+                os.environ.get(
+                    "SGLANG_MM_DATA_LOADING_WORKERS", min(96, os.cpu_count())
+                )
+            ),
+            thread_name_prefix="mm_data_loader",
+        )
 
         # Mapping from attribute names to modality types
         self.ATTR_NAME_TO_MODALITY = {
@@ -360,7 +368,6 @@ class BaseMultimodalProcessor(ABC):
         finally:
             cost_time = (time.perf_counter() - start_time) * 1000
             logger.info(f"load single mm item cost {cost_time:.2f} ms")
-
 
     def submit_data_loading_tasks(
         self,
@@ -575,7 +582,8 @@ class BaseMultimodalProcessor(ABC):
             discard_alpha_channel=discard_alpha_channel,
             audio_sample_rate=audio_sample_rate,
         )
-        return await asyncio.to_thread(func)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.load_mm_data_executor, func)
 
     @staticmethod
     def get_mm_items_offset(
