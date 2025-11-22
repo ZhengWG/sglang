@@ -78,6 +78,7 @@ from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
+from sglang.srt.metrics.utils import API_SERVER_ARRIVE_TIME
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import (
     PortArgs,
@@ -149,6 +150,7 @@ class ReqState:
     last_completion_tokens: int = 1
     finish_reason: str = ""
     input_process_finish_time: float = 0.0
+
     # Token counts for metrics
     completion_tokens: int = 0
     prompt_tokens: int = 0
@@ -453,7 +455,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
-        created_time = time.time()
+        created_time = getattr(obj, "metrics", {}).get(API_SERVER_ARRIVE_TIME, time.time())
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
@@ -1039,13 +1041,21 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         else:
             batch_req = BatchTokenizedEmbeddingReqInput(batch=tokenized_objs)
 
+        input_process_finish_time = time.time()
         self.send_to_scheduler.send_pyobj(batch_req)
+        request_sent_to_scheduler_ts = time.time()
         # Create states for each individual request in the batch
         for i, tokenized_obj in enumerate(tokenized_objs):
             tmp_obj = obj[i]
             state = ReqState(
-                [], False, asyncio.Event(), tmp_obj, created_time=created_time, input_process_finish_time=time.time()
+                [],
+                False,
+                asyncio.Event(),
+                tmp_obj,
+                created_time=created_time,
+                input_process_finish_time=input_process_finish_time,
             )
+            state.request_sent_to_scheduler_ts = request_sent_to_scheduler_ts
             self.rid_to_state[tmp_obj.rid] = state
 
     async def _wait_one_response(
@@ -2632,7 +2642,11 @@ def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
 
     # level 2
     if state.scheduler_req_metric:
-        span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = state.scheduler_req_metric.to_selected_json()
+        req_metrics_dict = state.scheduler_req_metric.to_selected_dict()
+        if state.obj and hasattr(state.obj, 'metrics'):
+            req_metrics_dict.update(state.obj.metrics)
+            req_metrics_dict['request_sent_to_scheduler_ts'] = state.request_sent_to_scheduler_ts
+        span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = orjson.dumps(req_metrics_dict)
         if tokens_generation_time := state.scheduler_req_metric.tokens_generation_time:
             req_created_time = state.created_time
             span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME] = (

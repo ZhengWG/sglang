@@ -14,6 +14,7 @@ from starlette.datastructures import Headers
 
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
 from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.metrics.utils import API_SERVER_ARRIVE_TIME
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.tracing.trace import contains_trace_headers, extract_trace_headers, is_tracing_enabled, log_tracing_disabled_warning
 
@@ -94,6 +95,7 @@ class OpenAIServingBase(ABC):
         If you want to override this method, you should be careful to record the validation time.
         """
         try:
+            api_server_arrival_time = time.time()
             # Validate request
             validation_start = time.perf_counter()
             error_msg = self._validate_request(request)
@@ -110,6 +112,11 @@ class OpenAIServingBase(ABC):
             )
             if hasattr(adapted_request, "validation_time"):
                 adapted_request.validation_time = validation_time
+
+            if hasattr(adapted_request, "metrics"):
+                if adapted_request.metrics is None:
+                    adapted_request.metrics = {}
+                adapted_request.metrics[API_SERVER_ARRIVE_TIME] = api_server_arrival_time
 
             if hasattr(adapted_request, "external_trace_headers"):
                 adapted_request.external_trace_headers = (

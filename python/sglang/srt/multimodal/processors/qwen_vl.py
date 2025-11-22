@@ -3,7 +3,7 @@ import math
 import os
 import re
 import time
-from typing import List, Union
+from typing import Dict, List, Union
 
 import numpy as np
 import torch
@@ -23,6 +23,7 @@ from sglang.srt.multimodal.processors.base_processor import (
 )
 from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 from sglang.utils import logger
+from sglang.srt.managers.io_struct import MMProcessMetrics
 
 MAX_RATIO = 200
 RESIZE_RESAMPLE = getattr(Image, envs.SGLANG_RESIZE_RESAMPLE.get(), None)
@@ -314,7 +315,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-        entry_time = time.perf_counter()
+        mm_metric = MMProcessMetrics()
+        mm_metric.mm_entry_time = time.perf_counter()
+        mm_metric.mm_entry_time_ts = time.time()
         base_output = await self.load_mm_data_async(
             prompt=input_text,
             image_data=image_data,
@@ -322,7 +325,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             audio_data=request_obj.audio_data,
             multimodal_tokens=self.mm_tokens,
         )
-        load_time = time.perf_counter()
+
+        mm_metric.mm_load_time = time.perf_counter()
+
         rid = getattr(request_obj, "rid", "anonymous_rid")
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
@@ -346,7 +351,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             )
             base_output.videos, video_metadata = map(list, zip(*video_results))
 
-        preprocess_time = time.perf_counter()
+        mm_metric.mm_preprocess_time = time.perf_counter()
 
         # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
         if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
@@ -374,7 +379,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             ret, "video_second_per_grid", None
         )
 
-        process_time = time.perf_counter()
+        mm_metric.mm_process_time = time.perf_counter()
 
         input_ids = input_ids.flatten()
 
@@ -400,14 +405,18 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             ),
         )
         mrope_positions = mrope_positions.squeeze(1)
-        get_rope_index_time = time.perf_counter()
+        mm_metric.mm_get_rope_index_time = time.perf_counter()
+
+        if hasattr(request_obj,"metrics") and isinstance(request_obj.metrics, Dict):
+            request_obj.metrics.update(mm_metric.to_dict())
+
         logger.info(
             f"[QwenVLProcessor Perf] {rid=}, "
-            f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
-            f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
-            f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
-            f"get_rope_index_time: {(get_rope_index_time - process_time) * 1000:.2f} ms, "
-            f"total_time: {(get_rope_index_time - entry_time) * 1000:.2f} ms"
+            f"load_time: {(mm_metric.mm_load_time - mm_metric.mm_entry_time) * 1000:.2f} ms, "
+            f"preprocess_time: {(mm_metric.mm_preprocess_time - mm_metric.mm_load_time) * 1000:.2f} ms, "
+            f"process_time: {(mm_metric.mm_process_time - mm_metric.mm_preprocess_time) * 1000:.2f} ms, "
+            f"get_rope_index_time: {(mm_metric.mm_get_rope_index_time - mm_metric.mm_process_time) * 1000:.2f} ms, "
+            f"total_time: {(mm_metric.mm_get_rope_index_time - mm_metric.mm_entry_time) * 1000:.2f} ms"
         )
 
         return {
@@ -421,3 +430,4 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             "mrope_positions": mrope_positions,
             "mrope_position_delta": mrope_position_delta,
         }
+

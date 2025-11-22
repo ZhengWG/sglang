@@ -20,6 +20,7 @@ import copy
 import json
 import uuid
 from abc import ABC
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -42,6 +43,7 @@ else:
 class BaseReq(ABC):
     rid: Optional[Union[str, List[str]]] = field(default=None, kw_only=True)
     http_worker_ipc: Optional[str] = field(default=None, kw_only=True)
+    metrics: Optional[Dict] = field(default_factory=lambda: {}, kw_only=True)
 
     def regenerate_rid(self):
         """Generate a new request ID and return it."""
@@ -904,10 +906,9 @@ class ReqMetric:
 
     def get_forward_time(self) -> float:
         return self.completion_time - self.forward_entry_time
-
-    def to_selected_json(self) -> str:
-        return orjson_dumps(
-            {
+    
+    def to_selected_dict(self) -> Dict[str, Any]:
+        return {
                 "wait_queue_size": self.wait_queue_size,
                 "wait_queue_entry_time": self.wait_queue_entry_time,
                 "forward_entry_time": self.forward_entry_time,
@@ -919,8 +920,21 @@ class ReqMetric:
                 "decode_prealloc_queue_entry_time": self.decode_prealloc_queue_entry_time,
                 "decode_transfer_queue_entry_time": self.decode_transfer_queue_entry_time,
             }
-        )
 
+    def to_selected_json(self) -> str:
+        return orjson_dumps(self.to_selected_dict())
+
+@dataclass
+class MMProcessMetrics:
+    mm_entry_time_ts: float = 0.0
+    mm_entry_time: float = 0.0
+    mm_load_time: float = 0.0
+    mm_preprocess_time: float = 0.0
+    mm_process_time: float = 0.0
+    mm_get_rope_index_time: float = 0.0
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
 
 @dataclass
 class BatchTokenIDOutput(
