@@ -124,7 +124,10 @@ from sglang.srt.utils import (
     get_process_uptime,
     kill_process_tree,
     set_uvicorn_logging_configs,
+    COMPILE_CACHE_ROOT,
+    COMPILE_CACHE_DIRS,
 )
+from sglang.srt.utils.compile_cache import save_compile_cache
 from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
@@ -1680,6 +1683,7 @@ def _wait_and_warmup(
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
+    save_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     logger.info("[SpanLogs] The server is fired up and ready to roll!")
     logger.info(f"Overall startup time: {get_process_uptime():.2f} seconds")
 
