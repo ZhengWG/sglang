@@ -56,6 +56,7 @@ from json import JSONDecodeError
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -96,6 +97,9 @@ from sglang.srt.metrics.func_timer import enable_func_timer
 
 if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
     from model_manager.apis import get_model_path_from_manager
+
+if TYPE_CHECKING:
+    from sglang.srt.server_args import ServerArgs
 
 
 logger = logging.getLogger(__name__)
@@ -2836,7 +2840,7 @@ class Withable(Generic[T]):
             self._value = None
 
 
-def require_mlp_tp_gather(server_args):
+def require_mlp_tp_gather(server_args: ServerArgs):
     """
     Check if the input of MLP is obtained by all-gather rather than all-reduce. This only happens when each MLP TP group contains multiple attention DP groups.
     """
@@ -2859,7 +2863,7 @@ def require_mlp_tp_gather(server_args):
         return False
 
 
-def require_attn_tp_gather(server_args):
+def require_attn_tp_gather(server_args: ServerArgs):
     """
     Check if the input of attention is scattered.
     """
@@ -2873,11 +2877,11 @@ def require_attn_tp_gather(server_args):
         return False
 
 
-def require_gathered_buffer(server_args):
+def require_gathered_buffer(server_args: ServerArgs):
     return require_mlp_tp_gather(server_args) or require_attn_tp_gather(server_args)
 
 
-def require_mlp_sync(server_args):
+def require_mlp_sync(server_args: ServerArgs):
     return server_args.enable_dp_attention or require_gathered_buffer(server_args)
 
 
