@@ -98,6 +98,8 @@ class ModelConfig:
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
         sampling_defaults: str = "openai",
         quantize_and_serve: bool = False,
+        speculative_algorithm: Optional[str] = None,
+        speculative_num_draft_tokens: Optional[int] = None,
     ) -> None:
         # Parse args
         self.model_path = model_path
@@ -149,6 +151,8 @@ class ModelConfig:
 
         # Config draft model
         self._config_draft_model()
+        self.speculative_algorithm = speculative_algorithm
+        self.speculative_num_draft_tokens = speculative_num_draft_tokens
 
         # Check model type
         self.attention_chunk_size = getattr(
@@ -248,6 +252,8 @@ class ModelConfig:
             sampling_defaults=server_args.sampling_defaults,
             quantize_and_serve=server_args.quantize_and_serve,
             override_config_file=server_args.decrypted_config_file,
+            speculative_algorithm=server_args.speculative_algorithm,
+            speculative_num_draft_tokens=server_args.speculative_num_draft_tokens,
             **kwargs,
         )
 
@@ -318,6 +324,11 @@ class ModelConfig:
                 self.context_len = context_length
         else:
             self.context_len = derived_context_len
+
+        # 扣除draft-tokens
+        if self.speculative_algorithm and self.speculative_num_draft_tokens:
+            assert self.speculative_num_draft_tokens > 0
+            self.context_len -= (self.speculative_num_draft_tokens + 2)
 
         # Transfer context_len to HuggingFace config so models can access it
         self.hf_config.context_len = self.context_len
