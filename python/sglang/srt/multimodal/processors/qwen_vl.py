@@ -163,91 +163,95 @@ async def preprocess_video(
     mm_sampling_kwargs: dict = {},
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
-    entry_time = time.perf_counter()
-    ele = {}
-    if mm_sampling_kwargs:
-        ele.update(mm_sampling_kwargs)
+    try:
+        entry_time = time.perf_counter()
+        ele = {}
+        if mm_sampling_kwargs:
+            ele.update(mm_sampling_kwargs)
 
-    video = vr
-    total_frames = video_fps = idx = None
-    if not isinstance(vr, np.ndarray):
-        total_frames, video_fps = len(vr), vr.get_avg_fps()
-        nframes = smart_nframes(
-            ele,
-            total_frames=total_frames,
-            temporal_factor=temporal_factor,
-            video_fps=video_fps,
-            default_fps=default_fps,
-            default_fps_min_frames=default_fps_min_frames,
-            default_fps_max_frames=default_fps_max_frames,
-        )
-        idx = np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)
-        idx = np.unique(idx)
-        video_np = vr.get_batch(idx).asnumpy()
-        video = torch.from_numpy(video_np).pin_memory()
-    video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
-    nframes, _, height, width = video.shape
-    min_pixels = ele.get("min_pixels", video_min_pixels)
-    max_pixels = ele.get("max_pixels", video_max_pixels)
-    max_pixels = max(max_pixels, int(min_pixels * 1.05))
+        video = vr
+        total_frames = video_fps = idx = None
+        if not isinstance(vr, np.ndarray):
+            total_frames, video_fps = len(vr), vr.get_avg_fps()
+            nframes = smart_nframes(
+                ele,
+                total_frames=total_frames,
+                temporal_factor=temporal_factor,
+                video_fps=video_fps,
+                default_fps=default_fps,
+                default_fps_min_frames=default_fps_min_frames,
+                default_fps_max_frames=default_fps_max_frames,
+            )
+            idx = np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)
+            idx = np.unique(idx)
+            video_np = vr.get_batch(idx).asnumpy()
+            video = torch.from_numpy(video_np).pin_memory()
+        video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
+        nframes, _, height, width = video.shape
+        min_pixels = ele.get("min_pixels", video_min_pixels)
+        max_pixels = ele.get("max_pixels", video_max_pixels)
+        max_pixels = max(max_pixels, int(min_pixels * 1.05))
 
-    get_batch_time = time.perf_counter()
+        get_batch_time = time.perf_counter()
 
-    if max_pixels > video_max_pixels:
-        logger.warning(
-            f"The given max_pixels[{max_pixels}] exceeds limit[{video_max_pixels}]."
+        if max_pixels > video_max_pixels:
+            logger.warning(
+                f"The given max_pixels[{max_pixels}] exceeds limit[{video_max_pixels}]."
+            )
+        max_pixels = min(max_pixels, video_max_pixels)
+        if "resized_height" in ele and "resized_width" in ele:
+            resized_height, resized_width = smart_resize_for_video(
+                nframes,
+                ele["resized_height"],
+                ele["resized_width"],
+                temporal_factor=temporal_factor,
+                factor=image_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+        else:
+            resized_height, resized_width = smart_resize_for_video(
+                nframes,
+                height,
+                width,
+                temporal_factor=temporal_factor,
+                factor=image_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+        smart_resize_time = time.perf_counter()
+        video = torchvision.transforms.functional.resize(
+            video,
+            [resized_height, resized_width],
+            interpolation=InterpolationMode.BILINEAR,
         )
-    max_pixels = min(max_pixels, video_max_pixels)
-    if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize_for_video(
-            nframes,
-            ele["resized_height"],
-            ele["resized_width"],
-            temporal_factor=temporal_factor,
-            factor=image_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    else:
-        resized_height, resized_width = smart_resize_for_video(
-            nframes,
-            height,
-            width,
-            temporal_factor=temporal_factor,
-            factor=image_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    smart_resize_time = time.perf_counter()
-    video = torchvision.transforms.functional.resize(
-        video,
-        [resized_height, resized_width],
-        interpolation=InterpolationMode.BILINEAR,
-    )
-    video = video.pin_memory()
+        video = video.pin_memory()
 
-    if total_frames is None and video_fps is None and idx is None:
-        total_frames = nframes
-        video_fps = ele.get("fps", default_fps)
-        idx = list(range(nframes))
-    video_metadata = {
-        "fps": video_fps,
-        "duration": total_frames / video_fps,
-        "total_num_frames": total_frames,
-        "frames_indices": idx,
-        "video_backend": "torchvision",
-        "width": resized_width,
-        "height": resized_height,
-    }
-    torchvision_resize_time = time.perf_counter()
-    logger.info(
-        f"[preprocess_video Perf], "
-        f"get_batch_time: {(get_batch_time - entry_time) * 1000:.2f} ms, "
-        f"smart_resize_time: {(smart_resize_time - get_batch_time) * 1000:.2f} ms, "
-        f"torchvision_resize_time: {(torchvision_resize_time - smart_resize_time) * 1000:.2f} ms, "
-        f"total_time: {(torchvision_resize_time - entry_time) * 1000:.2f} ms"
-    )
-    return video, video_metadata
+        if total_frames is None and video_fps is None and idx is None:
+            total_frames = nframes
+            video_fps = ele.get("fps", default_fps)
+            idx = list(range(nframes))
+        video_metadata = {
+            "fps": video_fps,
+            "duration": total_frames / video_fps,
+            "total_num_frames": total_frames,
+            "frames_indices": idx,
+            "video_backend": "torchvision",
+            "width": resized_width,
+            "height": resized_height,
+        }
+        torchvision_resize_time = time.perf_counter()
+        logger.info(
+            f"[preprocess_video Perf], "
+            f"get_batch_time: {(get_batch_time - entry_time) * 1000:.2f} ms, "
+            f"smart_resize_time: {(smart_resize_time - get_batch_time) * 1000:.2f} ms, "
+            f"torchvision_resize_time: {(torchvision_resize_time - smart_resize_time) * 1000:.2f} ms, "
+            f"total_time: {(torchvision_resize_time - entry_time) * 1000:.2f} ms"
+        )
+        return video, video_metadata
+    except Exception as e:
+        logger.error(f"Error processing video: {e}")
+        raise ValueError(f"Error processing video: {str(e)}")
 
 
 # Compatible with Qwen-VL & Qwen-Omni Series
