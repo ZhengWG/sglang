@@ -908,7 +908,6 @@ def _launch_subprocesses(
             )
         scheduler_infos.append(data)
 
-    save_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
 
