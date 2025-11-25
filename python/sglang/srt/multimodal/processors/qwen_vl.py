@@ -292,6 +292,11 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             image_processor = getattr(_processor, "image_processor", None)
             self.IMAGE_FACTOR = image_processor.patch_size * image_processor.merge_size
 
+            # FIXME(yudian.zy): 临时把qwen3-vl的单图大小限制为2k*2k，防止rank0 OOM
+            image_longest_edge = image_processor.size["longest_edge"]
+            if image_longest_edge >= (64 * self.IMAGE_FACTOR) ** 2:
+                image_processor.size["longest_edge"] = image_longest_edge // 4
+
             video_processor = getattr(_processor, "video_processor", None)
             self.VIDEO_MIN_PIXELS = video_processor.size["shortest_edge"]
             self.VIDEO_MAX_PIXELS = video_processor.size["longest_edge"]
