@@ -252,6 +252,8 @@ class MultimodalDataItem:
             else:
                 hashed_feature = self.precomputed_embeddings
             self.hash = hash_feature(hashed_feature)
+        else:
+            logger.info(f"Skipping hash computation, using existing hash {self.hash}")
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
 

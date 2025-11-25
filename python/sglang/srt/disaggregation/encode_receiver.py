@@ -23,7 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingData:
-    def __init__(self, req_id, num_parts, part_idx, image_grid_dim, embedding=None):
+    def __init__(
+        self,
+        req_id,
+        num_parts,
+        part_idx,
+        image_grid_dim,
+        embedding=None,
+        mm_hash=None,
+        mm_hash_list=[],
+    ):
         self.req_id = req_id
         self.num_parts = num_parts
         self.part_idx = part_idx
@@ -41,6 +50,12 @@ class EmbeddingData:
             self.image_grid_dim if i == self.part_idx else None
             for i in range(self.num_parts)
         ]
+        self.mm_hash = mm_hash
+        if mm_hash_list:
+            self.mm_hash_list = mm_hash_list
+        else:
+            self.mm_hash_list = [None for _ in range(self.num_parts)]
+            self.mm_hash_list[self.part_idx] = mm_hash
 
     def add(self, embedding_data):
         assert self.req_id == embedding_data.req_id
@@ -50,6 +65,7 @@ class EmbeddingData:
             embedding_data.image_grid_dim
         )
         self.embedding_list[embedding_data.part_idx] = embedding_data.embedding
+        self.mm_hash_list[embedding_data.part_idx] = embedding_data.mm_hash
 
     def get_embedding(self):
         return torch.concatenate(self.embedding_list)
@@ -62,7 +78,7 @@ class EmbeddingData:
         return sum(self.ready_list) == self.num_parts
 
     def __repr__(self):
-        return f"EmbeddingData(req_id={self.req_id}, num_parts={self.num_parts}, part_idx={self.part_idx})"
+        return f"EmbeddingData(req_id={self.req_id}, num_parts={self.num_parts}, part_idx={self.part_idx}, mm_hash_list={self.mm_hash_list}, mm_hash={self.mm_hash})"
 
     def copy_without_embedding(self):
         new_data = EmbeddingData(
@@ -70,6 +86,8 @@ class EmbeddingData:
             num_parts=self.num_parts,
             part_idx=self.part_idx,
             image_grid_dim=self.image_grid_dim,
+            mm_hash=self.mm_hash,
+            mm_hash_list=self.mm_hash_list,
         )
         new_data.send_time = self.send_time
         new_data.dtype = self.dtype
@@ -191,6 +209,12 @@ class WaitingImageRequest:
         )
         self.recv_req.mm_inputs = mm_inputs
         self.recv_req.input_ids = mm_inputs["input_ids"]
+        if (
+            len(self.recv_embedding_data.mm_hash_list) > 0
+            and self.recv_embedding_data.mm_hash_list[0] is not None
+        ):
+            for _mm_idex, _mm_item in enumerate(mm_inputs["mm_items"]):
+                _mm_item.hash = self.recv_embedding_data.mm_hash_list[_mm_idex]
         self.ready = True
         return True
 
@@ -532,4 +556,11 @@ class MMReceiver:
         img_grid_thw = recv_embedding_data.get_img_grid()
 
         mm_inputs = mm_processor.get_mm_data(prompt, recv_embedding, img_grid_thw)
+        if (
+            len(recv_embedding_data.mm_hash_list) > 0
+            and recv_embedding_data.mm_hash_list[0] is not None
+        ):
+            for _mm_idex, _mm_item in enumerate(mm_inputs["mm_items"]):
+                _mm_item.hash = recv_embedding_data.mm_hash_list[_mm_idex]
+
         return mm_inputs
