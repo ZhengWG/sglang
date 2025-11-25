@@ -224,7 +224,7 @@ class MMEncoder:
             f"Vit time : {(end_time - start_time)*1000:.2f} ms {mm_embedding.shape = }"
         )
 
-        return _get_image_grid_dim(images_input), mm_embedding
+        return _get_image_grid_dim(images_input), mm_embedding, mm_hash
 
     async def _send(
         self,
@@ -271,7 +271,7 @@ class MMEncoder:
 
     async def encode(self, mm_items, req_id, num_parts, part_idx):
         start_time = time.time()
-        image_grid_dim, mm_embedding = await self._encode(mm_items)
+        image_grid_dim, mm_embedding, mm_hash = await self._encode(mm_items)
         end_time = time.time()
         logger.info(f"🕛 encode cost = {(end_time - start_time) * 1000:.2f}ms")
         if self.rank == 0:
@@ -281,6 +281,7 @@ class MMEncoder:
                 part_idx,
                 image_grid_dim,
                 mm_embedding,
+                mm_hash,
             )
             self.embedding_to_send[mm_data.req_id] = mm_data
         return mm_embedding.nbytes, mm_embedding.shape[0], mm_embedding.shape[1]
