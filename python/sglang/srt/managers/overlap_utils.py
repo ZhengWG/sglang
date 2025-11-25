@@ -38,11 +38,20 @@ class FutureMap:
         device: torch.device,
         spec_algo: Optional[SpeculativeAlgorithm] = None,
     ):
+        # FIXME: the calculation of future_limit and future_buffer_len maybe too conservative
         self.future_ct = 0
-        # A factor of 3 is used to avoid collision in the circular buffer. 
-        # In case chunked_prefill's res overlap prefill's res, we increase the factor when chunked_prefill_size is set.
-        self.future_limit = max_running_requests * max(3, (context_len + chunked_prefill_size -1)//chunked_prefill_size) if chunked_prefill_size else 3 * max_running_requests
-        # A factor 2 * max_running_requests larger than future_limit is enough
+
+        # Circular buffer layout (wraps in this order):
+        # Running decode batch -> Prefill chunk 1 -> ... -> Prefill chunk N
+        # A running decode batch's result will be resolved after all prefill chunks are done.
+        # reserve `max_num_chunks` extra future slots on top of `max_running_requests * 3`.
+        max_num_chunks = (
+            (context_len + chunked_prefill_size - 1) // chunked_prefill_size
+            if chunked_prefill_size
+            else 0
+        )
+        self.future_limit = max_running_requests * 3 + max_num_chunks
+        # Adding 2 * max_running_requests to future_limit ensures the buffer is sufficiently large.
         self.future_buffer_len = self.future_limit + 2 * max_running_requests
         self.device = device
         self.spec_algo = spec_algo
