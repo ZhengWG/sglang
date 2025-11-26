@@ -1908,12 +1908,11 @@ class Scheduler(
                 # NOTE: abort req with mm_inputs currently
                 # to avoid mrope shape not matching issue
                 if req.multimodal_inputs is not None:
-                    req.set_finish_with_abort(
-                        error_msg=(
-                            "Request with multimodal inputs cannot be retracted due to implementation limitation. "
-                            "Please reduce the input length or set smaller max_new_tokens."
-                        )
+                    error_msg = (
+                        "Request with multimodal inputs cannot be retracted due to implementation limitation. "
+                        "Please reduce the input length or set smaller max_new_tokens."
                     )
+                    prepare_abort(req, error_msg, status_code=HTTPStatus.BAD_REQUEST)
                     aborted_mm_reqs.append(req)
                 else:
                     self._add_request_to_queue(req, is_retracted=True)
