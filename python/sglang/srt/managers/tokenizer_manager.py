@@ -728,6 +728,11 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 request_obj=obj,
                 max_req_input_len=self.max_req_input_len,
             )
+
+            # mm_inputs增加词表大小属性，为后续mm_data_item的hash -> pad_value
+            # 增加offset防止pad_value跟正常的词表token冲突
+            mm_inputs.update({"model_vocab_size": self.model_config.vocab_size})
+
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
         else:
