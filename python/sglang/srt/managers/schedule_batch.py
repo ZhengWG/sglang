@@ -205,6 +205,8 @@ class MultimodalDataItem:
     hash: int = None
     pad_value: int = None
     offsets: Optional[list] = None
+    # for pad_value offset
+    model_vocab_size: Optional[int] = 0
 
     # the raw features returned by processor, e.g. pixel_values or audio_features
     feature: Union[torch.Tensor, np.ndarray] = None
@@ -255,6 +257,9 @@ class MultimodalDataItem:
             self.hash = hash_feature(hashed_feature)
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
+        if self.pad_value <= self.model_vocab_size:
+            logger.warning(f"{self.pad_value=} conflict, add vocab offset {self.model_vocab_size=}")
+            self.pad_value += self.model_vocab_size
 
     def is_modality(self, modality: Modality) -> bool:
         return self.modality == modality
@@ -328,7 +333,10 @@ class MultimodalInputs:
 
         assert isinstance(ret.mm_items, list)
         ret.mm_items = [item for item in ret.mm_items if item.is_valid()]
+
+        model_vocab_size = obj.get("model_vocab_size", 0)
         for item in ret.mm_items:
+            item.model_vocab_size = model_vocab_size
             item.set_pad_value()
 
         optional_args = [
