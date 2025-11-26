@@ -74,6 +74,10 @@ RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${D
 # sglang安装时，numpy会升级为2.x， 重新降级为1.26.4
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps numpy==1.26.4
 
+# 适配torch2.9.1，升级对应的nv库
+RUN pip3 install nvidia-nccl-cu12==2.28.3 --force-reinstall --no-deps
+RUN pip3 install nvidia-cudnn-cu12==9.16.0.29 --force-reinstall --no-deps
+
 # TransferEngine安装
 ARG TRANSFER_ENGINE_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.4.post2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=519e4bb382be5a750c87ef93af66aa46606500f6832f946800d52b0786cf50d1'
 RUN pip3 uninstall -y mooncake-transfer-engine; pip3 install --force-reinstall --no-cache-dir ${TRANSFER_ENGINE_WHL_URL}
