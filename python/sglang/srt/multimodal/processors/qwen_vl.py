@@ -76,6 +76,57 @@ def smart_resize_for_video(
     return h_bar, w_bar
 
 
+def smart_resize_for_image(
+    height: int,
+    width: int,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """
+    Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+    """
+    if max(height, width) / min(height, width) > MAX_RATIO:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
+
+
+def resize_image(
+    image,
+    min_pixels: int,
+    max_pixels: int,
+    size_factor: int,
+) -> Image.Image:
+    width, height = image.size
+    resized_height, resized_width = smart_resize_for_image(
+        height,
+        width,
+        factor=size_factor,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
+    image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
+    return image
+
+
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
@@ -89,6 +140,15 @@ def ceil_by_factor(number: int, factor: int) -> int:
 def floor_by_factor(number: int, factor: int) -> int:
     """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
     return math.floor(number / factor) * factor
+
+
+async def resize_image_async(
+    image,
+    min_pixels: int,
+    max_pixels: int,
+    size_factor: int,
+):
+    return resize_image(image, min_pixels, max_pixels, size_factor)
 
 
 def smart_nframes(
@@ -280,6 +340,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.audio_token_id = getattr(hf_config, "audio_token_id", None)
 
         self.IMAGE_FACTOR = 28
+        self.MIN_PIXELS = 4 * 28 * 28
+        self.MAX_PIXELS = envs.SGLANG_IMAGE_MAX_PIXELS.get()
 
         self.VIDEO_MIN_PIXELS = 4 * 28 * 28 # 3136
         self.VIDEO_MAX_PIXELS = 16384 * 28 * 28 # 12845056
@@ -296,6 +358,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             image_longest_edge = image_processor.size["longest_edge"]
             if image_longest_edge >= (64 * self.IMAGE_FACTOR) ** 2:
                 image_processor.size["longest_edge"] = image_longest_edge // 4
+            self.MIN_PIXELS = image_processor.size["shortest_edge"]
+            self.MAX_PIXELS = image_processor.size["longest_edge"]
 
             video_processor = getattr(_processor, "video_processor", None)
             self.VIDEO_MIN_PIXELS = video_processor.size["shortest_edge"]
@@ -339,6 +403,16 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         rid = getattr(request_obj, "rid", "anonymous_rid")
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
+
+        # Qwen-specific: resize images if they are raw Image objects
+        if base_output.images and isinstance(base_output.images[0], Image.Image):
+            resize_tasks = [
+                resize_image_async(
+                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR
+                )
+                for image in base_output.images
+            ]
+            base_output.images = await asyncio.gather(*resize_tasks)
 
         video_metadata = None
         if base_output.videos:
