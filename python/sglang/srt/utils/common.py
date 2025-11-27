@@ -27,6 +27,7 @@ import ipaddress
 import itertools
 import json
 import logging
+import math
 import os
 import pickle
 import platform
@@ -99,6 +100,9 @@ if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
     from model_manager.apis import get_model_path_from_manager
 
 if TYPE_CHECKING:
+    # Apparently importing this here is necessary to avoid a segfault, see comment in load_video below
+    from decord import VideoReader
+
     from sglang.srt.server_args import ServerArgs
 
 
@@ -1013,6 +1017,24 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
     finally:
         if tmp_file and os.path.exists(tmp_file.name):
             os.unlink(tmp_file.name)
+
+
+def sample_video_frames(
+    video: "VideoReader", *, desired_fps: int, max_frames: int
+) -> list[int]:
+    total_frames = len(video)
+    assert total_frames > 0, "Video must have at least one frame"
+
+    duration = total_frames / video.get_avg_fps()
+    fps = min(desired_fps, video.get_avg_fps())
+
+    num_frames = math.floor(duration * fps)
+    num_frames = min(max_frames, num_frames, total_frames)
+    num_frames = max(1, num_frames)  # At least one frame
+    if num_frames == total_frames:
+        return list(range(total_frames))
+    else:
+        return np.linspace(0, total_frames - 1, num_frames, dtype=int).tolist()
 
 
 def encode_video(video_path, frame_count_limit=None):
@@ -2835,6 +2857,21 @@ def load_json_config(data: str):
 
 
 def dispose_tensor(x: torch.Tensor):
+    """
+    Dispose a tensor by freeing its memory.
+    During piecewise CUDA graph capture/replay, we skip disposal to avoid
+    interfering with torch.compile's memory tracking and graph recording.
+    """
+
+    # Skip disposal during piecewise CUDA graph to avoid torch.compile issues
+    # we do local import to avoid circular import
+    from sglang.srt.compilation.piecewise_context_manager import (
+        is_in_piecewise_cuda_graph,
+    )
+
+    if is_in_piecewise_cuda_graph():
+        return
+
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
