@@ -301,6 +301,9 @@ class ServerArgs:
     sleep_on_idle: bool = False
     mm_process_config: Optional[Dict[str, Any]] = None
 
+    # mm limit per prompt
+    limit_mm_per_prompt: Optional[Dict[str, Any]] = None
+
     # Logging
     log_level: str = "info"
     log_level_http: Optional[str] = None
@@ -699,6 +702,12 @@ class ServerArgs:
             self.random_seed = random.randint(0, 1 << 30)
         if self.mm_process_config is None:
             self.mm_process_config = {}
+        if self.limit_mm_per_prompt is None:
+            self.limit_mm_per_prompt = {
+                "image": 10,
+                "video": 1,
+                "audio": 4,
+            }
 
     def _handle_gpu_memory_settings(self, gpu_mem):
         """
@@ -2439,6 +2448,12 @@ class ServerArgs:
             type=json.loads,
             default=ServerArgs.mm_process_config,
             help="Multimodal preprocessing config, a json config contains keys: `image`, `video`, `audio`",
+        )
+        parser.add_argument(
+            "--limit-mm-per-prompt",
+            type=json.loads,
+            default=ServerArgs.limit_mm_per_prompt,
+            help="Multimodal resource limit per req, a json config contains keys: `image`, `video`, `audio`",
         )
 
         # Logging
