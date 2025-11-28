@@ -711,9 +711,9 @@ class ServerArgs:
             self.mm_process_config = {}
         if self.limit_mm_per_prompt is None:
             self.limit_mm_per_prompt = {
-                "image": 10,
+                "image": 30,
                 "video": 1,
-                "audio": 4,
+                "audio": 5,
             }
 
     def _handle_gpu_memory_settings(self, gpu_mem):
