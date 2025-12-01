@@ -1459,6 +1459,8 @@ class ProfileReqInput(BaseReq):
     merge_profiles: bool = False
     # The prefix of the profile filenames
     profile_prefix: Optional[str] = None
+    # Only profile these stages and ignore others
+    profile_stages: Optional[List[str]] = None
 
 
 class ProfileReqType(Enum):
@@ -1479,6 +1481,7 @@ class ProfileReq(BaseReq):
     profile_id: Optional[str] = None
     merge_profiles: bool = False
     profile_prefix: Optional[str] = None
+    profile_stages: Optional[List[str]] = None
 
 
 @dataclass
