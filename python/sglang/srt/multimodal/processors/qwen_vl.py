@@ -405,7 +405,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
         # Qwen-specific: resize images if they are raw Image objects
-        if base_output.images and isinstance(base_output.images[0], Image.Image):
+        if (self.model_type != "paddleocr_vl" and base_output.images and
+            isinstance(base_output.images[0], Image.Image)):
             resize_tasks = [
                 resize_image_async(
                     image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR
