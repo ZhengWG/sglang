@@ -195,6 +195,8 @@ class SchedulerStats:
     num_running_reqs_offline_batch: int = 0
     cache_hit_rate: float = 0.0
 
+    max_total_num_tokens: int = 0
+
     # Speculative decoding
     spec_accept_length: float = 0.0
     spec_accept_rate: float = 0.0
@@ -301,6 +303,13 @@ class SchedulerMetricsCollector:
         self.cache_hit_rate = Gauge(
             name="sglang:cache_hit_rate",
             documentation="The prefix cache hit rate.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+
+        self.max_total_num_tokens = Gauge(
+            name="sglang:max_total_num_tokens",
+            documentation="Maximum total number of tokens in the KV cache pool.",
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
@@ -650,6 +659,8 @@ class SchedulerMetricsCollector:
             self.num_running_reqs_offline_batch, stats.num_running_reqs_offline_batch
         )
         self._log_gauge(self.cache_hit_rate, stats.cache_hit_rate)
+
+        self._log_gauge(self.max_total_num_tokens, stats.max_total_num_tokens)
 
         # Speculative decoding
         self._log_gauge(self.spec_accept_length, stats.spec_accept_length)
