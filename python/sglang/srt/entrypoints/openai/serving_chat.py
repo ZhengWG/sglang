@@ -66,6 +66,7 @@ class OpenAIServingChat(OpenAIServingBase):
         self.template_manager = template_manager
         self.tool_call_parser = self.tokenizer_manager.server_args.tool_call_parser
         self.reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
+        self.thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
 
         # Get default sampling parameters from model's generation config
         self.default_sampling_params = (
@@ -289,23 +290,22 @@ class OpenAIServingChat(OpenAIServingBase):
         template_content_format = self.template_manager.jinja_template_content_format
 
         if self.use_dpsk_v32_encoding:
-            if request.chat_template_kwargs and request.chat_template_kwargs.get(
-                "thinking"
-            ):
+            if self._get_enable_thinking_from_request(request):
                 thinking_mode = "thinking"
             else:
                 thinking_mode = "chat"
             messages = request.messages
             messages = [msg.model_dump() for msg in messages]
-            if messages[0]["role"] != "system":
-                messages.insert(
-                    0, {"role": "system", "content": "You are a helpful Assistant."}
-                )
             if request.tools:
+                if messages[0]["role"] != "system":
+                    messages.insert(
+                        0, {"role": "system", "content": "You are a helpful Assistant."}
+                    )
                 messages[0]["tools"] = [tool.model_dump() for tool in request.tools]
             real_input = encode_messages(
                 messages, thinking_mode=thinking_mode, drop_thinking=False
             )
+            logger.info(f"Real prompt input for DeepSeek V3.2, {real_input=}")
             prompt_ids = self.tokenizer_manager.tokenizer.encode(real_input)
         else:
             for message in request.messages:
@@ -549,9 +549,8 @@ class OpenAIServingChat(OpenAIServingBase):
 
                     first_chunk_padding = self.tokenizer_manager.server_args.reasoning_padding
 
-                    thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
-                    if (thinking_trigger and
-                        not self._get_enable_thinking_from_request(request, thinking_trigger)):
+                    if (self.thinking_trigger and
+                        not self._get_enable_thinking_from_request(request, self.thinking_trigger)):
                         first_chunk_padding = ""
                     first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
 
@@ -840,9 +839,8 @@ class OpenAIServingChat(OpenAIServingBase):
 
             reasoning_padding = self.tokenizer_manager.server_args.reasoning_padding
 
-            thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
-            if (thinking_trigger and
-                not self._get_enable_thinking_from_request(request, thinking_trigger)):
+            if (self.thinking_trigger and
+                not self._get_enable_thinking_from_request(request, self.thinking_trigger)):
                 reasoning_padding = ""
 
             if reasoning_padding and text is not None:
@@ -1151,6 +1149,9 @@ class OpenAIServingChat(OpenAIServingBase):
         Returns:
             The boolean value of 'enable_thinking' if found, otherwise False.
         """
+        if self.thinking_trigger and thinking_trigger != self.thinking_trigger:
+            thinking_trigger = self.thinking_trigger
+
         if (
             hasattr(request, "chat_template_kwargs")
             and request.chat_template_kwargs
