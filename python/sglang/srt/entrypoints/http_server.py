@@ -73,6 +73,7 @@ from sglang.srt.entrypoints.openai.serving_tokenize import (
     OpenAIServingDetokenize,
     OpenAIServingTokenize,
 )
+from sglang.srt.entrypoints.warmup import execute_warmups
 from sglang.srt.environ import envs
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import (
@@ -131,7 +132,6 @@ from sglang.srt.utils import (
     COMPILE_CACHE_DIRS,
 )
 from sglang.srt.utils.compile_cache import save_compile_cache
-from sglang.srt.warmup import execute_warmups
 from sglang.utils import get_exception_traceback
 from sglang.version import __version__
 
