@@ -770,7 +770,7 @@ class BaseMultimodalProcessor(ABC):
                             sync_buffer_meta=sync_flag,
                         )
                     elif not self.server_args.keep_mm_feature_on_device:
-                        item.feature = item.feature.to("cpu")
+                        item.feature = item.feature.cpu()
                 elif (
                     isinstance(item.precomputed_embeddings, torch.Tensor)
                     and item.precomputed_embeddings.is_cuda
