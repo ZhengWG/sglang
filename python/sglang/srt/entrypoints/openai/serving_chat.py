@@ -296,14 +296,16 @@ class OpenAIServingChat(OpenAIServingBase):
                 thinking_mode = "chat"
             messages = request.messages
             messages = [msg.model_dump() for msg in messages]
+            drop_thinking = True
             if request.tools:
                 if messages[0]["role"] != "system":
                     messages.insert(
                         0, {"role": "system", "content": "You are a helpful Assistant."}
                     )
                 messages[0]["tools"] = [tool.model_dump() for tool in request.tools]
+                drop_thinking = False
             real_input = encode_messages(
-                messages, thinking_mode=thinking_mode, drop_thinking=False
+                messages, thinking_mode=thinking_mode, drop_thinking=drop_thinking
             )
             logger.info(f"Real prompt input for DeepSeek V3.2, {real_input=}")
             prompt_ids = self.tokenizer_manager.tokenizer.encode(real_input)
