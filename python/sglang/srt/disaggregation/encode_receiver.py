@@ -30,7 +30,7 @@ class EmbeddingData:
         image_grid_dim,
         embedding=None,
         mm_hash=None,
-        mm_hash_list=[],
+        mm_hash_list=None,
     ):
         self.req_id = req_id
         self.num_parts = num_parts
@@ -50,7 +50,7 @@ class EmbeddingData:
             for i in range(self.num_parts)
         ]
         self.mm_hash = mm_hash
-        if mm_hash_list:
+        if mm_hash_list is not None:
             self.mm_hash_list = mm_hash_list
         else:
             self.mm_hash_list = [None for _ in range(self.num_parts)]
@@ -215,8 +215,10 @@ class WaitingImageRequest:
             len(self.recv_embedding_data.mm_hash_list) > 0
             and self.recv_embedding_data.mm_hash_list[0] is not None
         ):
-            for _mm_idex, _mm_item in enumerate(mm_inputs["mm_items"]):
-                _mm_item.hash = self.recv_embedding_data.mm_hash_list[_mm_idex]
+            for _mm_item, _mm_hash in zip(
+                mm_inputs["mm_items"], self.recv_embedding_data.mm_hash_list
+            ):
+                _mm_item.hash = _mm_hash
         self.ready = True
 
 
@@ -579,7 +581,7 @@ class MMReceiver:
             len(recv_embedding_data.mm_hash_list) > 0
             and recv_embedding_data.mm_hash_list[0] is not None
         ):
-            for _mm_idex, _mm_item in enumerate(mm_inputs["mm_items"]):
-                _mm_item.hash = recv_embedding_data.mm_hash_list[_mm_idex]
+            for _mm_index, _mm_item in enumerate(mm_inputs["mm_items"]):
+                _mm_item.hash = recv_embedding_data.mm_hash_list[_mm_index]
 
         return mm_inputs
