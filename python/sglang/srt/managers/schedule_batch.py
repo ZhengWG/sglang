@@ -67,17 +67,26 @@ from sglang.srt.mem_cache.common import (
     alloc_for_decode,
     alloc_for_extend,
     evict_from_tree_cache,
+    release_kv_cache,
 )
 from sglang.srt.mem_cache.mamba_radix_cache import MambaRadixCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, TimeStats
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import (
+    CaptureHiddenMode,
+    ForwardBatch,
+    ForwardMode,
+)
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs, get_global_server_args
 from sglang.srt.utils import flatten_nested_list
+from sglang.srt.utils.common import is_npu
+from sglang.srt.utils.cuda_ipc_transport_utils import CudaIpcTensorTransportProxy
+
+_is_npu = is_npu()
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -196,6 +205,8 @@ class MultimodalDataItem:
     hash: int = None
     pad_value: int = None
     offsets: Optional[list] = None
+    # for pad_value offset
+    model_vocab_size: Optional[int] = 0
 
     # the raw features returned by processor, e.g. pixel_values or audio_features
     feature: Union[torch.Tensor, np.ndarray] = None
@@ -246,6 +257,9 @@ class MultimodalDataItem:
             self.hash = hash_feature(hashed_feature)
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
+        if self.pad_value <= self.model_vocab_size:
+            logger.warning(f"{self.pad_value=} conflict, add vocab offset {self.model_vocab_size=}")
+            self.pad_value += self.model_vocab_size
 
     def is_modality(self, modality: Modality) -> bool:
         return self.modality == modality
@@ -319,7 +333,10 @@ class MultimodalInputs:
 
         assert isinstance(ret.mm_items, list)
         ret.mm_items = [item for item in ret.mm_items if item.is_valid()]
+
+        model_vocab_size = obj.get("model_vocab_size", 0)
         for item in ret.mm_items:
+            item.model_vocab_size = model_vocab_size
             item.set_pad_value()
 
         optional_args = [
@@ -472,6 +489,12 @@ class Req:
         self.session_id = session_id
         self.input_embeds = input_embeds
 
+        # For req-level memory management
+        self.kv_committed_len = 0
+        self.kv_allocated_len = 0
+        self.kv_committed_freed = False
+        self.kv_overallocated_freed = False
+
         # for corss-endoder model
         self.token_type_ids = token_type_ids
 
@@ -548,8 +571,8 @@ class Req:
         self.host_hit_length = 0
         # The node to lock until for swa radix tree lock ref
         self.swa_uuid_for_lock: Optional[int] = None
-        # The prefix length of the last prefix matching
-        self.last_matched_prefix_len: int = 0
+        # The prefix length that is inserted into the tree cache
+        self.cache_protected_len: int = 0
 
         # Whether or not if it is chunked. It increments whenever
         # it is chunked, and decrement whenever chunked request is
@@ -558,8 +581,8 @@ class Req:
 
         # For retraction
         self.is_retracted = False
-        # indicate the req ever been retracted
-        self.has_retracted = False
+        # Indicates if the req has ever been retracted.
+        self.retracted_stain = False
 
         # Incremental streamining
         self.send_token_offset: int = 0
@@ -670,10 +693,6 @@ class Req:
         self.dimensions = dimensions
 
     @property
-    def first_scheduled_time(self):
-        return self.time_stats.get_queueing_time()
-
-    @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
@@ -691,6 +710,35 @@ class Req:
         if self.finished_len is not None:
             return self.output_ids[: self.finished_len]
         return self.output_ids
+
+    def pop_committed_kv_cache(self) -> int:
+        """Return the length of committed KV cache and mark them as freed."""
+
+        # NOTE: This function is called exactly once after the request is finished.
+        global_server_args = get_global_server_args()
+        topk = global_server_args.speculative_eagle_topk
+
+        enable_kv_committed_len = topk is None or topk == 1
+        if enable_kv_committed_len:
+            assert (
+                not self.kv_committed_freed
+            ), f"Committed KV cache already freed ({self.kv_committed_len=})"
+            self.kv_committed_freed = True
+            return self.kv_committed_len
+        else:
+            return len(self.origin_input_ids) + max(len(self.output_ids) - 1, 0)
+
+    def pop_overallocated_kv_cache(self) -> Tuple[int, int]:
+        """Return the range of over-allocated KV cache and mark them as freed."""
+
+        # NOTE: This function is called when there is over-allocation of KV cache.
+        # Over-allocation: we allocate more KV cache than the committed length.
+        # e.g., speculative decoding may allocate more KV cache than actually used.
+        assert (
+            not self.kv_overallocated_freed
+        ), f"Overallocated KV cache already freed, {self.kv_committed_len=}, {self.kv_allocated_len=}"
+        self.kv_overallocated_freed = True
+        return self.kv_committed_len, self.kv_allocated_len
 
     def add_latency(self, stage: RequestStage):
         if self.metrics_collector is None:
@@ -723,12 +771,7 @@ class Req:
         token_ids = self.fill_ids[:max_prefix_len]
 
         if tree_cache is not None:
-            (
-                self.prefix_indices,
-                self.last_node,
-                self.last_host_node,
-                self.host_hit_length,
-            ) = tree_cache.match_prefix(
+            match_result = tree_cache.match_prefix(
                 key=RadixKey(token_ids=token_ids, extra_key=self.extra_key),
                 **(
                     {"req": self, "cow_mamba": True}
@@ -736,7 +779,18 @@ class Req:
                     else {}
                 ),
             )
-            self.last_matched_prefix_len = len(self.prefix_indices)
+            (
+                self.prefix_indices,
+                self.last_node,
+                self.last_host_node,
+                self.host_hit_length,
+            ) = (
+                match_result.device_indices,
+                match_result.last_device_node,
+                match_result.last_host_node,
+                match_result.host_hit_length,
+            )
+            self.cache_protected_len = len(self.prefix_indices)
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
     # Based on https://github.com/vllm-project/vllm/blob/7a64d24aad69e4d2548aa0bf528d9fe63428ab01/vllm/transformers_utils/detokenizer.py#L194-L313
@@ -910,7 +964,7 @@ class Req:
         self.swa_uuid_for_lock = None
         self.extend_input_len = 0
         self.is_retracted = True
-        self.has_retracted = True
+        self.retracted_stain = True
         self.input_token_logprobs = None
         self.temp_input_top_logprobs_val = None
         self.temp_input_top_logprobs_idx = None
@@ -918,6 +972,10 @@ class Req:
         self.is_chunked = 0
         self.mamba_pool_idx = None
         self.already_computed = 0
+        self.kv_allocated_len = 0
+        self.kv_committed_len = 0
+        self.kv_committed_freed = False
+        self.kv_overallocated_freed = False
 
     def offload_kv_cache(self, req_to_token_pool, token_to_kv_pool_allocator):
         token_indices = req_to_token_pool.req_to_token[
@@ -950,7 +1008,7 @@ class Req:
         num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
         if num_new_tokens <= 0:
             return
-        
+
         reqTimeStats = self.time_stats
         log_time = time.time()
         for _ in range(num_new_tokens):
@@ -969,7 +1027,7 @@ class Req:
         self.time_stats.tokens_iter_batch_size.append(0)
         self.time_stats.tokens_iter_total_token.append(0)
         self.time_stats.tokens_iter_waiting_size.append(self.time_stats.wait_queue_size)
-    
+
     def log_disaggregation_prefill_first_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0):
         num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
         if num_new_tokens <= 0 or self.time_stats.prefill_bootstrap_queue_entry_time <= 0.0:
@@ -1057,6 +1115,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     orig_seq_lens: torch.Tensor = None  # shape: [b], int32
 
     # For DP attention
+    inner_idle_batch: Optional[ScheduleBatch] = None
     global_num_tokens: Optional[List[int]] = None
     global_num_tokens_for_logprob: Optional[List[int]] = None
     is_extend_in_batch: bool = False
@@ -1105,7 +1164,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     has_grammar: bool = False
 
     # Device
-    device: str = "cuda"
+    if not _is_npu:
+        device: str = "cuda"
+    else:
+        device: str = "npu"
 
     # Speculative decoding
     spec_algorithm: SpeculativeAlgorithm = None
@@ -1174,10 +1236,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def is_empty(self):
         return len(self.reqs) == 0
-    
+
     def mark_end_time(self):
         self.end_time = time.time()
-    
+
     def mark_start_time(self):
         self.create_time = time.time()
 
@@ -1318,6 +1380,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             req.req_pool_idx = req_pool_indices[i]
             assert seq_len - pre_len == req.extend_input_len
 
+            # update req-level memory management fields
+            req.kv_committed_len = seq_len
+            req.kv_allocated_len = seq_len
+
             # If input_embeds are available, store them
             if req.input_embeds is not None:
                 # If req.input_embeds is already a list, append its content directly
@@ -1325,9 +1391,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
             multimodal_inputs.append(req.multimodal_inputs)
 
-            # Only caculate cached_tokens once, once retracted, the 'has_retracted'
+            # Only calculate cached_tokens once. Once retracted, the 'retracted_stain'
             # flag will always True
-            if req.has_retracted is False:
+            if not req.retracted_stain:
                 req.cached_tokens += pre_len - req.already_computed
                 req.already_computed = seq_len
             req.is_retracted = False
@@ -1426,6 +1492,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 pixel_values = getattr(mm_item, "feature", None)
                 if isinstance(pixel_values, torch.Tensor):
                     mm_item.feature = pixel_values.to(self.device, non_blocking=True)
+                elif isinstance(pixel_values, CudaIpcTensorTransportProxy):
+                    mm_item.feature = pixel_values.reconstruct_on_target_device(
+                        torch.cuda.current_device()
+                    )
+                    del pixel_values
         self.multimodal_inputs = multimodal_inputs
         self.token_type_ids = token_type_ids_tensor
         self.seq_lens_sum = sum(seq_lens)
@@ -1511,7 +1582,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         evict_from_tree_cache(self.tree_cache, num_tokens)
         return self._is_available_size_sufficient(num_tokens)
 
-    def retract_decode(self, server_args: ServerArgs):
+    def retract_decode(
+        self, server_args: ServerArgs
+    ) -> Tuple[List[Req], float, List[Req]]:
         """Retract the decoding requests when there is not enough memory."""
         sorted_indices = list(range(len(self.reqs)))
 
@@ -1579,7 +1652,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )  # avoid zero division
         new_estimate_ratio = min(1.0, new_estimate_ratio)
 
-        return retracted_reqs, new_estimate_ratio
+        return retracted_reqs, new_estimate_ratio, []
 
     def release_req(self, idx: int, remaing_req_count: int, server_args: ServerArgs):
         req = self.reqs[idx]
@@ -1589,7 +1662,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 self.req_to_token_pool, self.token_to_kv_pool_allocator
             )
         # TODO (csy): for preempted requests, we may want to insert into the tree
-        self.tree_cache.cache_finished_req(req, is_insert=False)
+        release_kv_cache(req, self.tree_cache, is_insert=False)
         # NOTE(lsyin): we should use the newly evictable memory instantly.
         num_tokens = remaing_req_count * envs.SGLANG_RETRACT_DECODE_STEPS.get()
         evict_from_tree_cache(self.tree_cache, num_tokens)
@@ -1666,6 +1739,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Allocate memory
         self.out_cache_loc = alloc_for_decode(self, token_per_req=1)
+
+        # Update req-level memory management fields
+        for req in self.reqs:
+            req.kv_committed_len += 1
+            req.kv_allocated_len += 1
 
         # Update seq_lens after allocation
         if self.enable_overlap:
@@ -1758,7 +1836,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def merge_batch(self, other: "ScheduleBatch"):
         # NOTE: in v2 eagle mode, we do not need wait verify here because
-        # 1) current batch is always prefill, whose seq_lens and allocate_lens are not a future
+        # 1) current batch is always prefill, whose seq_lens is not a future
         # 2) other batch is always decode, which is finished in previous step
 
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
@@ -1891,6 +1969,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             seq_lens_cpu=self.seq_lens_cpu,
             enable_overlap=self.enable_overlap,
             waiting_size = self.waiting_size,
+            create_time=self.create_time,
         )
 
     def _is_available_size_sufficient(self, num_tokens: int) -> bool:

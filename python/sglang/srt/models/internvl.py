@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,10 +14,7 @@ from sglang.srt.layers.attention import vision_utils
 from sglang.srt.layers.attention.vision import SingletonCache, VisionAttention
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.managers.mm_utils import (
-    MultiModalityDataPaddingPatternTokenPairs,
-    general_mm_embed_routine,
-)
+from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternTokenPairs
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -48,7 +45,6 @@ class InternAttention(nn.Module):
         self.scale = self.head_dim**-0.5
 
         self.attn = VisionAttention(
-            qkv_backend="fa3",
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
             projection_size=self.embed_dim,
@@ -472,6 +468,12 @@ class InternVLChatModel(nn.Module):
             nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
+        self.external_mm_data_embedding_funcs = {
+            Modality.IMAGE: self.get_image_feature,
+        }
+
+        self.model = self.language_model.model
+
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
         # N, W, H, C --> N, W, H * scale, C // scale
@@ -532,17 +534,25 @@ class InternVLChatModel(nn.Module):
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
 
-        hs = general_mm_embed_routine(
+        input_embeds = forward_batch.input_embeds
+        # It may seem strange to assign input_embeds again even after passing it as an argument.
+        # This is for compatibility considerations.
+        # In the 'extend' scenario, this forward function is called from two places:
+        # 1. model_runner calls forward directly,
+        # 2. piece_wise_cuda_graph_runner calls forward and replay.
+
+        # Currently,
+        # In 'extend', input_embeds is passed in.
+        # In 'decode', input_ids is passed in.
+
+        hidden_states = self.language_model(
             input_ids=input_ids,
             forward_batch=forward_batch,
-            language_model=self.language_model,
-            data_embedding_funcs={
-                Modality.IMAGE: self.get_image_feature,
-            },
+            input_embeds=input_embeds,
             positions=positions,
         )
 
-        return hs
+        return hidden_states
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
         # Get all special token IDs
@@ -598,7 +608,6 @@ class InternVLChatModel(nn.Module):
             ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -651,19 +660,46 @@ class InternVLChatModel(nn.Module):
                     param = params_dict[name]
                     if "wqkv" in name:
                         config = self.config
-                        kv_groups = (
-                            config.num_attention_heads // config.num_key_value_heads
+                        hidden_size = config.hidden_size
+                        num_heads = config.num_attention_heads
+                        num_kv_heads = getattr(config, "num_key_value_heads", num_heads)
+                        head_size = hidden_size // num_heads
+                        kv_groups = num_heads // num_kv_heads
+
+                        quantization_config = getattr(
+                            config, "quantization_config", None
                         )
-                        head_dim = config.hidden_size // config.num_attention_heads
-                        loaded_weight = loaded_weight.view(
-                            -1, 2 + kv_groups, head_dim, loaded_weight.shape[-1]
+                        is_awq = (
+                            quantization_config
+                            and quantization_config.get("quant_method") == "awq"
                         )
-                        wq, wk, wv = torch.split(
-                            loaded_weight, [kv_groups, 1, 1], dim=1
-                        )
-                        wq = wq.reshape(-1, wq.shape[-1])
-                        wk = wk.reshape(-1, wk.shape[-1])
-                        wv = wv.reshape(-1, wv.shape[-1])
+
+                        if is_awq:
+                            if "scales" in name:
+                                loaded_weight = loaded_weight.unflatten(
+                                    1, (num_kv_heads, -1, head_size)
+                                )
+                            else:  # qweight and qzeros
+                                elem_per_int = 32 // quantization_config["bits"]
+                                loaded_weight = loaded_weight.unflatten(
+                                    1, (num_kv_heads, -1, head_size // elem_per_int)
+                                )
+
+                            wq = loaded_weight[:, :, :-2].flatten(1, 3)
+                            wk = loaded_weight[:, :, -2].flatten(1, 2)
+                            wv = loaded_weight[:, :, -1].flatten(1, 2)
+
+                        else:
+                            loaded_weight = loaded_weight.view(
+                                -1, 2 + kv_groups, head_size, loaded_weight.shape[-1]
+                            )
+                            wq, wk, wv = torch.split(
+                                loaded_weight, [kv_groups, 1, 1], dim=1
+                            )
+                            wq = wq.reshape(-1, wq.shape[-1])
+                            wk = wk.reshape(-1, wk.shape[-1])
+                            wv = wv.reshape(-1, wv.shape[-1])
+
                         weight_loader = param.weight_loader
                         weight_loader(param, wq, "q")
                         weight_loader(param, wk, "k")
@@ -677,23 +713,6 @@ class InternVLChatModel(nn.Module):
                                 self.config, name, loaded_weight
                             )
                         weight_loader(param, loaded_weight)
-
-            loaded_params.add(name)
-        unloaded_params = params_dict.keys() - loaded_params
-        # Skip params that are created by quantization wrappers and are not expected in the ckpt
-        _quant_only_fragments = (
-            "weight_scale",  # per-matrix FP8 scales (e.g., w2_weight_scale, w13_weight_scale)
-        )
-        unloaded_params = {
-            n
-            for n in unloaded_params
-            if not any(frag in n for frag in _quant_only_fragments)
-        }
-        if unloaded_params:
-            raise RuntimeError(
-                f"Some weights are not initialized from checkpoints: {unloaded_params}"
-            )
-        return loaded_params
 
 
 EntryClass = InternVLChatModel

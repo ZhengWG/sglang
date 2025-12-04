@@ -15,6 +15,8 @@
 import math
 from typing import List
 
+API_SERVER_ARRIVE_TIME = "api_server_arrive_time"
+
 
 def two_sides_exponential_buckets(
     middle: float, base: float, count: int

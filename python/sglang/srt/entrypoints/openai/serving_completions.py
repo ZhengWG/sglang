@@ -4,7 +4,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Union
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from sglang.srt.entrypoints.openai.protocol import (
@@ -247,8 +247,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 index = content.get("index", 0)
 
                 text = content["text"]
-                prompt_tokens[index] = content["meta_info"]["prompt_tokens"]
-                completion_tokens[index] = content["meta_info"]["completion_tokens"]
+                prompt_tokens[index] = content["meta_info"].get("prompt_tokens", 0)
+                completion_tokens[index] = content["meta_info"].get("completion_tokens", 0)
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
 
@@ -264,10 +264,10 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 if request.logprobs is not None:
                     # The first chunk and echo is enabled.
                     if not stream_buffer and request.echo:
-                        input_token_logprobs = content["meta_info"][
-                            "input_token_logprobs"
-                        ]
-                        input_top_logprobs = content["meta_info"]["input_top_logprobs"]
+                        input_token_logprobs = content["meta_info"].get(
+                            "input_token_logprobs", None)
+                        input_top_logprobs = content["meta_info"].get(
+                            "input_top_logprobs", None)
                     else:
                         input_token_logprobs = None
                         input_top_logprobs = None
@@ -276,15 +276,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     logprobs = to_openai_style_logprobs(
                         input_token_logprobs=input_token_logprobs,
                         input_top_logprobs=input_top_logprobs,
-                        output_token_logprobs=content["meta_info"][
-                            "output_token_logprobs"
-                        ][n_prev_token:],
-                        output_top_logprobs=content["meta_info"]["output_top_logprobs"][
-                            n_prev_token:
-                        ],
+                        output_token_logprobs=content["meta_info"].get(
+                            "output_token_logprobs", [])[n_prev_token:],
+                        output_top_logprobs=content["meta_info"].get(
+                            "output_top_logprobs", [])[n_prev_token:],
                     )
                     n_prev_tokens[index] = len(
-                        content["meta_info"]["output_token_logprobs"]
+                        content["meta_info"].get("output_token_logprobs", [])
                     )
 
                 # Generate delta
@@ -367,15 +365,25 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     model=request.model,
                     usage=usage,
                     metadata={
-                        "weight_version": content["meta_info"]["weight_version"],
-                        "e2e_latency": content["meta_info"]["e2e_latency"] * 1000,
+                        "weight_version": content["meta_info"].get("weight_version", ""),
+                        "e2e_latency": content["meta_info"].get("e2e_latency", 0.0) * 1000,
                         "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
-                        "queue_latency": content["meta_info"].get("queue_latency", 0.0) * 1000,
+                        "queue_latency": content["meta_info"].get("queue_time", 0.0) * 1000,
                     },
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
 
+        except HTTPException as e:
+            error = self.create_streaming_error_response(
+                message=e.detail,
+                err_type=str(e.status_code),
+                status_code=e.status_code,
+            )
+            yield f"data: {error}\n\n"
+        except ValueError as e:
+            error = self.create_streaming_error_response(str(e))
+            yield f"data: {error}\n\n"
         except Exception as e:
             error_code = getattr(e, "error_code", 400)
             error = self.create_streaming_error_response(str(e), status_code=error_code,)
@@ -437,8 +445,10 @@ class OpenAIServingCompletion(OpenAIServingBase):
             logprobs = None
             if request.logprobs is not None:
                 if echo:
-                    input_token_logprobs = ret_item["meta_info"]["input_token_logprobs"]
-                    input_top_logprobs = ret_item["meta_info"]["input_top_logprobs"]
+                    input_token_logprobs = ret_item["meta_info"].get(
+                        "input_token_logprobs", None)
+                    input_top_logprobs = ret_item["meta_info"].get(
+                        "input_top_logprobs", None)
                 else:
                     input_token_logprobs = None
                     input_top_logprobs = None
@@ -446,10 +456,10 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 logprobs = to_openai_style_logprobs(
                     input_token_logprobs=input_token_logprobs,
                     input_top_logprobs=input_top_logprobs,
-                    output_token_logprobs=ret_item["meta_info"][
-                        "output_token_logprobs"
-                    ],
-                    output_top_logprobs=ret_item["meta_info"]["output_top_logprobs"],
+                    output_token_logprobs=ret_item["meta_info"].get(
+                        "output_token_logprobs", None),
+                    output_top_logprobs=ret_item["meta_info"].get(
+                        "output_top_logprobs", None),
                 )
 
             # Handle hidden states
@@ -484,10 +494,10 @@ class OpenAIServingCompletion(OpenAIServingBase):
             choices=choices,
             usage=usage,
             metadata={
-                "weight_version": ret[0]["meta_info"]["weight_version"],
-                "e2e_latency": ret[0]["meta_info"]["e2e_latency"] * 1000,
+                "weight_version": ret[0]["meta_info"].get("weight_version", ""),
+                "e2e_latency": ret[0]["meta_info"].get("e2e_latency", 0.0) * 1000,
                 "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
-                "queue_latency": ret[0]["meta_info"].get("queue_latency", 0.0) * 1000,
+                "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
             },
         )
 

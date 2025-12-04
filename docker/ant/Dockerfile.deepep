@@ -67,6 +67,10 @@ RUN pip3 uninstall -y atorch atorch-addon && \
 # 同上， 强制重新安装sgl-kernel
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
 
+# 安装bugfix版本的decord2，必须在numpy降级前，否则会冲突
+ARG DECORD2_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/decord2_fix/decord2-2.1.0-cp310-cp310-manylinux_2_28_x86_64.whl'
+RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${DECORD2_WHL_URL}
+
 # sglang安装时，numpy会升级为2.x， 重新降级为1.26.4
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps numpy==1.26.4
 

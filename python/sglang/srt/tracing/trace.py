@@ -30,28 +30,42 @@ from sglang.srt.utils import get_int_env_var
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import Req
+from typing import Any, Dict, List, Mapping, Optional
 
 from sglang.utils import run_once
 
 logger = logging.getLogger(__name__)
 opentelemetry_imported = False
 tracing_enabled = False
+_trace_context_propagator = None
 tracing_multispan_enabled = False
 
 NORMAL_TRACE_LEVEL = 1
 ENHANCED_TRACE_LEVEL = 2
 APP_NAME = 'sglang'
+
 TRACE_HEADERS = ["traceparent", "tracestate", "SOFA-TraceId", "SOFA-RpcId", "X-Request-ID", "X-AIGW-APP-KeyId"]
 
 try:
     from opentelemetry import context, propagate, trace
     from opentelemetry.context.context import Context
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+        OTLPSpanExporter as GRPCSpanExporter,
+    )
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+        OTLPSpanExporter as HTTPSpanExporter,
+    )
+    from opentelemetry.sdk.environment_variables import (
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+    )
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider, id_generator
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace.propagation.tracecontext import (
-        TraceContextTextMapPropagator)
+        TraceContextTextMapPropagator,
+    )
+
+    _trace_context_propagator = TraceContextTextMapPropagator()
 
     opentelemetry_imported = True
 except ImportError:
@@ -60,13 +74,8 @@ except ImportError:
         class IdGenerator:
             pass
 
-    logger.info("opentelemetry package is not installed, tracing disabled")
+    logger.debug("opentelemetry package is not installed, tracing disabled")
 
-def is_tracing_enabled() -> bool:
-    return tracing_enabled
-
-def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
-    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
     return any(h in headers for h in TRACE_HEADERS)
@@ -75,6 +84,14 @@ def contains_trace_headers(headers: Mapping[str, str]) -> bool:
 def log_tracing_disabled_warning() -> None:
     logger.warning(
         "Received a request with trace context but tracing is disabled")
+
+def is_tracing_enabled() -> bool:
+    return tracing_enabled
+
+
+def extract_trace_headers(headers: Mapping[str, str]) -> Optional[Dict]:
+    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
+
 
 @dataclass
 class SglangTraceThreadInfo:
@@ -231,7 +248,7 @@ def process_tracing_init(otlp_endpoint, server_name):
         )
 
         processor = BatchSpanProcessor(
-            OTLPSpanExporter(endpoint=otlp_endpoint),
+            span_exporter=get_otlp_span_exporter(otlp_endpoint),
             schedule_delay_millis=schedule_delay_millis,
             max_export_batch_size=max_export_batch_size,
         )
@@ -247,6 +264,22 @@ def process_tracing_init(otlp_endpoint, server_name):
         __get_cur_time_ns = lambda: int(time.time_ns())
 
     tracing_enabled = True
+
+
+def get_otlp_span_exporter(endpoint):
+    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "http/protobuf")
+    supported_protocols = {"grpc", "http/protobuf"}
+
+    if protocol not in supported_protocols:
+        raise ValueError(
+            f"Unsupported OTLP protocol '{protocol}' configured. "
+            f"Supported protocols are: {', '.join(sorted(supported_protocols))}"
+        )
+
+    if protocol == "grpc":
+        return GRPCSpanExporter(endpoint=endpoint, insecure=True)
+    elif protocol == "http/protobuf":
+        return HTTPSpanExporter(endpoint=endpoint)
 
 
 # Should be called by each tracked thread.
@@ -379,7 +412,7 @@ def trace_set_proc_propagate_context(rid, trace_context: Optional[Dict[str, Any]
 def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
     if not tracing_enabled:
         return ""
-    
+
     if not tracing_multispan_enabled:
         return ""
 
@@ -403,7 +436,7 @@ def trace_get_remote_propagate_context(bootstrap_room_list: List[str]):
 def trace_set_remote_propagate_context(base64_str):
     if not tracing_enabled:
         return
-    
+
     if not tracing_multispan_enabled:
         return
 
@@ -430,7 +463,7 @@ def trace_req_start(
     bootstrap_room: Optional[int] = None,
     ts: Optional[int] = None,
     role: Optional[str] = "null",
-    trace_headers: Optional[Dict[str, str]] = None,
+    external_trace_header: Optional[Dict[str, str]] = None,
 ):
     if not tracing_enabled:
         return
@@ -453,10 +486,13 @@ def trace_req_start(
         is_copy=False,
     )
 
-    trace_context = extract_trace_context(trace_headers)
-
     tracer = threads_info[pid].tracer
     bootstrap_room_span_context = None
+
+    external_trace_context = _trace_context_propagator.extract(
+        external_trace_header if external_trace_header is not None else {}
+    )
+
     # create bootstrap room span
     if tracing_multispan_enabled:
         if str(bootstrap_room) not in remote_trace_contexts:
@@ -465,7 +501,7 @@ def trace_req_start(
                 name=f"Bootstrap Room {hex(bootstrap_room)}",
                 start_time=ts,
                 attributes=attrs,
-                context=trace_context
+                context=external_trace_context,
             )
             reqs_context[rid].bootstrap_room_span = bootstrap_room_span
             bootstrap_room_span_context = trace.set_span_in_context(bootstrap_room_span)
@@ -481,7 +517,7 @@ def trace_req_start(
     root_span = tracer.start_span(
         name="llm_request",
         start_time=ts,
-        context=bootstrap_room_span_context if tracing_multispan_enabled else trace_context,
+        context=bootstrap_room_span_context if tracing_multispan_enabled else external_trace_context,
         attributes=attrs,
         kind=trace.SpanKind.SERVER,
     )
@@ -843,6 +879,8 @@ def trace_slice_batch(
             auto_next_anon=not req.finished(),
             thread_finish_flag=req.finished(),
         )
+
+
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
     if tracing_enabled:
@@ -856,10 +894,14 @@ def trace_event_batch(
     name: str,
     reqs: List[Req],
     ts: Optional[int] = None,
-    attrs: Dict[str, Any] = None,
+    attrs: Dict[str, Any] = {},
 ):
     if not tracing_enabled or not tracing_multispan_enabled:
         return
 
+    bid = uuid.uuid4().hex[:8]
+    _attrs = {"bid": bid, "batch_size": len(reqs)}
+    _attrs.update(attrs)
+
     for req in reqs:
-        trace_event(name, req.rid, ts=ts, attrs=attrs)
+        trace_event(name, req.rid, ts=ts, attrs=_attrs)
