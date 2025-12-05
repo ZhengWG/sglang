@@ -2170,7 +2170,8 @@ class Scheduler(
         num_timeout_reqs = 0
         for req in self.grammar_queue:
             try:
-                if req.finished():  # It is aborted by AbortReq
+                # NOTE: fix when abort req comes first, but req is still in to_finish status
+                if req.finished() or req.to_finish is not None:  # It is aborted by AbortReq
                     num_ready_reqs += 1
                     continue
 
@@ -2206,7 +2207,8 @@ class Scheduler(
 
             for i in range(num_ready_reqs, num_ready_reqs_max):
                 req = self.grammar_queue[i]
-                if req.finished():  # It is aborted by AbortReq
+                # NOTE: fix when abort req comes first, but req is still in to_finish status
+                if req.finished() or req.to_finish is not None:  # It is aborted by AbortReq
                     continue
                 req.grammar = req.grammar.result()
                 self.grammar_backend.set_cache(req.grammar_key, req.grammar.copy())
