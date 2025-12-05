@@ -455,11 +455,6 @@ class ModelRunner:
             if architectures and not any("Llama4" in arch for arch in architectures):
                 self.is_hybrid_swa = self.model_config.is_hybrid_swa = True
 
-        if config := self.mamba2_config:
-            class_name = config.__class__.__name__
-            logger.warning(f"{class_name} model detected, disable radix cache")
-            self.server_args.disable_radix_cache = True
-
         load_config = LoadConfig(
             load_format=self.server_args.load_format,
             model_loader_extra_config=self.server_args.model_loader_extra_config,
