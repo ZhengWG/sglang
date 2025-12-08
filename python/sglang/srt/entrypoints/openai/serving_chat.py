@@ -219,6 +219,7 @@ class OpenAIServingChat(OpenAIServingBase):
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
             extra_key=self._compute_extra_key(request),
+            reasoning=self._get_reasoning_from_request(request),
             priority=request.priority,
             custom_labels=custom_labels,
             custom_logit_processor=request.custom_logit_processor,
@@ -451,7 +452,10 @@ class OpenAIServingChat(OpenAIServingBase):
                 prompt = prompt[: -len(conv.sep2)]
         else:
             prompt = conv.get_prompt()
-            if self._get_enable_thinking_from_request(request):
+            if self._get_reasoning_from_request(
+                request
+            ) and self.reasoning_parser not in ["qwen3", "qwen3-thinking", "glm4"]:
+                # qwen3 and glm4 think internally without a leading <think> token
                 prompt += "<think>"  # Note(Xinyuan): hard code thinking token
 
         image_data = conv.image_data if conv.image_data else None
@@ -854,7 +858,7 @@ class OpenAIServingChat(OpenAIServingBase):
             if reasoning_parser and request.separate_reasoning:
                 is_force_reasoning = (
                     self.template_manager.force_reasoning
-                    or self._get_enable_thinking_from_request(request)
+                    or self._get_reasoning_from_request(request)
                 )
                 try:
                     parser = ReasoningParser(
@@ -1106,7 +1110,7 @@ class OpenAIServingChat(OpenAIServingBase):
         if index not in reasoning_parser_dict:
             is_force_reasoning = (
                 self.template_manager.force_reasoning
-                or self._get_enable_thinking_from_request(request)
+                or self._get_reasoning_from_request(request)
             )
             reasoning_parser_dict[index] = ReasoningParser(
                 self.reasoning_parser,
@@ -1161,6 +1165,24 @@ class OpenAIServingChat(OpenAIServingBase):
         ):
             return request.chat_template_kwargs.get(thinking_trigger)
         return False
+
+    # TODO(yudian.zy): 确认下这个跟reasoning_padding等feature的关系
+    def _get_reasoning_from_request(self, request: ChatCompletionRequest) -> bool:
+        """Judge whether the request needs reasoning"""
+        if not self.reasoning_parser:
+            return False
+        if self.reasoning_parser in ["deepseek-v3"]:
+            return (
+                request.chat_template_kwargs is not None
+                and request.chat_template_kwargs.get("thinking") is True
+            )
+        if self.reasoning_parser in ["qwen3", "glm45"]:
+            # qwen3 and glm45 are reasoning by default
+            return (
+                not request.chat_template_kwargs
+                or request.chat_template_kwargs.get("enable_thinking", True) is True
+            )
+        return True  # default
 
     async def _process_tool_call_stream(
         self,
