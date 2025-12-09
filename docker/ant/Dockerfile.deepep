@@ -28,8 +28,15 @@ RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistu
 
 RUN python3 -m pip install --upgrade pip --no-cache-dir && pip install -U setuptools
 
+# 单独处理vllm的依赖包
+RUN pip3 install --no-cache-dir vllm==0.12.0
+
 # 安装运行sglang依赖的包
-RUN pip3 install --no-cache-dir torch==2.9.1 torchao==0.9.0 torchaudio==2.9.1 torchvision==0.24.1 vllm==0.11.2
+RUN pip3 install --no-cache-dir torch==2.9.1 torchao==0.9.0 torchaudio==2.9.1 torchvision==0.24.1
+
+# 安装flash-attn 2.8.3，配合sglang升级transformers 5.x
+ARG FLASH_ATTN_283_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/sglang_torch291/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl'
+RUN pip3 install --no-cache-dir ${FLASH_ATTN_283_WHL_URL}
 
 # for torch compile remote cache: https://yuque.antfin.com/deepxpu/uiwv6l/rtifd09662zz2u5k
 RUN pip3 install --no-cache-dir redis
