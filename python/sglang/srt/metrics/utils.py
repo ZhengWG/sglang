@@ -15,7 +15,7 @@
 import math
 from typing import List
 
-API_SERVER_ARRIVE_TIME = "api_server_arrive_time"
+RECEIVED_TIME = "received_time"
 
 
 def two_sides_exponential_buckets(

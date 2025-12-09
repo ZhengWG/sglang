@@ -14,7 +14,7 @@ from starlette.datastructures import Headers
 
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
 from sglang.srt.managers.io_struct import GenerateReqInput
-from sglang.srt.metrics.utils import API_SERVER_ARRIVE_TIME
+from sglang.srt.metrics.utils import RECEIVED_TIME
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.tracing.trace import contains_trace_headers, extract_trace_headers, is_tracing_enabled, log_tracing_disabled_warning
 
@@ -94,8 +94,10 @@ class OpenAIServingBase(ABC):
         """Handle the specific request type with common pattern
         If you want to override this method, you should be careful to record the validation time.
         """
+        received_time = time.time()
+        received_time_perf = time.perf_counter()
+
         try:
-            api_server_arrival_time = time.time()
             # Validate request
             validation_start = time.perf_counter()
             error_msg = self._validate_request(request)
@@ -113,10 +115,16 @@ class OpenAIServingBase(ABC):
             if hasattr(adapted_request, "validation_time"):
                 adapted_request.validation_time = validation_time
 
+            if hasattr(adapted_request, "received_time"):
+                adapted_request.received_time = received_time
+
+            if hasattr(adapted_request, "received_time_perf"):
+                adapted_request.received_time_perf = received_time_perf
+
             if hasattr(adapted_request, "metrics"):
                 if adapted_request.metrics is None:
                     adapted_request.metrics = {}
-                adapted_request.metrics[API_SERVER_ARRIVE_TIME] = api_server_arrival_time
+                adapted_request.metrics[RECEIVED_TIME] = received_time
 
             if hasattr(adapted_request, "external_trace_headers"):
                 adapted_request.external_trace_headers = (
@@ -124,6 +132,8 @@ class OpenAIServingBase(ABC):
                     if raw_request is None
                     else await self._get_trace_headers(raw_request.headers)
                 )
+
+           
 
             # Note(Xinyuan): raw_request below is only used for detecting the connection of the client
             if hasattr(request, "stream") and request.stream:

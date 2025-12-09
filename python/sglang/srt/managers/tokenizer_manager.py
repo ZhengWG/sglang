@@ -80,7 +80,6 @@ from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
-from sglang.srt.metrics.utils import API_SERVER_ARRIVE_TIME
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import (
     PortArgs,
@@ -458,7 +457,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
-        created_time = getattr(obj, "metrics", {}).get(API_SERVER_ARRIVE_TIME, time.time())
+        created_time = obj.received_time if getattr(obj, "received_time", None) else time.time()
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
