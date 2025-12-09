@@ -457,7 +457,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         obj: Union[GenerateReqInput, EmbeddingReqInput],
         request: Optional[fastapi.Request] = None,
     ):
-        created_time = obj.received_time if getattr(obj, "received_time", None) else time.time()
+        created_time = time.time()
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
