@@ -13,8 +13,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from starlette.datastructures import Headers
 
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
-from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.metrics.utils import RECEIVED_TIME
+from sglang.srt.managers.io_struct import EmbeddingReqInput, GenerateReqInput
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.tracing.trace import contains_trace_headers, extract_trace_headers, is_tracing_enabled, log_tracing_disabled_warning
 
@@ -94,6 +94,9 @@ class OpenAIServingBase(ABC):
         """Handle the specific request type with common pattern
         If you want to override this method, you should be careful to record the validation time.
         """
+        received_time = time.time()
+        received_time_perf = time.perf_counter()
+
         try:
             # Validate request
             validation_start = time.perf_counter()
@@ -109,8 +112,12 @@ class OpenAIServingBase(ABC):
             adapted_request, processed_request = self._convert_to_internal_request(
                 request, raw_request
             )
-            if hasattr(adapted_request, "validation_time"):
+
+            if isinstance(adapted_request, (GenerateReqInput, EmbeddingReqInput)):
+                # Only set timing fields if adapted_request supports them
                 adapted_request.validation_time = validation_time
+                adapted_request.received_time = received_time
+                adapted_request.received_time_perf = received_time_perf
 
             if hasattr(adapted_request, "metrics"):
                 if adapted_request.metrics is None:
