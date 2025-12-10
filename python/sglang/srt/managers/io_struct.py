@@ -937,7 +937,7 @@ class ReqMetric:
 
     def get_forward_time(self) -> float:
         return self.completion_time - self.forward_entry_time
-    
+
     def to_selected_dict(self) -> Dict[str, Any]:
         return {
                 "wait_queue_size": self.wait_queue_size,
