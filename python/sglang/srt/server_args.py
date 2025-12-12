@@ -2248,6 +2248,7 @@ class ServerArgs:
 
     def _handle_remote_instance_weight_loader_support_transfer_engine(self):
         try:
+            importlib.import_module("mooncake")
             if importlib.util.find_spec("mooncake.engine") is None:
                 logger.warning(
                     f"Failed to import mooncake.engine. Does not support using TransferEngine as remote instance weight loader backend."
@@ -2260,9 +2261,9 @@ class ServerArgs:
                 self.remote_instance_weight_loader_support_transfer_engine = False
             else:
                 self.remote_instance_weight_loader_support_transfer_engine = True
-        except (ImportError, ModuleNotFoundError) as e:
+        except ImportError:
             logger.warning(
-                f"Failed to import mooncake.engine. Does not support using TransferEngine as remote instance weight loader backend. {e}"
+                f"Failed to import mooncake. Does not support using TransferEngine as remote instance weight loader backend."
             )
             self.remote_instance_weight_loader_support_transfer_engine = False
 
