@@ -2246,18 +2246,24 @@ class ServerArgs:
             self.skip_server_warmup = True
 
     def _handle_remote_instance_weight_loader_support_transfer_engine(self):
-        if importlib.util.find_spec("mooncake.engine") is None:
+        try:
+            if importlib.util.find_spec("mooncake.engine") is None:
+                logger.warning(
+                    f"Failed to import mooncake.engine. Does not support using TransferEngine as remote instance weight loader backend."
+                )
+                self.remote_instance_weight_loader_support_transfer_engine = False
+            elif self.enable_memory_saver:
+                logger.warning(
+                    "Memory saver is enabled, which is not compatible with TransferEngine. Does not support using TransferEngine as remote instance weight loader backend."
+                )
+                self.remote_instance_weight_loader_support_transfer_engine = False
+            else:
+                self.remote_instance_weight_loader_support_transfer_engine = True
+        except (ImportError, ModuleNotFoundError) as e:
             logger.warning(
-                f"Failed to import mooncake.engine. Does not support using TransferEngine as remote instance weight loader backend."
+                f"Failed to import mooncake.engine. Does not support using TransferEngine as remote instance weight loader backend. {e}"
             )
             self.remote_instance_weight_loader_support_transfer_engine = False
-        elif self.enable_memory_saver:
-            logger.warning(
-                "Memory saver is enabled, which is not compatible with TransferEngine. Does not support using TransferEngine as remote instance weight loader backend."
-            )
-            self.remote_instance_weight_loader_support_transfer_engine = False
-        else:
-            self.remote_instance_weight_loader_support_transfer_engine = True
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
