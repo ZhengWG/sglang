@@ -498,8 +498,7 @@ class Qwen3ForCausalLM(nn.Module):
     def end_layer(self):
         return self.model.end_layer
 
-    def _load_weights_impl(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """Internal implementation of weight loading without reload scenario handling."""
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -512,7 +511,6 @@ class Qwen3ForCausalLM(nn.Module):
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
         futures = []
         params_dict = dict(self.named_parameters())
-        updated_params = set()
         for name, loaded_weight in weights:
             # Use async multi-threading only for host memory (CPU) tensors to overlap data transfer.
             # For device memory (GPU) tensors, multi-threading adds overhead without benefit.
@@ -569,7 +567,6 @@ class Qwen3ForCausalLM(nn.Module):
                     )
                 else:
                     weight_loader(param, loaded_weight, shard_id)
-                updated_params.add(name)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -587,30 +584,11 @@ class Qwen3ForCausalLM(nn.Module):
                         )
                     else:
                         weight_loader(param, loaded_weight)
-                    updated_params.add(name)
                 else:
                     logger.warning(f"Parameter {name} not found in params_dict")
 
         concurrent.futures.wait(futures)
         executor.shutdown()
-
-        return updated_params
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        """Load weights into the model, with support for RL training reload scenarios."""
-        from sglang.srt.model_loader.loader import QuantizedRLModelLoader
-
-        # Check if this is a reload scenario for RL training with quantized models
-        is_reload = QuantizedRLModelLoader.is_reload_scenario(self)
-        if is_reload:
-            # Use the fast path for RL training reloads
-            logger.info("[QuantizedRL] Using fast path reload in load_weights")
-            QuantizedRLModelLoader.rebinding_and_load_weights(
-                self, self._load_weights_impl, weights
-            )
-        else:
-            # Standard weight loading path
-            self._load_weights_impl(weights)
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
