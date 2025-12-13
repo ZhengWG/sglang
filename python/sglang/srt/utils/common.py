@@ -1166,18 +1166,6 @@ def add_api_key_middleware(app, api_key: str):
         return await call_next(request)
 
 
-def prepare_model_and_tokenizer(model_path: str, tokenizer_path: str):
-    if get_bool_env_var("SGLANG_USE_MODELSCOPE"):
-        if not os.path.exists(model_path):
-            from modelscope import snapshot_download
-
-            model_path = snapshot_download(model_path)
-            tokenizer_path = snapshot_download(
-                tokenizer_path, ignore_patterns=["*.bin", "*.safetensors"]
-            )
-    return model_path, tokenizer_path
-
-
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
     def __init__(self, fmt, datefmt=None, style="%"):
