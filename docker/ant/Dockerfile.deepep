@@ -67,6 +67,11 @@ RUN pip3 uninstall -y atorch atorch-addon && \
 # 同上， 强制重新安装sgl-kernel
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps ${SGL_KERNEL_WHL_URL}
 
+# torch 2.9.1 和 cudnn有兼容问题，见https://github.com/sgl-project/sglang/blob/372507649d43d50dc8d109eaeafa622f980ee473/python/sglang/srt/server_args.py#L4534
+# 升级 nvidia-cudnn-cu12==9.16.0.29
+
+RUN bash -c 'torch_version=$(pip show torch 2>/dev/null | grep "^Version:" | cut -d" " -f2);if [ "${torch_version}" ==  "2.9.1" ]; then pip install nvidia-cudnn-cu12==9.16.0.29; fi'
+
 # 安装bugfix版本的decord2，必须在numpy降级前，否则会冲突
 ARG DECORD2_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/decord2_fix/decord2-2.1.0-cp310-cp310-manylinux_2_28_x86_64.whl'
 RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${DECORD2_WHL_URL}
