@@ -736,7 +736,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         if isinstance(param, BlockQuantScaleParameter):
             weight_block_size = self.quant_method.quant_config.weight_block_size
-            block_n, _ = weight_block_size[0], weight_block_size[1]
+            raw_block_n, _ = weight_block_size[0], weight_block_size[1]
+            block_n = 1 if getattr(param, "format_ue8m0", False) else raw_block_n
             shard_offset = (
                 (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) // block_n
             ) // self.tp_size
@@ -965,8 +966,13 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
         if isinstance(param, BlockQuantScaleParameter):
-            weight_block_size = self.quant_method.quant_config.weight_block_size
-            block_n, _ = weight_block_size[0], weight_block_size[1]
+            if hasattr(self.quant_method, "quant_config"):
+                weight_block_size = self.quant_method.quant_config.weight_block_size
+            else:
+                assert hasattr(self, "weight_block_size")  # llm-compressor
+                weight_block_size = self.weight_block_size
+            raw_block_n, _ = weight_block_size[0], weight_block_size[1]
+            block_n = 1 if getattr(param, "format_ue8m0", False) else raw_block_n
             shard_offset = (shard_offset + block_n - 1) // block_n
             shard_size = (shard_size + block_n - 1) // block_n
 
