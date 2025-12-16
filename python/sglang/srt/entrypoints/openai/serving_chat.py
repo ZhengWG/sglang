@@ -299,12 +299,14 @@ class OpenAIServingChat(OpenAIServingBase):
                 thinking_mode = "chat"
             messages = request.messages
             messages = [msg.model_dump() for msg in messages]
+
+            if messages[0]["role"] != "system":
+                # insert an empty system prompt to help render tool system prompt
+                # note: 脚本里如果system是空，不会影响任何prompt
+                messages.insert(0, {"role": "system", "content": ""})
+
             drop_thinking = True
             if request.tools:
-                if messages[0]["role"] != "system":
-                    messages.insert(
-                        0, {"role": "system", "content": "You are a helpful Assistant."}
-                    )
                 messages[0]["tools"] = [tool.model_dump() for tool in request.tools]
                 drop_thinking = False
             real_input = encode_messages(
