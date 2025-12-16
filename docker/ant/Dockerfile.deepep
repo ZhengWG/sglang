@@ -101,6 +101,11 @@ RUN pip3 uninstall -y deep-ep ant_deep_ep; pip3 install --force-reinstall --no-c
 # For EPLB initialization
 COPY ./docker/ant/expert_workload.json /root/expert_workload.json
 
+# 安装deepgemm编译缓存
+RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_gemm_cache_common1216.tar" && \
+    tar -xPf deep_gemm_cache_common1216.tar && \
+    rm -rf deep_gemm_cache_common1216.tar
+
 # checkpoint-engine
 RUN mkdir -p /root/checkpoint_engine
 COPY ./examples/checkpoint_engine/update.py /root/checkpoint_engine/update.py
