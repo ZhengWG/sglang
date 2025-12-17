@@ -53,7 +53,11 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3 import Qwen3Model
-from sglang.srt.models.utils import RotaryPosMixin, compute_cu_seqlens_from_grid_numpy, WeightsMapper
+from sglang.srt.models.utils import (
+    RotaryPosMixin,
+    WeightsMapper,
+    compute_cu_seqlens_from_grid_numpy,
+)
 from sglang.srt.multimodal.mm_utils import run_dp_sharded_mrope_vision_model
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, get_int_env_var
@@ -606,7 +610,7 @@ class Qwen3VLForConditionalGeneration(nn.Module):
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
-        }
+        },
     )
 
     def __init__(
