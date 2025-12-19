@@ -12,6 +12,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from starlette.datastructures import Headers
 
+from sglang.srt.entrypoints.openai.encoding_dsv32 import DS32EncodingError
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
 from sglang.srt.metrics.utils import RECEIVED_TIME
 from sglang.srt.managers.io_struct import EmbeddingReqInput, GenerateReqInput
@@ -149,6 +150,13 @@ class OpenAIServingBase(ABC):
             return self.create_error_response(
                 message=str(e),
                 err_type="BadRequestError",
+                status_code=400,
+            )
+        except DS32EncodingError as e:
+            logger.info(f"DS32EncodingError: {e}")
+            return self.create_error_response(
+                message=str(e),
+                err_type="BadRequest",
                 status_code=400,
             )
         except Exception as e:
