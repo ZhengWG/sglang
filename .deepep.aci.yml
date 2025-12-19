@@ -79,7 +79,7 @@ jobs:
       appName: sglang
       tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
       retry: 10
-      imageType: oci,nydus
+      imageType: oci
 
   推送镜像信息至keeper:
     stage: Push-Image
