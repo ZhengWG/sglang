@@ -715,6 +715,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             ):
                 for item in mm_inputs["mm_items"]:
                     if isinstance(item, MultimodalDataItem):
+                        item.model_vocab_size = self.model_config.vocab_size
                         item.set_pad_value()
         else:
             mm_inputs = None
