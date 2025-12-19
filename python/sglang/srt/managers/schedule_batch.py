@@ -1272,6 +1272,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Diffusion LLM
     dllm_config: Optional[DllmConfig] = None
 
+    # For hidden states before normal
+    return_hidden_states_before_norm: bool = False
+
     # batch creation time
     create_time : float = field(default_factory=time.time)
     # batch end time
@@ -2183,6 +2186,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             dllm_config=self.dllm_config,
             reqs=self.reqs,
             has_grammar=self.has_grammar,
+            return_hidden_states_before_norm=self.return_hidden_states_before_norm,
             mamba_track_indices=self.mamba_track_indices,
             mamba_track_mask=self.mamba_track_mask,
             mamba_track_seqlens=self.mamba_track_seqlens,
@@ -2313,6 +2317,9 @@ class ModelWorkerBatch:
     # FIXME(lsyin): remove this after fully overlap grammar
     reqs: Optional[List[Req]] = None
     has_grammar: bool = False
+
+    # For hidden states before normal
+    return_hidden_states_before_norm: bool = False
 
     # For mamba state tracking
     mamba_track_indices: Optional[torch.Tensor] = None  # shape: [b], int64
