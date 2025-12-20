@@ -14,6 +14,7 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.deepseekv3_detector import DeepSeekV3Detector
 from sglang.srt.function_call.deepseekv31_detector import DeepSeekV31Detector
 from sglang.srt.function_call.glm4_moe_detector import Glm4MoeDetector
+from sglang.srt.function_call.glm47_moe_detector import Glm47MoeDetector
 from sglang.srt.function_call.gpt_oss_detector import GptOssDetector
 from sglang.srt.function_call.kimik2_detector import KimiK2Detector
 from sglang.srt.function_call.llama32_detector import Llama32Detector
@@ -42,6 +43,7 @@ class FunctionCallParser:
         "deepseekv31": DeepSeekV31Detector,
         "glm": Glm4MoeDetector,
         "glm45": Glm4MoeDetector,
+        "glm47": Glm47MoeDetector,
         "gpt-oss": GptOssDetector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,
