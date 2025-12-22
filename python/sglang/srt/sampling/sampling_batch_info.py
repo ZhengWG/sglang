@@ -82,7 +82,7 @@ class SamplingBatchInfo:
             [r.sampling_params.top_p for r in reqs], dtype=torch.float, device=device
         )
         top_ks = torch.tensor(
-            [r.sampling_params.top_k for r in reqs], dtype=torch.int32, device=device
+            [min(r.sampling_params.top_k, vocab_size) for r in reqs], dtype=torch.int32, device=device
         )
         min_ps = torch.tensor(
             [r.sampling_params.min_p for r in reqs], dtype=torch.float, device=device
