@@ -20,7 +20,6 @@ This file implements HTTP APIs for the inference engine via fastapi.
 import asyncio
 import dataclasses
 import logging
-import multiprocessing
 import os
 import tempfile
 import threading
@@ -53,7 +52,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
-from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.entrypoints.engine import (
+    _launch_subprocesses,
+    init_tokenizer_manager,
+    run_detokenizer_process,
+    run_scheduler_process,
+)
 from sglang.srt.entrypoints.ollama.protocol import (
     OllamaChatRequest,
     OllamaGenerateRequest,
@@ -1524,10 +1528,7 @@ def _create_error_response(e):
 MINIMUM_PNG_PICTURE_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAbUlEQVRYhe3VsQ2AMAxE0Y/lIgNQULD/OqyCMgCihCKSG4yRuKuiNH6JLsoEbMACOGBcua9HOR7Y6w6swBwMy0qLTpkeI77qdEBpBFAHBBDAGH8WrwJKI4AAegUCfAKgEgpQDvh3CR3oQCuav58qlAw73kKCSgAAAABJRU5ErkJggg=="
 
 
-def _execute_server_warmup(
-    server_args: ServerArgs,
-    pipe_finish_writer: Optional[multiprocessing.connection.Connection],
-):
+def _execute_server_warmup(server_args: ServerArgs):
     headers = {}
     url = server_args.url()
     if server_args.api_key:
@@ -1547,8 +1548,6 @@ def _execute_server_warmup(
             pass
 
     if not success:
-        if pipe_finish_writer is not None:
-            pipe_finish_writer.send(last_traceback)
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
         kill_process_tree(os.getpid())
         return success
@@ -1668,8 +1667,6 @@ def _execute_server_warmup(
 
     except Exception:
         last_traceback = get_exception_traceback()
-        if pipe_finish_writer is not None:
-            pipe_finish_writer.send(last_traceback)
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
         kill_process_tree(os.getpid())
         return False
@@ -1681,7 +1678,6 @@ def _execute_server_warmup(
 
 def _wait_and_warmup(
     server_args: ServerArgs,
-    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
     launch_callback: Optional[Callable[[], None]] = None,
     execute_warmup_func: Callable = _execute_server_warmup,
 ):
@@ -1690,10 +1686,7 @@ def _wait_and_warmup(
 
     # Send a warmup request
     if not server_args.skip_server_warmup:
-        if not execute_warmup_func(
-            server_args,
-            pipe_finish_writer,
-        ):
+        if not execute_warmup_func(server_args):
             return
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
@@ -1702,9 +1695,6 @@ def _wait_and_warmup(
     save_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     logger.info("[SpanLogs] The server is fired up and ready to roll!")
     logger.info(f"Overall startup time: {get_process_uptime():.2f} seconds")
-
-    if pipe_finish_writer is not None:
-        pipe_finish_writer.send("ready")
 
     if server_args.delete_ckpt_after_loading:
         delete_directory(server_args.model_path)
@@ -1739,8 +1729,9 @@ def _wait_weights_ready():
 
 def launch_server(
     server_args: ServerArgs,
-    pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
-    launch_subprocesses_func: Callable = _launch_subprocesses,
+    init_tokenizer_manager_func: Callable = init_tokenizer_manager,
+    run_scheduler_process_func: Callable = run_scheduler_process,
+    run_detokenizer_process_func: Callable = run_detokenizer_process,
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
@@ -1759,23 +1750,27 @@ def launch_server(
     1. The HTTP server, Engine, and TokenizerManager all run in the main process.
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
+    # Launch subprocesses
     tokenizer_manager, template_manager, scheduler_infos, port_args = (
-        launch_subprocesses_func(server_args=server_args)
+        _launch_subprocesses(
+            server_args=server_args,
+            init_tokenizer_manager_func=init_tokenizer_manager_func,
+            run_scheduler_process_func=run_scheduler_process_func,
+            run_detokenizer_process_func=run_detokenizer_process_func,
+        )
     )
 
-    scheduler_info = scheduler_infos[0]
-    remote_instance_transfer_engine_info = None
-    if server_args.remote_instance_weight_loader_use_transfer_engine():
-        remote_instance_transfer_engine_info = (
-            parse_remote_instance_transfer_engine_info_from_scheduler_infos(
-                scheduler_infos
-            )
-        )
+    # Parse info got from the schedulers
+    remote_instance_transfer_engine_info = (
+        parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
+    )
+
+    # Set global states
     set_global_state(
         _GlobalState(
             tokenizer_manager=tokenizer_manager,
             template_manager=template_manager,
-            scheduler_info=scheduler_info,
+            scheduler_info=scheduler_infos[0],
             remote_instance_transfer_engine_info=remote_instance_transfer_engine_info,
         )
     )
@@ -1791,7 +1786,6 @@ def launch_server(
         app.server_args = server_args
         app.warmup_thread_kwargs = dict(
             server_args=server_args,
-            pipe_finish_writer=pipe_finish_writer,
             launch_callback=launch_callback,
             execute_warmup_func=execute_warmup_func,
         )
@@ -1805,7 +1799,7 @@ def launch_server(
         # for other worker processes to read.
         app.is_single_tokenizer_mode = False
         multi_tokenizer_args_shm = write_data_for_multi_tokenizer(
-            port_args, server_args, scheduler_info
+            port_args, server_args, scheduler_infos[0]
         )
 
     try:
@@ -1814,6 +1808,7 @@ def launch_server(
 
         # Listen for HTTP requests
         if server_args.tokenizer_worker_num == 1:
+            # Default case, one tokenizer process
             uvicorn.run(
                 app,
                 host=server_args.host,
@@ -1824,6 +1819,7 @@ def launch_server(
                 loop="uvloop",
             )
         else:
+            # Multiple tokenizer and http processes
             from uvicorn.config import LOGGING_CONFIG
 
             LOGGING_CONFIG["loggers"]["sglang.srt.entrypoints.http_server"] = {
