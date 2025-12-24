@@ -737,14 +737,11 @@ class ServerArgs:
         # Handle diffusion LLM inference.
         self._handle_dllm_inference()
 
-        # Handle any other necessary validations.
-        self._handle_other_validations()
-
-        # Handle two-batch overlap settings.
-        self._handle_two_batch_overlap()
-
         # Handle debug utilities.
         self._handle_debug_utils()
+
+        # Handle any other necessary validations.
+        self._handle_other_validations()
 
     def _handle_deprecated_args(self):
         # Handle deprecated tool call parsers
@@ -2414,12 +2411,6 @@ class ServerArgs:
                 self.preferred_sampling_params = json.loads(
                     self.preferred_sampling_params
                 )
-
-    def _handle_two_batch_overlap(self):
-        if self.enable_two_batch_overlap and self.moe_a2a_backend == "none":
-            raise ValueError(
-                "When enabling two batch overlap, moe_a2a_backend cannot be 'none'."
-            )
 
     def _handle_debug_utils(self):
         if is_in_ci() and self.soft_watchdog_timeout is None:
@@ -4666,6 +4657,12 @@ class ServerArgs:
         if self.export_metrics_to_file and self.export_metrics_to_file_dir is None:
             raise ValueError(
                 "--export-metrics-to-file-dir is required when --export-metrics-to-file is enabled"
+            )
+
+        # Check two batch overlap
+        if self.enable_two_batch_overlap and self.moe_a2a_backend == "none":
+            raise ValueError(
+                "When enabling two batch overlap, moe_a2a_backend cannot be 'none'."
             )
 
     def check_torch_2_9_1_cudnn_compatibility(self):
