@@ -1776,7 +1776,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.extend_logprob_start_lens.extend([0] * running_bs)
         self.is_prefill_only = False
 
-    def new_page_count_next_decode(self, selected_indices: Optional[List[int]] = None):
+    def new_page_count_next_decode(
+        self,
+        buf_multiplier = 1,
+        selected_indices: Optional[List[int]] = None
+    ):
         page_size = self.token_to_kv_pool_allocator.page_size
         requests = (
             self.reqs
@@ -1788,13 +1792,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         if not self.spec_algorithm.is_none():
             # A loose bound that err towards safety
-            server_args = get_global_server_args()
-            thresh = server_args.speculative_num_draft_tokens + (
-                (server_args.speculative_eagle_topk or 1)
-                * (server_args.speculative_num_steps or 1)
-            )
             return sum(
-                1 for req in requests if ((req.seqlen + thresh) % page_size) <= thresh
+                1 for req in requests if ((req.seqlen + buf_multiplier) % page_size) <= buf_multiplier
             )
 
         # In the decoding phase, the length of a request's KV cache should be
@@ -1809,7 +1808,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self, buf_multiplier=1, selected_indices: Optional[List[int]] = None
     ):
         num_tokens = (
-            self.new_page_count_next_decode(selected_indices)
+            self.new_page_count_next_decode(buf_multiplier, selected_indices)
             * buf_multiplier
             * self.token_to_kv_pool_allocator.page_size
         )

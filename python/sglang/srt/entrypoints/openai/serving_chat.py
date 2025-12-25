@@ -68,6 +68,7 @@ class OpenAIServingChat(OpenAIServingBase):
         self.tool_call_parser = self.tokenizer_manager.server_args.tool_call_parser
         self.reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
         self.thinking_trigger = self.tokenizer_manager.server_args.thinking_trigger
+        self.default_thinking = self.tokenizer_manager.server_args.default_thinking
 
         # Get default sampling parameters from model's generation config
         self.default_sampling_params = (
@@ -1173,7 +1174,7 @@ class OpenAIServingChat(OpenAIServingBase):
             and request.chat_template_kwargs.get(thinking_trigger) is not None
         ):
             return request.chat_template_kwargs.get(thinking_trigger)
-        return False
+        return self.default_thinking
 
     # TODO(yudian.zy): 确认下这个跟reasoning_padding等feature的关系
     def _get_reasoning_from_request(self, request: ChatCompletionRequest) -> bool:

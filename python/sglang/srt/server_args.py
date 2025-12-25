@@ -381,6 +381,7 @@ class ServerArgs:
 
     reasoning_padding: Optional[str] = None
     thinking_trigger: Optional[str] = None
+    default_thinking: bool = False
 
     # Data parallelism
     dp_size: int = 1
@@ -3182,6 +3183,12 @@ class ServerArgs:
             type=str,
             default=ServerArgs.thinking_trigger,
             help="Thinking mode trigger for hybrid model.",
+        )
+        parser.add_argument(
+            "--default-thinking",
+            default=ServerArgs.default_thinking,
+            action="store_true",
+            help="The default mode for hybird reasoning models.",
         )
 
         # Data parallelism
