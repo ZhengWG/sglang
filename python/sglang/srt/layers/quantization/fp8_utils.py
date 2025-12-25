@@ -26,7 +26,6 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     fp8_max,
     is_fp8_fnuz,
     per_token_group_quant_fp8,
-    sglang_per_token_group_quant_fp8,
     scaled_fp8_quant,
     sglang_per_token_quant_fp8,
     static_quant_fp8,

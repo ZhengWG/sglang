@@ -391,10 +391,10 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer.weight_scale_inv.format_ue8m0 = True
                 weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
 
-            layer.weight.data = weight
-            layer.weight_scale_inv.data = weight_scale
+            layer.weight.data = weight.data
+            layer.weight_scale_inv.data = weight_scale.data
         else:
-            layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+            layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
             # If checkpoint not serialized fp8, quantize the weights.
             if not self.quant_config.is_checkpoint_fp8_serialized:
