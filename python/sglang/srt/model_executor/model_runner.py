@@ -166,6 +166,7 @@ from sglang.srt.utils import (
     dynamic_import,
     enable_show_time_cost,
     get_available_gpu_memory,
+    get_bool_env_var,
     get_cpu_ids_by_node,
     get_local_ip_auto,
     init_custom_process_group,
