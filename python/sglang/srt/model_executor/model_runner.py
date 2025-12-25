@@ -13,8 +13,8 @@
 # ==============================================================================
 """ModelRunner runs the forward passes of the models."""
 
-import datetime
 import concurrent.futures
+import datetime
 import gc
 import inspect
 import json
@@ -38,6 +38,7 @@ from sglang.srt.configs import (
     NemotronHConfig,
     Qwen3NextConfig,
 )
+from sglang.srt.configs.bailing_hybrid import BailingHybridConfig
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.configs.model_config import (
@@ -150,6 +151,7 @@ from sglang.srt.utils import (
     get_available_gpu_memory,
     get_bool_env_var,
     get_cpu_ids_by_node,
+    get_model_path,
     init_custom_process_group,
     is_cuda,
     is_float4_e2m1fn_x2,
@@ -161,7 +163,6 @@ from sglang.srt.utils import (
     set_cuda_arch,
     slow_rank_detector,
     xpu_has_xmx_support,
-    get_model_path,
 )
 from sglang.srt.utils.nvtx_pytorch_hooks import PytHooks
 from sglang.srt.utils.offloader import (
@@ -453,7 +454,9 @@ class ModelRunner:
         if server_args.enable_lora:
             self.model_config.is_post_loading_model = False
 
-        if envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model):
+        if envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (
+            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
+        ):
             self.model_config.model_path = get_model_path(with_weights=True)
 
         # Load the model
@@ -481,7 +484,10 @@ class ModelRunner:
         )
         loader = get_model_loader(load_config)
         is_default_loader = isinstance(loader, DefaultModelLoader)
-        if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
+        if (
+            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
+        ) and is_default_loader:
+
             def get_weights(config):
                 if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
                     config.model_path = get_model_path(with_weights=True)
@@ -592,7 +598,9 @@ class ModelRunner:
 
             self.model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
 
-        if (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model) and is_default_loader:
+        if (
+            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
+        ) and is_default_loader:
             weights = future.result()
             executor.shutdown()
 
@@ -1532,7 +1540,7 @@ class ModelRunner:
     @property
     def kimi_linear_config(self):
         config = self.model_config.hf_config
-        if isinstance(config, KimiLinearConfig):
+        if isinstance(config, KimiLinearConfig | BailingHybridConfig):
             return config
         return None
 
