@@ -16,6 +16,8 @@ The definition of objects transferred between different
 processes (TokenizerManager, DetokenizerManager, Scheduler).
 """
 
+from __future__ import annotations
+
 import copy
 import json
 import uuid
@@ -1041,6 +1043,9 @@ class BatchTokenIDOutput(
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
 
+    # Load for DP balance
+    load: GetLoadReqOutput = None
+
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
 
@@ -1124,6 +1129,9 @@ class BatchStrOutput(
 
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
+
+    # Load for DP balance
+    load: GetLoadReqOutput = None
 
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
@@ -1712,6 +1720,7 @@ class GetLoadReqOutput(BaseReq):
     num_reqs: int
     num_waiting_reqs: int
     num_tokens: int
+    ts_tic: float
 
 
 @dataclass
