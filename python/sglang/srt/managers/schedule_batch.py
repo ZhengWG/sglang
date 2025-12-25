@@ -1553,7 +1553,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.extend_logprob_start_lens.extend([0] * running_bs)
         self.is_prefill_only = False
 
-    def new_page_count_next_decode(self, selected_indices: Optional[List[int]] = None):
+    def new_page_count_next_decode(
+        self,
+        buf_multiplier = 1,
+        selected_indices: Optional[List[int]] = None
+    ):
         page_size = self.token_to_kv_pool_allocator.page_size
         requests = (
             self.reqs
@@ -1562,6 +1566,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )
         if page_size == 1:
             return len(requests)
+
+        if not self.spec_algorithm.is_none():
+            # A loose bound that err towards safety
+            return sum(
+                1 for req in requests if ((req.seqlen + buf_multiplier) % page_size) <= buf_multiplier
+            )
+
         # In the decoding phase, the length of a request's KV cache should be
         # the total length of the request minus 1
         return (
@@ -1574,7 +1585,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self, buf_multiplier=1, selected_indices: Optional[List[int]] = None
     ):
         num_tokens = (
-            self.new_page_count_next_decode(selected_indices)
+            self.new_page_count_next_decode(buf_multiplier, selected_indices)
             * buf_multiplier
             * self.token_to_kv_pool_allocator.page_size
         )
@@ -1583,7 +1594,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return self._is_available_size_sufficient(num_tokens)
 
     def retract_decode(
-        self, server_args: ServerArgs
+        self,
+        server_args: ServerArgs,
+        buf_multiplier: int = 1,
     ) -> Tuple[List[Req], float, List[Req]]:
         """Retract the decoding requests when there is not enough memory."""
         sorted_indices = list(range(len(self.reqs)))
@@ -1605,7 +1618,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         retracted_reqs = []
         first_iter = True
         while first_iter or (
-            not self.check_decode_mem(selected_indices=sorted_indices)
+            not self.check_decode_mem(
+                selected_indices=sorted_indices, buf_multiplier=buf_multiplier
+            )
         ):
             if len(sorted_indices) == 1:
                 # Corner case: only one request left

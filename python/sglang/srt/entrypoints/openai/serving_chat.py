@@ -65,6 +65,7 @@ class OpenAIServingChat(OpenAIServingBase):
         self.template_manager = template_manager
         self.tool_call_parser = self.tokenizer_manager.server_args.tool_call_parser
         self.reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
+        self.default_thinking = self.tokenizer_manager.server_args.default_thinking
 
         # Get default sampling parameters from model's generation config
         self.default_sampling_params = (
@@ -1119,7 +1120,7 @@ class OpenAIServingChat(OpenAIServingBase):
             and request.chat_template_kwargs.get(thinking_trigger) is not None
         ):
             return request.chat_template_kwargs.get(thinking_trigger)
-        return False
+        return self.default_thinking
 
     async def _process_tool_call_stream(
         self,

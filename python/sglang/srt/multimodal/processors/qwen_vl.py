@@ -114,8 +114,20 @@ def resize_image(
     min_pixels: int,
     max_pixels: int,
     size_factor: int,
+    mm_sampling_kwargs: dict = {},
 ) -> Image.Image:
     width, height = image.size
+
+    # 自定义长宽
+    if (mm_sampling_kwargs and "resized_height" in mm_sampling_kwargs
+        and "resized_width" in mm_sampling_kwargs):
+        resized_height = mm_sampling_kwargs["resized_height"]
+        resized_width = mm_sampling_kwargs["resized_width"]
+        if resized_height > 0 and resized_width > 0:
+            logger.info(f"Resize image to {height}x{width} -> {resized_height}x{resized_width}")
+            height = resized_height
+            width = resized_width
+
     resized_height, resized_width = smart_resize_for_image(
         height,
         width,
@@ -147,8 +159,9 @@ async def resize_image_async(
     min_pixels: int,
     max_pixels: int,
     size_factor: int,
+    mm_sampling_kwargs: dict = {},
 ):
-    return resize_image(image, min_pixels, max_pixels, size_factor)
+    return resize_image(image, min_pixels, max_pixels, size_factor, mm_sampling_kwargs=mm_sampling_kwargs)
 
 
 def smart_nframes(
@@ -410,7 +423,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         if base_output.images and isinstance(base_output.images[0], Image.Image):
             resize_tasks = [
                 resize_image_async(
-                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR
+                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR, mm_sampling_kwargs=mm_sampling_kwargs,
                 )
                 for image in base_output.images
             ]
