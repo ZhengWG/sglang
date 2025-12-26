@@ -172,6 +172,7 @@ from sglang.srt.utils import (
     configure_logger,
     freeze_gc,
     get_available_gpu_memory,
+    get_numa_node,
     get_bool_env_var,
     get_int_env_var,
     get_zmq_socket,
@@ -2658,6 +2659,11 @@ def run_scheduler_process(
         )
     if (numa_node := server_args.numa_node) is not None:
         numa_bind_to_node(numa_node[gpu_id])
+    elif get_bool_env_var("SGLANG_AUTO_NUMA_BIND"):
+        node = get_numa_node(gpu_id)
+        if node is not None:
+            logger.info(f"auto bind to NUMA {node} for GPU {gpu_id}")
+            numa_bind_to_node(node)
 
     # Set up tracing
     if server_args.enable_trace:
