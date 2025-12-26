@@ -2627,7 +2627,10 @@ class Scheduler(
                 release_kv_cache(req, self.tree_cache)
 
             # For mamba radix cache
-            if req.mamba_pool_idx is not None:
+            if (
+                req.mamba_pool_idx is not None
+                and self.disaggregation_mode != DisaggregationMode.DECODE
+            ):
                 release_kv_cache(req, self.tree_cache, is_insert=False)
             logger.info(f"Abort queued request. {req.rid=}")
 
