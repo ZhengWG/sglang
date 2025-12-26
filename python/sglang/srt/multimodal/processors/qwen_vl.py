@@ -345,8 +345,6 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
 
-        self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
-        self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
         self.IM_TOKEN_ID = hf_config.image_token_id
 
         self.vision_start_token_id = hf_config.vision_start_token_id
@@ -425,8 +423,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         return {
             "input_ids": input_ids,
             "mm_items": mm_items,
-            "im_start_id": self.IM_START_TOKEN_ID,
-            "im_end_id": self.IM_END_TOKEN_ID,
+            "im_start_id": self.vision_start_token_id,
+            "im_end_id": self.vision_end_token_id,
             "im_token_id": self.mm_tokens.image_token_id,
             "video_token_id": self.mm_tokens.video_token_id,
             "audio_token_id": self.mm_tokens.audio_token_id,
