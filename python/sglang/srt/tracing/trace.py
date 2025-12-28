@@ -492,7 +492,7 @@ def trace_req_start(
     bootstrap_room_span_context = None
 
     external_trace_context = _trace_context_propagator.extract(
-        external_trace_header if external_trace_header is not None else {}
+        external_trace_header or {}
     )
 
     # create bootstrap room span
@@ -572,7 +572,7 @@ def trace_req_finish(
     if tracing_multispan_enabled:
         if str(req_context.bootstrap_room) in remote_trace_contexts:
             del remote_trace_contexts[str(req_context.bootstrap_room)]
-        else:
+        elif req_context.bootstrap_room_span:
             req_context.bootstrap_room_span.end(end_time=ts)
 
     del reqs_context[rid]
