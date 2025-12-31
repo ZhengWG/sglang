@@ -277,6 +277,7 @@ class MambaPool:
         self.mamba_cache.temporal[:, select_index] = 0
 
         # fill allocated slots with zeros
+        # FIXME(yudian.zy): 重复
         for i in range(len(self.mamba_cache.conv)):
             self.mamba_cache.conv[i][:, select_index] = 0
         self.mamba_cache.temporal[:, select_index] = 0
