@@ -1050,6 +1050,8 @@ class BatchTokenIDOutput(
 
     # Load for DP balance
     load: GetLoadReqOutput = None
+    # Customized info
+    customized_info: Optional[Dict[str, List[Any]]] = None
 
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
@@ -1137,6 +1139,9 @@ class BatchStrOutput(
 
     # Load for DP balance
     load: GetLoadReqOutput = None
+
+    # Customized info
+    customized_info: Optional[Dict[str, List[Any]]] = None
 
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
