@@ -68,7 +68,7 @@ class RequestLogger:
 
     def _setup_targets(self) -> List[logging.Logger]:
         if not self.log_requests_target:
-            return [_create_log_target_stdout()]
+            return [logger]
         return [_create_log_target(t) for t in self.log_requests_target]
 
     def configure(
