@@ -589,6 +589,22 @@ class ChatCompletionRequest(BaseModel):
         "repetition_penalty": 1.0,
     }
 
+    @field_validator("n")
+    @classmethod
+    def validate_n_range(cls, v):
+        if v is not None and (v <= 0 or v > 5):
+            raise ValueError("n must be [1, 5]")
+        elif v is None:
+            v = 1
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def validate_temperature_range(cls, v):
+        if v is not None and (v < 0.0 or v > 20.0):
+            raise ValueError("temperature must be [0.0, 20.0]")
+        return v
+
     @model_validator(mode="before")
     @classmethod
     def set_tool_choice_default(cls, values):
