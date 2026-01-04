@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import triton.language as tl
+from sglang.srt.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 
 from sglang.srt.layers.moe.moe_runner.base import (
     MoeQuantInfo,
@@ -19,6 +23,7 @@ from sglang.srt.layers.moe.moe_runner.base import (
     register_pre_permute,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
+from sglang.srt.layers.ngpt import scale_operation
 from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip
 
 if TYPE_CHECKING:
@@ -111,6 +116,8 @@ class TritonRunnerCore(MoeRunnerCore):
         runner_input: TritonRunnerInput,
         quant_info: TritonMoeQuantInfo,
         running_state: dict,
+        layernorm_epsilon: float = 1e-6,
+        scaling_up_factor: Optional[torch.tensor] = None,
     ) -> TritonRunnerOutput:
 
         # TODO: move these functions to the triton runner
@@ -191,6 +198,11 @@ class TritonRunnerCore(MoeRunnerCore):
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        if scaling_up_factor is not None:
+            intermediate_cache1 = scale_operation(
+                intermediate_cache1, scaling_up_factor, layernorm_epsilon
+            )
 
         intermediate_cache2 = torch.empty(
             (M * topk_ids.shape[1], N // 2),
@@ -330,6 +342,8 @@ def fused_experts_none_to_triton(
     dispatch_output: StandardDispatchOutput,
     quant_info: TritonMoeQuantInfo,
     runner_config: MoeRunnerConfig,
+    layernorm_epsilon: float = 1e-6,
+    scaling_up_factor: Optional[torch.tensor] = None,
 ) -> StandardCombineInput:
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
     from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
@@ -354,6 +368,8 @@ def fused_experts_none_to_triton(
         a1_scale=quant_info.a13_scale,
         a2_scale=quant_info.a2_scale,
         block_shape=quant_info.block_shape,
+        layernorm_epsilon=layernorm_epsilon,
+        scaling_up_factor=scaling_up_factor,
     )
 
     return StandardCombineInput(

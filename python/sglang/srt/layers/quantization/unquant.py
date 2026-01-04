@@ -14,6 +14,7 @@ from sglang.srt.layers.moe import (
     get_moe_runner_backend,
 )
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
+from sglang.srt.layers.ngpt import ScaleUpNorm
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -318,16 +319,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
+        _scale_up_norm: Optional[ScaleUpNorm] = None,
     ) -> CombineInput:
         return self.forward(
             layer=layer,
             dispatch_output=dispatch_output,
+            _scale_up_norm = _scale_up_norm,
         )
 
     def forward_cuda(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
+        _scale_up_norm: Optional[ScaleUpNorm] = None,
     ) -> CombineInput:
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
@@ -402,7 +406,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                     b13=getattr(layer, "w13_weight_bias", None),
                     b2=getattr(layer, "w2_weight_bias", None),
                 )
-                return self.runner.run(dispatch_output, quant_info)
+                return self.runner.run(dispatch_output, quant_info, _scale_up_norm=_scale_up_norm)
 
     def forward_cpu(
         self,

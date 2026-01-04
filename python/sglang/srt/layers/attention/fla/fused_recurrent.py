@@ -36,6 +36,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    USE_VALUE_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
@@ -85,6 +86,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q) + 1e-6))
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k) + 1e-6))
+            if USE_VALUE_L2NORM_IN_KERNEL:
+                b_v = b_v / (tl.sqrt(tl.sum(b_v * b_v) + 1e-6))
         b_q = b_q * scale
         # [BK, BV]
         if not IS_KDA:

@@ -628,6 +628,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
+        use_value_l2norm_in_kernel: bool = True,
         **kwargs,
     ):
         q_proj_states = kwargs["q_proj_states"]
@@ -709,6 +710,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
             beta=beta,
             initial_state=initial_state,
             use_qk_l2norm_in_kernel=True,
+            use_value_l2norm_in_kernel=use_value_l2norm_in_kernel,
             cu_seqlens=query_start_loc,
         )
         ssm_states[cache_indices] = last_recurrent_state
