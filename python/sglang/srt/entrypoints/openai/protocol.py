@@ -380,10 +380,14 @@ class ChatCompletionMessageContentTextPart(BaseModel):
 class ChatCompletionMessageContentImageURL(BaseModel):
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = "auto"
+    max_dynamic_patch: Optional[int] = None
+    min_dynamic_patch: Optional[int] = None
 
 
 class ChatCompletionMessageContentVideoURL(BaseModel):
     url: str
+    max_dynamic_patch: Optional[int] = None
+    min_dynamic_patch: Optional[int] = None
 
 
 class ChatCompletionMessageContentAudioURL(BaseModel):
@@ -556,6 +560,10 @@ class ChatCompletionRequest(BaseModel):
     separate_reasoning: bool = True
     stream_reasoning: bool = True
     chat_template_kwargs: Optional[Dict] = None
+
+    # SGLang multimodal tiling controls (extensions)
+    max_dynamic_patch: Optional[int] = None
+    min_dynamic_patch: Optional[int] = None
 
     mm_sampling_kwargs: Optional[Dict] = None
 
