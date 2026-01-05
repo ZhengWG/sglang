@@ -626,6 +626,8 @@ async def get_simple_server_info():
 
     if internal_states and len(internal_states) > 0:
         _simple_info["cuda_graph_bs"] = internal_states[0].get("cuda_graph_bs", None)
+        _simple_info["last_gen_throughput"] = internal_states[0].get("last_gen_throughput", None)
+        _simple_info["memory_usage"] = internal_states[0].get("memory_usage", {})
 
     return _simple_info
 
