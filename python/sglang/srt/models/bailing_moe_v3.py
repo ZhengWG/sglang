@@ -570,7 +570,11 @@ class BailingMoELinearDecoderLayer(nn.Module):
         is_kda = True
         self.use_nGPT = getattr(config, "use_nGPT", False)
         if self.use_nGPT:
-            self.attn_alpha_init_value = 0.5 if is_kda else 0.70716 / config.num_hidden_layers
+            self.layer_group_size = getattr(config, "layer_group_size", None)
+            if self.layer_group_size is not None:
+                self.attn_alpha_init_value = 0.5 if (is_kda and (layer_id + 1) < self.layer_group_size) else 0.70716 / config.num_hidden_layers
+            else:
+                self.attn_alpha_init_value = 0.70716 / config.num_hidden_layers
             self.attn_alpha_init_scaling = config.hidden_size ** -0.5
             self.attn_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
             self.mlp_alpha_init_value = 0.70716 / config.num_hidden_layers

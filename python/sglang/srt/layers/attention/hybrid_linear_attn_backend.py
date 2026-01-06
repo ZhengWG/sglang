@@ -628,7 +628,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
-        use_value_l2norm_in_kernel: bool = True,
+        use_value_l2norm_in_kernel: bool = False,
         **kwargs,
     ):
         q_proj_states = kwargs["q_proj_states"]
@@ -724,6 +724,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache: bool = True,
+        use_value_l2norm_in_kernel: bool = False,
         **kwargs,
     ):
         from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
@@ -825,6 +826,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
             initial_state=ssm_states,
             initial_state_indices=cache_indices,
             use_qk_l2norm_in_kernel=True,
+            use_value_l2norm_in_kernel=use_value_l2norm_in_kernel,
             cu_seqlens=query_start_loc,
         )
 

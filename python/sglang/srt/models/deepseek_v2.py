@@ -1399,7 +1399,8 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
 
-        self.gated_attention_proj_granularity_type = getattr(config, "gated_attention_proj_granularity_type", "head_wise")
+        self.gated_attention_proj_granularity_type = getattr(config, "gated_attention_proj_granularity_type", None)
+        # gated_attn now not support NPU
         if self.gated_attention_proj_granularity_type == "head_wise":
             self.g_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -1681,13 +1682,6 @@ class DeepseekV2AttentionMLA(nn.Module):
         if inner_state is None:
             return hidden_states
 
-        # gated_attn now only support MHA, MHA_ONE_SHOT, MHA_CHUNKED_KV, MLA
-        assert (
-            attn_forward_method == AttnForwardMethod.MHA
-            or attn_forward_method == AttnForwardMethod.MLA
-            or attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV
-            or attn_forward_method == AttnForwardMethod.MHA_ONE_SHOT
-        )
         if attn_forward_method == AttnForwardMethod.MHA:
             return self.forward_normal_core(*inner_state)
         elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
@@ -2270,6 +2264,23 @@ class DeepseekV2AttentionMLA(nn.Module):
                         -1, self.num_local_heads, self.v_head_dim
                     ).transpose(0, 1),
                 )
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_bmm_output = (
+                    attn_bmm_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_bmm_output = attn_bmm_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_bmm_output = attn_bmm_output * gate
+
         output, _ = self.o_proj(attn_bmm_output)
 
         return output
@@ -2386,6 +2397,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             k_input,
             forward_batch,
             zero_allocator,
+            hidden_states,
         )
 
     def forward_absorb_fused_mla_rope_cpu_prepare(
@@ -2437,7 +2449,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 self.qk_rope_head_dim,
             )
         )
-        return (q_input, k_input, v_input, forward_batch, zero_allocator)
+        return (q_input, k_input, v_input, forward_batch, zero_allocator, hidden_states)
 
     def forward_absorb_fused_mla_rope_core(
         self,
@@ -2457,6 +2469,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         k_input,
         forward_batch,
         zero_allocator,
+        hidden_states,
     ):
         decode_attention_fwd_grouped_rope(
             q_input,
@@ -2508,12 +2521,29 @@ class DeepseekV2AttentionMLA(nn.Module):
         else:
             attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
         output, _ = self.o_proj(attn_output)
 
         return output
 
     def forward_absorb_fused_mla_rope_cpu_core(
-        self, q_input, k_input, v_input, forward_batch, zero_allocator
+        self, q_input, k_input, v_input, forward_batch, zero_allocator, hidden_states
     ):
         assert self.q_lora_rank is not None and use_intel_amx_backend(
             self
@@ -2545,6 +2575,23 @@ class DeepseekV2AttentionMLA(nn.Module):
             None,  # scale
         )
         attn_output = output
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
         output, _ = self.o_proj(attn_output)
 
         return output
@@ -2639,8 +2686,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
 
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
-        output, _ = self.o_proj(attn_output)
-    
+
         if self.g_proj is not None:
             gate, _ = self.g_proj(hidden_states)
             gate = F.sigmoid(gate.float()).type_as(hidden_states)
@@ -2656,6 +2702,8 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 # gate shape: [seq_len, head_num*head_dim]
                 attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
 
         return output
 
