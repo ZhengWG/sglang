@@ -181,7 +181,7 @@ class BailingMLP(nn.Module):
 
         self.use_nGPT = getattr(config, "use_nGPT", False)
         self.config = config
-        self.intermediate_size = intermediate_size        
+        self.intermediate_size = intermediate_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -1199,6 +1199,16 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
+
+    @classmethod
+    def get_model_config_for_expert_location(cls, config):
+        num_groups = getattr(config, "n_group", 0)
+        from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+        return ModelConfigForExpertLocation(
+            num_layers=config.num_hidden_layers,
+            num_logical_experts=config.num_experts,
+            num_groups=None if num_groups == 0 else num_groups,
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         def load_linear_attn_weight(
