@@ -1642,6 +1642,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     mm_item.feature = pixel_values.reconstruct_on_target_device(
                         torch.cuda.current_device()
                     )
+                    # The reference by CudaIpcTensorTransportProxy was cut off,
+                    # proactively delete to avoid slow gc.
                     # 这里到CudaIpcTensorTransportProxy的引用已经断掉了，防止gc慢主动del
                     del pixel_values
         self.multimodal_inputs = multimodal_inputs

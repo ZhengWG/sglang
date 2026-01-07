@@ -956,5 +956,7 @@ class BaseMultimodalProcessor(ABC):
                             info_data=item.precomputed_embeddings,
                             sync_buffer_meta=sync_flag,
                         )
+                    elif not self.server_args.keep_mm_feature_on_device:
+                        item.precomputed_embeddings = item.precomputed_embeddings.cpu()
 
         return all_collected_items, input_ids, ret
