@@ -26,21 +26,17 @@ from sglang.srt.layers.communicator import (
 )
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
-    get_attention_tp_group,
     is_dp_attention_enabled,
 )
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.ngpt import apply_hyper_spherical_fusion, ScaleUpNorm, l2norm
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.layers.quantization.fp8_utils import (
@@ -63,6 +59,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import (
+    DeepEPMoE,
     DeepseekV2AttentionMLA,
     DeepseekV2MLP,
     _is_hip,
@@ -172,19 +169,11 @@ class BailingMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        config: PretrainedConfig,
         reduce_results=True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        self.config = config
-        self.intermediate_size = intermediate_size
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -200,16 +189,6 @@ class BailingMLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-
-        if self.use_nGPT:
-            self.hidden_size = config.hidden_size
-            self.swv = ScaleUpNorm(
-                intermediate_size=intermediate_size,
-                layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-            )
-
         self.act_fn = SiluAndMul()
 
     def forward(
@@ -219,10 +198,6 @@ class BailingMLP(nn.Module):
         use_reduce_scatter: bool = False,
     ):
         x, _ = self.gate_up_proj(x)
-
-        if self.use_nGPT:
-            x = self.swv(x)
-
         x = self.act_fn(x)
         x, _ = self.down_proj(
             x,
@@ -239,10 +214,6 @@ class BailingMoEGate(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-
-        self.use_nGPT = getattr(config, 'use_nGPT', False)
-        self.scale_router_input = getattr(config, "scale_router_input", False)
-
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -252,12 +223,6 @@ class BailingMoEGate(nn.Module):
                 dtype=self.params_dtype,
             ),
         )
-
-        if self.use_nGPT and self.scale_router_input:
-            self.router_init_value = 1.0
-            self.router_init_scaling = config.hidden_size ** -0.5
-            self.router_scaling = torch.nn.Parameter(torch.ones(config.hidden_size))
-
         if getattr(config, "moe_router_enable_expert_bias", False):
             self.expert_bias = nn.Parameter(
                 torch.empty((config.num_experts,), dtype=torch.float32),
@@ -266,12 +231,7 @@ class BailingMoEGate(nn.Module):
             self.expert_bias = None
 
     def forward(self, hidden_states):
-        if self.use_nGPT and self.scale_router_input:
-            router_scaling = (self.router_scaling * (self.router_init_value / self.router_init_scaling)).to(self.params_dtype)
-            gate_input = hidden_states * router_scaling
-        else:
-            gate_input = hidden_states
-        logits = F.linear(gate_input.to(self.weight.dtype), self.weight, None).to(
+        logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None).to(
             hidden_states.dtype
         )
         return logits
@@ -287,8 +247,6 @@ class BailingMoE(nn.Module):
         prefix: str = "moe",
     ):
         super().__init__()
-
-        self.use_nGPT = getattr(config, "use_nGPT", False)
 
         self.layer_id = layer_id
 
@@ -361,8 +319,6 @@ class BailingMoE(nn.Module):
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=f"{prefix}.experts",
-            use_nGPT=self.use_nGPT,
-            layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
         )
 
         if self.num_shared_experts > 0:
@@ -374,7 +330,6 @@ class BailingMoE(nn.Module):
             self.shared_experts = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
-                config = config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -419,8 +374,6 @@ class BailingKDA(KimiDeltaAttention):
                 "short_conv_kernel_size": config.short_conv_kernel_size,
                 "kda_layers": [],
                 "full_attn_layers": [],
-                "use_nGPT": getattr(config, "use_nGPT", False),
-                "value_norm": getattr(config, "value_norm", False),
             }
         )
         super().__init__(
@@ -443,9 +396,6 @@ class BailingMoEAttention(nn.Module):
         prefix: str = "mha",
     ) -> None:
         super().__init__()
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        self.value_norm = getattr(config, "value_norm", False)
-        self.config = config
         self.layer_id = layer_id
 
         self.hidden_size = config.hidden_size
@@ -465,7 +415,7 @@ class BailingMoEAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**0.5 if self.use_nGPT else self.head_dim**-0.5
+        self.scaling = self.head_dim**-0.5
 
         self.split_qkv = getattr(config, "using_split_qkv_in_self_attention", False)
         assert not self.split_qkv, "split_qkv is not supported for now"
@@ -483,8 +433,6 @@ class BailingMoEAttention(nn.Module):
         if self.use_qk_norm:
             self.query_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.key_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            if self.use_nGPT and self.value_norm:
-                self.value_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -541,10 +489,6 @@ class BailingMoEAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
-            if self.use_nGPT and self.value_norm:
-                v_by_head = v.reshape(-1, self.head_dim)
-                v_by_head = self.value_layernorm(v_by_head)
-                v = v_by_head.view(v.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.dense(attn_output)
@@ -568,16 +512,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
         # todo nextn
 
         is_kda = True
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        if self.use_nGPT:
-            self.attn_alpha_init_value = 0.5 if is_kda else 0.70716 / config.num_hidden_layers
-            self.attn_alpha_init_scaling = config.hidden_size ** -0.5
-            self.attn_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
-            self.mlp_alpha_init_value = 0.70716 / config.num_hidden_layers
-            self.mlp_alpha_init_scaling = config.hidden_size ** -0.5
-            self.mlp_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
-        self.config = config
-
         if config.attention_type == 0:  # Linear layer
             self.attention = BailingKDA(
                 layer_id=self.layer_id,
@@ -604,7 +538,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     max_position_embeddings=262144,
                     quant_config=quant_config,
                     layer_id=layer_id,
-                    reduce_results=True,
+                    reduce_results=False,
                     prefix=add_prefix("attention", prefix),
                     alt_stream=alt_stream,
                     skip_rope=(
@@ -631,14 +565,10 @@ class BailingMoELinearDecoderLayer(nn.Module):
         is_previous_moe_layer = not (self.expert_num == 1) and (
             self.layer_id - 1 >= config.first_k_dense_replace
         )
-        is_next_layer_sparse = not (self.expert_num == 1) and (
-            self.layer_id + 1 >= config.first_k_dense_replace
-        )
         if self.expert_num == 1:
             self.mlp = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
-                config=config,
                 quant_config=quant_config,
                 prefix=prefix,
             )
@@ -656,7 +586,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 self.mlp = BailingMLP(
                     hidden_size=self.hidden_size,
                     intermediate_size=config.intermediate_size,
-                    config=config,
                     quant_config=quant_config,
                     prefix=prefix,
                 )
@@ -669,10 +598,8 @@ class BailingMoELinearDecoderLayer(nn.Module):
             num_layers=config.num_hidden_layers,
             is_layer_sparse=is_moe_layer,
             is_previous_layer_sparse=is_previous_moe_layer,
-            is_next_layer_sparse=is_next_layer_sparse,
         )
 
-    @torch.inference_mode()
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -707,29 +634,9 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     positions=positions,
                     forward_batch=forward_batch,
                 )
-        if self.use_nGPT:
-            hidden_states, residual = apply_hyper_spherical_fusion(
-                hidden_states,
-                residual,
-                self.attn_alpha,
-                self.attn_alpha_init_value,
-                self.attn_alpha_init_scaling,
-                getattr(self.config, "layernorm_epsilon", 1e-6),
-            )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-
-        if self.use_nGPT:
-            hidden_states, residual = apply_hyper_spherical_fusion(
-                hidden_states,
-                residual,
-                self.mlp_alpha,
-                self.mlp_alpha_init_value,
-                self.mlp_alpha_init_scaling,
-                getattr(self.config, "layernorm_epsilon", 1e-6),
-            )
-
         return hidden_states, residual
 
     @staticmethod
@@ -751,7 +658,6 @@ class BailingMoELinearModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.use_nGPT = getattr(config, "use_nGPT", False)
         self.pp_group = get_pp_group()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -858,14 +764,10 @@ class BailingMoELinearModel(nn.Module):
             )
         else:
             if not forward_batch.forward_mode.is_idle():
-                if self.use_nGPT:
-                    hidden_states = hidden_states + residual
-                    hidden_states = l2norm(hidden_states, getattr(self.config, "layernorm_epsilon", 1e-6))
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
                 else:
-                    if residual is None:
-                        hidden_states = self.norm(hidden_states)
-                    else:
-                        hidden_states, _ = self.norm(hidden_states, residual)
+                    hidden_states, _ = self.norm(hidden_states, residual)
             return hidden_states
 
 
@@ -879,13 +781,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        if self.use_nGPT:
-            self.finalnorm_init_value = 1.0
-            self.finalnorm_init_scaling = config.hidden_size ** -0.5
-            self.finalnorm = torch.nn.Parameter(self.finalnorm_init_scaling * torch.ones(config.vocab_size, dtype=torch.float32))
-
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
@@ -895,7 +790,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             self.lm_head = (
-                self.model.word_embeddings
+                self.word_embeddings
                 if config.tie_word_embeddings
                 else ParallelLMHead(
                     config.vocab_size,
@@ -1181,12 +1076,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
             pp_proxy_tensors=pp_proxy_tensors,
         )
         if self.pp_group.is_last_rank:
-            if self.use_nGPT:
-                finalnorm = self.finalnorm * (self.finalnorm_init_value / self.finalnorm_init_scaling)
-            else:
-                finalnorm = None
             return self.logits_processor(
-                input_ids, hidden_states.float(), self.lm_head, forward_batch, ngpt_final_norm=finalnorm
+                input_ids, hidden_states.float(), self.lm_head, forward_batch
             )
         else:
             return hidden_states
@@ -1216,9 +1107,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader", self.weight_direct_load)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             if "A_log" in name:
-                # Temporary use this way
-                # As our A_log param's shape is different from kimi's
-                loaded_weight=loaded_weight[None, None, :, None]
+                self.weight_direct_load(param, loaded_weight[None, None, :, None])
+                return
             weight_loader(param, loaded_weight)
             return
 

@@ -179,8 +179,6 @@ class KimiDeltaAttention(nn.Module):
         self.prefix = prefix
         assert self.num_heads % self.tp_size == 0
         self.local_num_heads = divide(self.num_heads, self.tp_size)
-        self.use_nGPT = config.linear_attn_config["use_nGPT"]
-        self.value_norm = config.linear_attn_config["value_norm"]
 
         projection_size = self.head_dim * self.num_heads
         self.conv_size = config.linear_attn_config["short_conv_kernel_size"]
@@ -342,7 +340,6 @@ class KimiDeltaAttention(nn.Module):
             v=None,
             layer=None,
             forward_batch=forward_batch,
-            use_value_l2norm_in_kernel=(self.use_nGPT and self.value_norm),
             **kwargs,
         )
 

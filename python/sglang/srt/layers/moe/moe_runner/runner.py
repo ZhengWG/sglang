@@ -13,7 +13,6 @@ from sglang.srt.layers.moe.moe_runner.deep_gemm import DeepGemmRunnerCore
 from sglang.srt.layers.moe.moe_runner.triton import TritonRunnerCore
 from sglang.srt.layers.moe.moe_runner.triton_kernels import TritonKernelsRunnerCore
 from sglang.srt.layers.moe.utils import get_moe_a2a_backend
-from sglang.srt.layers.ngpt import ScaleUpNorm
 
 if TYPE_CHECKING:
     from sglang.srt.batch_overlap.single_batch_overlap import DownGemmOverlapArgs
@@ -72,19 +71,11 @@ class MoeRunner:
             self.fused_func = None
 
     def run(
-        self,
-        dispatch_output: DispatchOutput,
-        quant_info: MoeQuantInfo,
-        _scale_up_norm: Optional[ScaleUpNorm] = None,
+        self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo
     ) -> CombineInput:
-        if _scale_up_norm is None:
-            layernorm_epsilon = 1e-6
-            scaling_up_factor = None
-        else:
-            layernorm_epsilon = _scale_up_norm.layernorm_epsilon
-            scaling_up_factor = _scale_up_norm.weight
+
         if self.fused_func is not None:
-            return self.fused_func(dispatch_output, quant_info, self.config, layernorm_epsilon=layernorm_epsilon, scaling_up_factor=scaling_up_factor)
+            return self.fused_func(dispatch_output, quant_info, self.config)
 
         assert self.runner_core is not None
         dispatch_format = dispatch_output.format.value
@@ -102,7 +93,7 @@ class MoeRunner:
         runner_input = self.pre_permute_func(
             dispatch_output, quant_info, self.config, running_state
         )
-        runner_output = self.runner_core.run(runner_input, quant_info, running_state, layernorm_epsilon=layernorm_epsilon, scaling_up_factor=scaling_up_factor)
+        runner_output = self.runner_core.run(runner_input, quant_info, running_state)
 
         runner_format = self.runner_core.runner_backend.value
         combine_format = dispatch_output.format.value

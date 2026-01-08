@@ -49,7 +49,6 @@ def fused_recurrent_kda_fwd(
     # ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
-    use_value_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -108,7 +107,6 @@ def fused_recurrent_kda_fwd(
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_VARLEN=cu_seqlens is not None,
-        USE_VALUE_L2NORM_IN_KERNEL=use_value_l2norm_in_kernel,
         # INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=True,
         num_warps=num_warps,
@@ -128,7 +126,6 @@ def fused_recurrent_kda(
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
     use_qk_l2norm_in_kernel: bool = True,
-    use_value_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     # ssm_state_indices: torch.LongTensor | None = None,
     **kwargs,
@@ -154,7 +151,6 @@ def fused_recurrent_kda(
         # ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=None,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        use_value_l2norm_in_kernel=use_value_l2norm_in_kernel,
     )
     return o, final_state
 
@@ -1211,7 +1207,6 @@ def chunk_kda(
     initial_state: torch.Tensor = None,
     initial_state_indices: torch.Tensor = None,
     use_qk_l2norm_in_kernel: bool = False,
-    use_value_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
 ):
@@ -1221,8 +1216,6 @@ def chunk_kda(
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
-        if use_value_l2norm_in_kernel:
-            v = l2norm_fwd(v.contiguous())
 
     o = chunk_kda_fwd(
         q=q,

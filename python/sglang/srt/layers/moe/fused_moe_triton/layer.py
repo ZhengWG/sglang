@@ -49,7 +49,6 @@ from sglang.srt.layers.moe.topk import (
     TopKOutputChecker,
 )
 from sglang.srt.layers.moe.utils import RoutingMethodType
-from sglang.srt.layers.ngpt import ScaleUpNorm
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -60,7 +59,6 @@ from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 from sglang.srt.model_loader.weight_utils import narrow_padded_param_and_loaded_weight
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
-    add_prefix,
     cpu_has_amx_support,
     get_bool_env_var,
     is_cpu,
@@ -163,8 +161,6 @@ class FusedMoE(torch.nn.Module):
         reduce_results: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_nGPT: bool = False,
-        layernorm_epsilon: float = 1e-6,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         use_presharded_weights: bool = False,
@@ -185,7 +181,6 @@ class FusedMoE(torch.nn.Module):
         self.layer_id = layer_id
         self.top_k = top_k
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
         self.num_experts = num_experts
         self.num_fused_shared_experts = num_fused_shared_experts
 
@@ -200,17 +195,6 @@ class FusedMoE(torch.nn.Module):
         self.num_local_experts = (
             num_experts - num_fused_shared_experts
         ) // self.moe_ep_size + num_fused_shared_experts
-
-        self.use_nGPT = use_nGPT
-        if use_nGPT:
-            self.swv = ScaleUpNorm(
-                intermediate_size=intermediate_size,
-                layernorm_epsilon=layernorm_epsilon,
-                tp_rank=self.moe_tp_rank,
-                tp_size=self.moe_tp_size,
-            )
-        else:
-            self.swv = None
 
         self.expert_mask_gpu = None
 
@@ -954,7 +938,6 @@ class FusedMoE(torch.nn.Module):
 
         combine_input = self.run_moe_core(
             dispatch_output=dispatch_output,
-            _scale_up_norm=self.swv,
         )
 
         with use_symmetric_memory(
@@ -972,12 +955,11 @@ class FusedMoE(torch.nn.Module):
 
         return final_hidden_states
 
-    def run_moe_core(self, dispatch_output: DispatchOutput, _scale_up_norm: Optional[ScaleUpNorm] = None) -> CombineInput:
+    def run_moe_core(self, dispatch_output: DispatchOutput) -> CombineInput:
         # TODO: consider using symmetric memory
         return self.quant_method.apply(
             layer=self,
             dispatch_output=dispatch_output,
-            _scale_up_norm=_scale_up_norm,
         )
 
     @classmethod

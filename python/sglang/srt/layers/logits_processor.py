@@ -281,7 +281,6 @@ class LogitsProcessor(nn.Module):
         lm_head: VocabParallelEmbedding,
         logits_metadata: Union[LogitsMetadata, ForwardBatch],
         delimiter_token: int,
-        ngpt_final_norm: Optional[torch.Tensor] = None,
     ):
         """
         Compute logprobs for multi-item scoring using delimiter-based token extraction.
@@ -318,8 +317,6 @@ class LogitsProcessor(nn.Module):
         sliced_hidden = hidden_states[multi_item_indices]
 
         sliced_logits = self._get_logits(sliced_hidden, lm_head, logits_metadata)
-        if ngpt_final_norm is not None:
-             sliced_logits = ngpt_final_norm *  sliced_logits
         sliced_logprobs = torch.nn.functional.log_softmax(sliced_logits, dim=-1)
 
         # Initialize return values
@@ -387,7 +384,6 @@ class LogitsProcessor(nn.Module):
         logits_metadata: Union[LogitsMetadata, ForwardBatch],
         aux_hidden_states: Optional[torch.Tensor] = None,
         hidden_states_before_norm: Optional[torch.Tensor] = None,
-        ngpt_final_norm: Optional[torch.Tensor] = None,
     ) -> LogitsProcessorOutput:
         if isinstance(logits_metadata, ForwardBatch):
             logits_metadata = LogitsMetadata.from_forward_batch(logits_metadata)
@@ -396,7 +392,7 @@ class LogitsProcessor(nn.Module):
         multi_item_delimiter = get_global_server_args().multi_item_scoring_delimiter
         if multi_item_delimiter is not None and logits_metadata.is_prefill_only:
             return self.compute_logprobs_for_multi_item_scoring(
-                input_ids, hidden_states, lm_head, logits_metadata, multi_item_delimiter, ngpt_final_norm
+                input_ids, hidden_states, lm_head, logits_metadata, multi_item_delimiter
             )
 
         if logits_metadata.forward_mode.is_dllm_extend():
@@ -579,8 +575,6 @@ class LogitsProcessor(nn.Module):
         if not logits_metadata.extend_return_logprob:
             # Compute logits for both input and sampled tokens.
             logits = self._get_logits(pruned_states, lm_head, logits_metadata)
-            if ngpt_final_norm is not None:
-                logits = ngpt_final_norm * logits
             sampled_logits = (
                 logits[sample_indices] if sample_indices is not None else logits
             )
@@ -623,8 +617,6 @@ class LogitsProcessor(nn.Module):
         if should_skip_chunking:
             # Compute logits for both input and sampled tokens.
             logits = self._get_logits(pruned_states, lm_head, logits_metadata)
-            if ngpt_final_norm is not None:
-                logits = ngpt_final_norm * logits
             sampled_logits = (
                 logits[sample_indices] if sample_indices is not None else logits
             )
@@ -641,7 +633,6 @@ class LogitsProcessor(nn.Module):
                 token_to_seq_idx,
                 lm_head,
                 logits_metadata,
-                ngpt_final_norm,
             )
 
         return LogitsProcessorOutput(
@@ -699,7 +690,6 @@ class LogitsProcessor(nn.Module):
         token_to_seq_idx: list[int],
         lm_head: VocabParallelEmbedding,
         logits_metadata: LogitsMetadata,
-        ngpt_final_norm: Optional[torch.Tensor] = None,
     ) -> Tuple[InputLogprobsResult, torch.Tensor]:
         """
         compute logprobs for the output token from the hidden states.
@@ -752,8 +742,6 @@ class LogitsProcessor(nn.Module):
             # Get the logits for this chunk
             chunk_states = pruned_states[start_idx:end_idx]
             chunk_logits = self._get_logits(chunk_states, lm_head, logits_metadata)
-            if ngpt_final_norm is not None:
-                chunk_logits = ngpt_final_norm * chunk_logits
 
             # Initialize sampled_logits on first chunk
             if i == 0:
