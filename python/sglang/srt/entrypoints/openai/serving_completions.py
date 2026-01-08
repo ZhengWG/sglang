@@ -459,9 +459,11 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     input_token_logprobs=input_token_logprobs,
                     input_top_logprobs=input_top_logprobs,
                     output_token_logprobs=ret_item["meta_info"].get(
-                        "output_token_logprobs", None),
+                        "output_token_logprobs", []
+                    ),
                     output_top_logprobs=ret_item["meta_info"].get(
-                        "output_top_logprobs", None),
+                        "output_top_logprobs", []
+                    ),
                 )
 
             # Handle hidden states
