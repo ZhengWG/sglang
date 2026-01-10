@@ -704,9 +704,6 @@ class ServerArgs:
         # Apply model-specific adjustments.
         self._handle_model_specific_adjustments()
 
-        # Handle Hicache settings.
-        self._handle_hicache()
-
         # Set kernel backends.
         self._handle_sampling_backend()
         self._handle_attention_backend_compatibility()
@@ -714,6 +711,9 @@ class ServerArgs:
         self._handle_page_size()
         self._handle_amd_specifics()
         self._handle_grammar_backend()
+
+        # Handle Hicache settings.
+        self._handle_hicache()
 
         # Handle data parallelism.
         self._handle_data_parallelism()
@@ -2013,23 +2013,14 @@ class ServerArgs:
             )
 
     def _handle_hicache(self):
-        if self.hicache_storage_backend == "mooncake":
-            if self.hicache_mem_layout == "layer_first":
-                if self.hicache_io_backend == "direct":
-                    self.hicache_mem_layout = "page_first_direct"
-                elif self.hicache_io_backend == "kernel":
-                    self.hicache_mem_layout = "page_first"
-                logger.warning(
-                    f"Mooncake storage backend does not support layer_first layout, "
-                    f"switching to {self.hicache_mem_layout} layout for {self.hicache_io_backend} io backend"
-                )
-
-        if self.hicache_mem_layout == "page_first_direct":
-            if self.hicache_io_backend not in ["direct", "kernel_ascend"]:
-                self.hicache_io_backend = "direct"
-                logger.warning(
-                    "Page first direct layout only support direct io backend"
-                )
+        if (
+            self.hicache_mem_layout == "page_first_direct"
+            and self.hicache_io_backend is "kernel"
+        ):
+            self.hicache_io_backend = "direct"
+            logger.warning(
+                "Kernel io backend does not support page first direct layout"
+            )
 
         if (
             self.enable_hierarchical_cache
@@ -2062,6 +2053,17 @@ class ServerArgs:
                         "FlashAttention3 decode backend is not compatible with hierarchical cache. "
                         "Setting hicache_io_backend to vanilla I/O, which may lead to suboptimal performance with small page sizes."
                     )
+
+        if self.hicache_storage_backend == "mooncake":
+            if self.hicache_mem_layout == "layer_first":
+                if self.hicache_io_backend == "direct":
+                    self.hicache_mem_layout = "page_first_direct"
+                elif self.hicache_io_backend == "kernel":
+                    self.hicache_mem_layout = "page_first"
+                logger.warning(
+                    f"Mooncake storage backend does not support layer_first layout, "
+                    f"switching to {self.hicache_mem_layout} layout for {self.hicache_io_backend} io backend"
+                )
 
     def _handle_speculative_decoding(self):
         if (
