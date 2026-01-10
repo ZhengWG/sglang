@@ -309,6 +309,11 @@ class OpenAIServingBase(ABC):
             }
         return custom_labels
 
+    def extract_routing_key(self, raw_request):
+        if raw_request is None:
+            return None
+        return raw_request.headers.get("x-smg-routing-key")
+
     def set_trace_id(self, request: OpenAIServingRequest, raw_request: Request):
         # 0. 判断是否包含rid属性
         if not hasattr(request, 'rid'):
