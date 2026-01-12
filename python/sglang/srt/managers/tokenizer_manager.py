@@ -32,6 +32,7 @@ from http import HTTPStatus
 from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
 import fastapi
+import orjson
 import uvloop
 import zmq
 import zmq.asyncio
