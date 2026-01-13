@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
@@ -26,6 +26,9 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.utils.gauge_histogram import GaugeHistogram
+
+if TYPE_CHECKING:
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 
@@ -1301,6 +1304,124 @@ class TokenizerMetricsCollector:
             ],
         )
 
+        # Multimodal metrics (initialized optionally)
+        self._init_multimodal_metrics(labels)
+
+    def _init_multimodal_metrics(
+        self,
+        labels: Dict[str, str],
+        bucket_preprocessing_time: Optional[List[float]] = None,
+        bucket_request_mm_tokens: Optional[List[float]] = None,
+        bucket_request_mm_items: Optional[List[float]] = None,
+    ) -> None:
+        """Initialize multimodal metrics. Can be called later if needed."""
+        from prometheus_client import Counter, Histogram
+
+        # Default buckets for preprocessing time (in seconds)
+        if bucket_preprocessing_time is None:
+            bucket_preprocessing_time = [
+                0.001,
+                0.002,
+                0.005,
+                0.01,
+                0.02,
+                0.05,
+                0.1,
+                0.2,
+                0.5,
+                1.0,
+                2.0,
+                5.0,
+                10.0,
+                20.0,
+                50.0,
+                100.0,
+                200.0,
+                400.0,
+            ]
+
+        # Default buckets for request_mm_tokens count
+        if bucket_request_mm_tokens is None:
+            bucket_request_mm_tokens = [
+                100,
+                300,
+                500,
+                700,
+                1000,
+                1500,
+                2000,
+                3000,
+                4000,
+                5000,
+                6000,
+                7000,
+                8000,
+                9000,
+                10000,
+                12000,
+                15000,
+                20000,
+                22000,
+                25000,
+                30000,
+                35000,
+                40000,
+                66000,
+                99000,
+                132000,
+                300000,
+                600000,
+                900000,
+                1100000,
+            ]
+
+        # Default buckets for request_mm_items count
+        if bucket_request_mm_items is None:
+            bucket_request_mm_items = [
+                1,
+                2,
+                4,
+                6,
+                8,
+                10,
+                16,
+                32,
+                64,
+                128,
+                1024,
+            ]
+
+        # Multimodal preprocessing time histogram
+        self.request_mm_preprocessing_time_seconds = Histogram(
+            name="sglang:request_mm_preprocessing_time_seconds",
+            documentation="Histogram of multimodal preprocessing time in seconds.",
+            labelnames=list(labels.keys()) + ["modality"],
+            buckets=bucket_preprocessing_time,
+        )
+
+        # mm_items count counter (by modality)
+        self.mm_items_total = Counter(
+            name="sglang:mm_items_total",
+            documentation="Total number of multimodal items processed, categorized by modality.",
+            labelnames=list(labels.keys()) + ["modality"],
+        )
+
+        # request_mm_items count histogram (per request)
+        self.request_mm_items = Histogram(
+            name="sglang:request_mm_items",
+            documentation="Histogram of multimodal items count per request.",
+            labelnames=list(labels.keys()) + ["modality"],
+            buckets=bucket_request_mm_items,
+        )
+
+        # request_mm_tokens count histogram (by modality)
+        self.request_mm_tokens = Histogram(
+            name="sglang:request_mm_tokens",
+            documentation="Histogram of request multimodal tokens count per multimodal item, categorized by modality.",
+            labelnames=list(labels.keys()) + ["modality"],
+            buckets=bucket_request_mm_tokens,
+        )
+
     def observe_one_finished_request(
         self,
         labels: Dict[str, str],
@@ -1363,6 +1484,101 @@ class TokenizerMetricsCollector:
 
     def observe_one_aborted_request(self, labels: Dict[str, str]):
         self.num_aborted_requests_total.labels(**labels).inc(1)
+
+    # Multimodal metrics methods
+    def observe_request_mm_preprocessing_time(
+        self, modality: Union["Modality", str], duration_seconds: float
+    ) -> None:
+        """
+        Record multimodal preprocessing time.
+
+        Args:
+            modality: The modality type (IMAGE, VIDEO, AUDIO, etc.)
+            duration_seconds: Preprocessing duration in seconds
+        """
+        modality_str = getattr(modality, "name", str(modality).upper())
+        labels_with_modality = {**self.labels, "modality": modality_str}
+        self.request_mm_preprocessing_time_seconds.labels(
+            **labels_with_modality
+        ).observe(duration_seconds)
+
+    def observe_mm_items(self, mm_items: List["MultimodalDataItem"]) -> None:
+        """
+        Record the count of multimodal items, categorized by modality.
+
+        Args:
+            mm_items: List of MultimodalDataItem objects
+        """
+        # Count items by modality
+        modality_counts: Dict[str, int] = {}
+        for item in mm_items:
+            modality_str = getattr(item.modality, "name", str(item.modality).upper())
+            # Count actual items: if offsets exist, use its length; otherwise count as 1
+            item_count = len(item.offsets) if item.offsets is not None else 1
+            modality_counts[modality_str] = (
+                modality_counts.get(modality_str, 0) + item_count
+            )
+
+        # Record counts for each modality
+        for modality_str, cnt in modality_counts.items():
+            labels_with_modality = {**self.labels, "modality": modality_str}
+            self.mm_items_total.labels(**labels_with_modality).inc(cnt)
+            self.request_mm_items.labels(**labels_with_modality).observe(cnt)
+
+    def observe_request_mm_tokens(self, mm_items: List["MultimodalDataItem"]) -> None:
+        """
+        Record vision tokens count for each multimodal item, categorized by modality.
+
+        Args:
+            mm_items: List of MultimodalDataItem objects with offsets
+        """
+        for item in mm_items:
+            modality_str = getattr(item.modality, "name", str(item.modality).upper())
+
+            # Calculate request_mm_tokens from offsets
+            # Each offset is a tuple (start, end), and the number of tokens is end - start + 1
+            mm_tokens_count = 0
+            if item.offsets is not None:
+                for offset in item.offsets:
+                    if isinstance(offset, (list, tuple)) and len(offset) >= 2:
+                        start, end = offset[0], offset[1]
+                        mm_tokens_count += max(0, end - start + 1)
+                    elif isinstance(offset, int):
+                        # If offset is a single integer, treat it as a single token
+                        mm_tokens_count += 1
+
+            if mm_tokens_count > 0:
+                labels_with_modality = {**self.labels, "modality": modality_str}
+                self.request_mm_tokens.labels(**labels_with_modality).observe(
+                    mm_tokens_count
+                )
+
+    def observe_request_mm(
+        self,
+        mm_items: List["MultimodalDataItem"],
+        preprocessing_time_seconds: Optional[float] = None,
+    ) -> None:
+        """
+        Convenience method to record all multimodal metrics for a request.
+
+        Args:
+            mm_items: List of MultimodalDataItem objects
+            preprocessing_time_seconds: Optional total preprocessing time in seconds
+                (will be recorded for each modality present)
+        """
+        self.observe_mm_items(mm_items)
+
+        self.observe_request_mm_tokens(mm_items)
+
+        if preprocessing_time_seconds is not None:
+            # Record the same total preprocessing time for each modality present
+            modalities_seen = set()
+            for item in mm_items:
+                if item.modality not in modalities_seen:
+                    self.observe_request_mm_preprocessing_time(
+                        item.modality, preprocessing_time_seconds
+                    )
+                    modalities_seen.add(item.modality)
 
 
 @dataclass

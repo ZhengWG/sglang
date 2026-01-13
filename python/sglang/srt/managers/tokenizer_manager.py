@@ -745,6 +745,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             self._validate_mm_limits(obj)
 
             mm_inputs = None
+            preprocessing_start_time = None
+            preprocessing_time = None
 
             if (
                 not self.server_args.language_only
@@ -758,6 +760,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         prompt=(input_text or input_ids),
                     )
                 if mm_inputs is None:
+                    if self.enable_metrics:
+                        preprocessing_start_time = time.perf_counter()
                     mm_inputs: Dict = await self.mm_data_processor.process(
                         image_data=obj.image_data,
                         audio_data=obj.audio_data,
@@ -765,6 +769,11 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         request_obj=obj,
                         max_req_input_len=self.max_req_input_len,
                     )
+                    if self.enable_metrics:
+                        preprocessing_end_time = time.perf_counter()
+                        preprocessing_time = (
+                            preprocessing_end_time - preprocessing_start_time
+                        )
 
             # mm_inputs增加词表大小属性，为后续mm_data_item的hash -> pad_value
             # 增加offset防止pad_value跟正常的词表token冲突
@@ -782,6 +791,19 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     if isinstance(item, MultimodalDataItem):
                         item.model_vocab_size = self.model_config.vocab_size
                         item.set_pad_value()
+
+            # Record multimodal metrics asynchronously to avoid blocking
+            if (
+                self.enable_metrics
+                and self.metrics_collector is not None
+                and mm_inputs is not None
+                and "mm_items" in mm_inputs
+                and mm_inputs["mm_items"]
+            ):
+                self.metrics_collector.observe_request_mm(
+                    mm_items=mm_inputs["mm_items"],
+                    preprocessing_time_seconds=preprocessing_time,
+                )
         else:
             mm_inputs = None
 
