@@ -1846,14 +1846,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 recv_obj.input_token_logprobs_idx[recv_obj_index]
             )
 
-            delta_input_token_logprobs = self.detokenize_logprob_tokens(
-                recv_obj.input_token_logprobs_val[recv_obj_index],
-                recv_obj.input_token_logprobs_idx[recv_obj_index],
-                return_text_in_logprobs,
-            )
-
-            state.input_token_logprobs.extend(delta_input_token_logprobs)
-
         state.output_token_logprobs_val.extend(
             recv_obj.output_token_logprobs_val[recv_obj_index]
         )
@@ -1861,13 +1853,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             recv_obj.output_token_logprobs_idx[recv_obj_index]
         )
 
-        delta_output_token_logprobs = self.detokenize_logprob_tokens(
-            recv_obj.output_token_logprobs_val[recv_obj_index],
-            recv_obj.output_token_logprobs_idx[recv_obj_index],
-            return_text_in_logprobs
-        )
-
-        state.output_token_logprobs.extend(delta_output_token_logprobs)
 
         if top_logprobs_num > 0:
             if len(recv_obj.input_top_logprobs_val) > 0:
@@ -1878,13 +1863,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     recv_obj.input_top_logprobs_idx[recv_obj_index]
                 )
 
-                delta_input_top_logprobs = self.detokenize_top_logprobs_tokens(
-                    recv_obj.input_top_logprobs_val[recv_obj_index],
-                    recv_obj.input_top_logprobs_idx[recv_obj_index],
-                    return_text_in_logprobs,
-                )
-
-                state.input_top_logprobs.extend(delta_input_top_logprobs)
 
             state.output_top_logprobs_val.extend(
                 recv_obj.output_top_logprobs_val[recv_obj_index]
@@ -1893,13 +1871,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 recv_obj.output_top_logprobs_idx[recv_obj_index]
             )
 
-            delta_output_top_logprobs = self.detokenize_top_logprobs_tokens(
-                recv_obj.output_top_logprobs_val[recv_obj_index],
-                recv_obj.output_top_logprobs_idx[recv_obj_index],
-                return_text_in_logprobs
-            )
-
-            state.output_top_logprobs.extend(delta_output_top_logprobs)
 
         if token_ids_logprob is not None:
             if len(recv_obj.input_token_ids_logprobs_val) > 0:
@@ -1910,13 +1881,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     recv_obj.input_token_ids_logprobs_idx[recv_obj_index]
                 )
 
-                delta_input_token_ids_logprobs = self.detokenize_top_logprobs_tokens(
-                    recv_obj.input_token_ids_logprobs_val[recv_obj_index],
-                    recv_obj.input_token_ids_logprobs_idx[recv_obj_index],
-                    return_text_in_logprobs,
-                )
 
-                state.input_token_ids_logprobs.extend(delta_input_token_ids_logprobs)
             state.output_token_ids_logprobs_val.extend(
                 recv_obj.output_token_ids_logprobs_val[recv_obj_index]
             )
@@ -1924,13 +1889,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 recv_obj.output_token_ids_logprobs_idx[recv_obj_index]
             )
 
-            delta_output_token_ids_logprobs = self.detokenize_top_logprobs_tokens(
-                recv_obj.output_token_ids_logprobs_val[recv_obj_index],
-                recv_obj.output_token_ids_logprobs_idx[recv_obj_index],
-                return_text_in_logprobs
-            )
-
-            state.output_token_ids_logprobs.extend(delta_output_token_ids_logprobs)
         self.add_logprob_to_meta_info(
             meta_info,
             state,
