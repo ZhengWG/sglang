@@ -64,7 +64,7 @@ jobs:
       image: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像同步组件的租户一致
 
-  推送sglang镜像:
+  推送sglang镜像[S集群]:
     stage: Push-Image
     component: image-sync-from-alipay-to-ats
     id: push-image
@@ -76,6 +76,23 @@ jobs:
       checkImageAndStc: false
       sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       targetImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      appName: sglang
+      tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
+      retry: 10
+      imageType: oci
+
+  推送sglang镜像[北京B1]:
+    stage: Push-Image
+    component: image-sync-from-alipay-to-ats
+    id: push-image
+    config:
+      beforeExecute:
+        confirm:
+          buttonName: 确认推送
+    inputs:
+      checkImageAndStc: false
+      sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      targetImage: acr-bj-ant-registry-vpc.cn-beijing.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
       appName: sglang
       tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
       retry: 10
