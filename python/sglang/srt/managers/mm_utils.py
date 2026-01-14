@@ -1293,6 +1293,10 @@ def _get_length(value):
         return None
     if isinstance(value, torch.Tensor):
         return value.shape[0] if value.ndim > 0 else None
+    if isinstance(value, CudaIpcTensorTransportProxy):
+        ipc_extra = value.proxy_state["ipc_extra"]
+        if ipc_extra and "recons_shape" in ipc_extra:
+            return ipc_extra["recons_shape"][0]
     if isinstance(value, np.ndarray):
         return value.shape[0] if value.ndim > 0 else None
     if isinstance(value, (list, tuple)):
@@ -1303,6 +1307,9 @@ def _get_length(value):
 def _slice_value(value, start, end):
     if isinstance(value, torch.Tensor):
         return value[start:end]
+    if isinstance(value, CudaIpcTensorTransportProxy):
+        reconstruct_t = value.reconstruct_on_target_device(torch.cuda.current_device())
+        return reconstruct_t[start:end]
     if isinstance(value, np.ndarray):
         return value[start:end]
     if isinstance(value, list):
