@@ -115,6 +115,9 @@ def get_model_config(
         E = config.num_experts // ep_size
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
+        if not disable_shared_experts_fusion:
+            E += config.num_shared_experts
+            topk += config.num_shared_experts
     elif architecture == "NemotronHForCausalLM":
         E = config.n_routed_experts // ep_size
         topk = config.num_experts_per_tok
