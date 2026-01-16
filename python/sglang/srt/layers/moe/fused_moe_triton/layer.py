@@ -49,6 +49,7 @@ from sglang.srt.layers.moe.topk import (
     TopKOutputChecker,
 )
 from sglang.srt.layers.moe.utils import RoutingMethodType
+from sglang.srt.layers.ngpt import ScaleUpNorm
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -161,6 +162,8 @@ class FusedMoE(torch.nn.Module):
         reduce_results: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_nGPT: bool = False,
+        layernorm_epsilon: float = 1e-6,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         use_presharded_weights: bool = False,
@@ -195,6 +198,16 @@ class FusedMoE(torch.nn.Module):
         self.num_local_experts = (
             num_experts - num_fused_shared_experts
         ) // self.moe_ep_size + num_fused_shared_experts
+
+        if use_nGPT:
+            self.swv = ScaleUpNorm(
+                intermediate_size=intermediate_size,
+                layernorm_epsilon=layernorm_epsilon,
+                tp_rank=self.moe_tp_rank,
+                tp_size=self.moe_tp_size,
+            )
+        else:
+            self.swv = None
 
         self.expert_mask_gpu = None
 
@@ -938,6 +951,7 @@ class FusedMoE(torch.nn.Module):
 
         combine_input = self.run_moe_core(
             dispatch_output=dispatch_output,
+            _scale_up_norm=self.swv,
         )
 
         with use_symmetric_memory(
@@ -955,12 +969,19 @@ class FusedMoE(torch.nn.Module):
 
         return final_hidden_states
 
-    def run_moe_core(self, dispatch_output: DispatchOutput) -> CombineInput:
+    def run_moe_core(self, dispatch_output: DispatchOutput, _scale_up_norm: Optional[ScaleUpNorm] = None) -> CombineInput:
         # TODO: consider using symmetric memory
-        return self.quant_method.apply(
-            layer=self,
-            dispatch_output=dispatch_output,
-        )
+        if isinstance(self.quant_method, UnquantizedFusedMoEMethod):
+            return self.quant_method.apply(
+                layer=self,
+                dispatch_output=dispatch_output,
+                _scale_up_norm=_scale_up_norm,
+            )
+        else:
+            return self.quant_method.apply(
+                layer=self,
+                dispatch_output=dispatch_output,
+            )
 
     @classmethod
     def make_expert_params_mapping(

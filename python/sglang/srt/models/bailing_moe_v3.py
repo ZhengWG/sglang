@@ -1,16 +1,21 @@
 # coding=utf-8
 # Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
+from __future__ import annotations
+
 import copy
 import logging
-from typing import Callable, Iterable, Optional, Set, Tuple, Union
+import os
+from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
+    divide,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -19,26 +24,36 @@ from sglang.srt.distributed import (
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.activation import SiluAndMul
+from sglang.srt.layers.attention.nsa.utils import nsa_use_prefill_cp
 from sglang.srt.layers.communicator import (
     AttentionInputs,
     LayerScatterModes,
     get_attn_tp_context,
 )
 from sglang.srt.layers.dp_attention import (
+    get_attention_tp_rank,
     get_attention_tp_size,
     is_dp_attention_enabled,
 )
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.ngpt import ScaleUpNorm, apply_hyper_spherical_fusion, l2norm
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
+from sglang.srt.layers.quantization.fp8_kernel import (
+    fp8_dtype,
+    is_fp8_fnuz,
+    per_tensor_quant_mla_fp8,
+    per_token_group_quant_mla_deep_gemm_masked_fp8,
+)
 from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_dequant,
     block_quant_to_tensor_quant,
@@ -57,13 +72,11 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
-from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.deepseek_v2 import (
-    DeepEPMoE,
-    DeepseekV2AttentionMLA,
-    DeepseekV2MLP,
-    _is_hip,
+from sglang.srt.model_loader.weight_utils import (
+    default_weight_loader,
+    sharded_weight_loader,
 )
+from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP, _is_hip
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
@@ -79,8 +92,11 @@ from sglang.srt.utils import (
     is_gfx95_supported,
     is_hip,
     is_npu,
+    is_nvidia_cublas_cu12_version_ge_12_9,
     is_sm100_supported,
     make_layers,
+    set_weight_attrs,
+    use_intel_amx_backend,
 )
 
 _is_hip = is_hip()
@@ -96,28 +112,1039 @@ _is_gfx95_supported = is_gfx95_supported()
 _use_aiter_gfx95 = _use_aiter and _is_gfx95_supported
 
 if _use_aiter_gfx95:
-    pass
+
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant,
+    )
+    from aiter.ops.triton.fused_fp8_quant import (
+        fused_flatten_fp8_group_quant,
+        fused_rms_fp8_group_quant,
+    )
+
+    from sglang.srt.layers.quantization.rocm_mxfp4_utils import (
+        batched_gemm_afp4wfp4_pre_quant,
+        fused_flatten_mxfp4_quant,
+        fused_rms_mxfp4_quant,
+    )
+    from sglang.srt.layers.rocm_linear_utils import fused_qk_rope_cat_and_cache_mla
 
 if _is_cuda:
-    from sgl_kernel import awq_dequantize
+    from sgl_kernel import awq_dequantize, bmm_fp8
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
+    from sglang.srt.layers.attention.triton_ops.rocm_mla_decode_rope import (
+        decode_attention_fwd_grouped_rope,
+    )
     from sglang.srt.layers.quantization.awq_triton import (
         awq_dequantize_triton as awq_dequantize,
     )
+
 else:
     from vllm._custom_ops import awq_dequantize
 
 if _is_hip:
     pass
 
+_is_cublas_ge_129 = is_nvidia_cublas_cu12_version_ge_12_9()
 _is_flashinfer_available = is_flashinfer_available()
 _is_sm100_supported = is_cuda() and is_sm100_supported()
 
+FORWARD_ABSORB_CORE_ATTENTION_BACKENDS = [
+    "fa3",
+    "nsa",
+    "flashinfer",
+    "cutlass_mla",
+    "trtllm_mla",
+    "ascend",
+]
+
 
 class DsV3MLA(DeepseekV2AttentionMLA):
-    pass
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        layer_id: int = None,
+        prefix: str = "",
+        alt_stream: Optional[torch.cuda.Stream] = None,
+        skip_rope: bool = False,
+    ) -> None:
+        super().__init__(
+            config,
+            hidden_size,
+            num_heads,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+            q_lora_rank,
+            kv_lora_rank,
+            rope_theta,
+            rope_scaling,
+            max_position_embeddings,
+            quant_config,
+            reduce_results,
+            layer_id,
+            prefix,
+            alt_stream,
+            skip_rope,
+        )
+        attn_tp_rank = get_attention_tp_rank()
+        attn_tp_size = get_attention_tp_size()
+        self.gated_attention_proj_granularity_type = getattr(
+            config, "gated_attention_proj_granularity_type", None
+        )
+        # gated_attn now not support NPU
+        if self.gated_attention_proj_granularity_type == "head_wise":
+            self.g_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.output_gate",
+                tp_rank=attn_tp_rank,
+                tp_size=attn_tp_size,
+            )
+        elif self.gated_attention_proj_granularity_type == "element_wise":
+            self.g_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads * self.v_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.output_gate",
+                tp_rank=attn_tp_rank,
+                tp_size=attn_tp_size,
+            )
+        else:
+            self.g_proj = None
+
+    def forward_normal_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        zero_allocator: BumpAllocator,
+    ):
+        if self.q_lora_rank is not None:
+            q, latent_cache = (
+                get_attn_tp_context()
+                .fetch_qkv_latent()
+                .split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1,
+                )
+            )
+
+            # NSA Indexer: cache quantized keys, auto-skip topk for sequences <= nsa_index_topk
+
+            if self.use_nsa:
+                q_lora = self.q_a_layernorm(q)
+                q = self.q_b_proj(q_lora)[0].view(
+                    -1, self.num_local_heads, self.qk_head_dim
+                )
+                _ = self.indexer(
+                    x=hidden_states,
+                    q_lora=q_lora,
+                    positions=positions,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                    return_indices=False,
+                )
+            elif _use_aiter_gfx95 and self.q_b_proj.weight.dtype == torch.uint8:
+                # MXFP4: fused RMSNorm + quant
+                q, _, _, _ = fused_rms_mxfp4_quant(
+                    q,
+                    self.q_a_layernorm.weight,
+                    self.q_a_layernorm.variance_epsilon,
+                    None,
+                    None,
+                    None,
+                )
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            elif _use_aiter_gfx95 and self.q_b_proj.weight.dtype == torch.float8_e4m3fn:
+
+                q, _, _, _ = fused_rms_fp8_group_quant(
+                    q,
+                    self.q_a_layernorm.weight,
+                    self.q_a_layernorm.variance_epsilon,
+                    None,
+                    None,
+                    None,
+                    group_size=128,
+                    dtype_quant=torch.float8_e4m3fn,
+                    res1=None,
+                    output_unquantized_inp1=False,
+                )
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            else:
+                q = self.q_a_layernorm(q)
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        latent_cache = latent_cache.unsqueeze(1)
+
+        if _use_aiter_gfx95 and self.kv_b_proj.weight.dtype == torch.float8_e4m3fn:
+
+            kv_a_quanted, kv_a, _, _ = fused_rms_fp8_group_quant(
+                kv_a,
+                self.kv_a_layernorm.weight,
+                self.kv_a_layernorm.variance_epsilon,
+                None,
+                None,
+                None,
+                group_size=128,
+                dtype_quant=torch.float8_e4m3fn,
+                res1=None,
+                output_unquantized_inp1=True,  # return unqaunt kv_a
+            )
+
+        else:
+            kv_a = self.kv_a_layernorm(kv_a)
+
+        # kv_a = self.kv_a_layernorm(kv_a)
+
+        k_pe = latent_cache[:, :, self.kv_lora_rank :]
+        if self.rotary_emb is not None:
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        q[..., self.qk_nope_head_dim :] = q_pe
+
+        self._set_mla_kv_buffer(latent_cache, kv_a, k_pe, forward_batch)
+        if (
+            forward_batch.mha_one_shot
+            and sum(forward_batch.extend_prefix_lens_cpu) != 0
+        ):
+            if self.use_nsa and self.kv_cache_dtype == "fp8_e4m3":
+                # FP8 path: dequantize NSA-specific FP8 format to BF16
+                kv_a, k_pe = self._get_mla_kv_buffer_from_fp8(forward_batch)
+            else:
+                # BF16/FP16 path: directly fetch from cache
+                kv_a, k_pe = self._get_mla_kv_buffer(
+                    forward_batch.fetch_mha_one_shot_kv_indices(),
+                    q.dtype,
+                    forward_batch,
+                )
+        if _use_aiter_gfx95 and self.kv_b_proj.weight.dtype == torch.float8_e4m3fn:
+            kv = self.kv_b_proj(
+                kv_a_quanted,
+            )[0]
+        else:
+            kv = self.kv_b_proj(kv_a)[0]
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[..., : self.qk_nope_head_dim]
+        v = kv[..., self.qk_nope_head_dim :]
+
+        k = self._concat_and_cast_mha_k(k_nope, k_pe, forward_batch)
+        return q, k, v, forward_batch, hidden_states
+
+    def forward_normal_core(self, q, k, v, forward_batch, hidden_states):
+        attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
+        attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    def forward_absorb_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        zero_allocator: BumpAllocator,
+        llama_4_scaling: Optional[torch.Tensor] = None,
+    ):
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
+        q_lora = None
+        if self.q_lora_rank is not None:
+            q, latent_cache = (
+                get_attn_tp_context()
+                .fetch_qkv_latent()
+                .split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1,
+                )
+            )
+            k_nope = latent_cache[..., : self.kv_lora_rank]
+
+            # overlap qk norm
+            if self.alt_stream is not None and get_is_capture_mode():
+                current_stream = torch.cuda.current_stream()
+                self.alt_stream.wait_stream(current_stream)
+                q = self.q_a_layernorm(q)
+                with torch.cuda.stream(self.alt_stream):
+                    k_nope = self.kv_a_layernorm(k_nope)
+                current_stream.wait_stream(self.alt_stream)
+            else:
+                if _use_aiter_gfx95 and self.q_b_proj.weight.dtype == torch.uint8:
+                    q, _, k_nope, *_ = fused_rms_mxfp4_quant(
+                        q,
+                        self.q_a_layernorm.weight,
+                        self.q_a_layernorm.variance_epsilon,
+                        k_nope,
+                        self.kv_a_layernorm.weight,
+                        self.kv_a_layernorm.variance_epsilon,
+                    )
+                else:
+                    if (
+                        _use_aiter_gfx95
+                        and self.q_b_proj.weight.dtype == torch.float8_e4m3fn
+                    ):
+
+                        q, _, k_nope, _ = fused_rms_fp8_group_quant(
+                            q,
+                            self.q_a_layernorm.weight,
+                            self.q_a_layernorm.variance_epsilon,
+                            k_nope,
+                            self.kv_a_layernorm.weight,
+                            self.kv_a_layernorm.variance_epsilon,
+                            group_size=128,
+                            dtype_quant=torch.float8_e4m3fn,
+                            res1=None,
+                            output_unquantized_inp1=False,
+                        )
+
+                    else:
+                        q = self.q_a_layernorm(q)
+                        k_nope = self.kv_a_layernorm(k_nope)
+
+            # q_lora needed by indexer
+            if self.use_nsa:
+                q_lora = q
+
+            k_nope = k_nope.unsqueeze(1)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+            k_nope = latent_cache[..., : self.kv_lora_rank]
+            k_nope = self.kv_a_layernorm(k_nope).unsqueeze(1)
+
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        k_pe = latent_cache[..., self.kv_lora_rank :].unsqueeze(1)
+
+        if self.use_deep_gemm_bmm:
+            q_nope_val, q_nope_scale, masked_m, expected_m, aligned_m = (
+                per_token_group_quant_mla_deep_gemm_masked_fp8(q_nope.transpose(0, 1))
+            )
+            q_nope_out = q_nope.new_empty(
+                (self.num_local_heads, aligned_m, self.kv_lora_rank)
+            )
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
+                (q_nope_val, q_nope_scale),
+                (self.w_kc, self.w_scale_k),
+                q_nope_out,
+                masked_m,
+                expected_m,
+            )
+            q_nope_out = q_nope_out[:, :expected_m, :]
+        elif _is_hip:
+            # TODO(haishaw): add bmm_fp8 to ROCm
+            if _use_aiter_gfx95 and self.w_kc.dtype == torch.uint8:
+                x = q_nope.transpose(0, 1)
+                q_nope_out = torch.empty(
+                    x.shape[0],
+                    x.shape[1],
+                    self.w_kc.shape[2],
+                    device=x.device,
+                    dtype=torch.bfloat16,
+                )
+                batched_gemm_afp4wfp4_pre_quant(
+                    x,
+                    self.w_kc.transpose(-2, -1),
+                    self.w_scale_k.transpose(-2, -1),
+                    torch.bfloat16,
+                    q_nope_out,
+                )
+            else:
+                if _use_aiter_gfx95 and self.w_kc.dtype == torch.float8_e4m3fn:
+
+                    q_nope_out = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(
+                        X=q_nope,
+                        WQ=self.w_kc.transpose(-1, -2),
+                        w_scale=self.w_scale,
+                        group_size=128,
+                        YQ=None,  # allocate (B, M, N)
+                        transpose_bm=False,  # (B, M, N)
+                        transpose_bm_in=True,  # (M, B, K)
+                        dtype=torch.bfloat16,
+                    )
+
+                else:
+                    q_nope_out = torch.bmm(
+                        q_nope.to(torch.bfloat16).transpose(0, 1),
+                        self.w_kc.to(torch.bfloat16) * self.w_scale,
+                    )
+
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            # fix bmm_fp8 error under cublas12.9 caused by bumpallocator, detail in pr#11612
+            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                q_nope.transpose(0, 1),
+                (
+                    torch.zeros((1,), dtype=torch.float32, device=q_nope.device)
+                    if _is_cublas_ge_129
+                    else zero_allocator.allocate(1)
+                ),
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+
+        q_nope_out = q_nope_out.transpose(0, 1)
+
+        if (
+            self.rotary_emb is not None
+            and (not self._fuse_rope_for_trtllm_mla(forward_batch))
+            and (not _use_aiter or not _is_gfx95_supported or self.use_nsa)
+        ):
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+
+        if nsa_use_prefill_cp(forward_batch):
+            # support allgather+rerrange
+            k_nope, k_pe = self.rebuild_cp_kv_cache(
+                latent_cache, forward_batch, k_nope, k_pe
+            )
+        topk_indices = None
+        if q_lora is not None:
+            topk_indices = self.indexer(
+                x=hidden_states,
+                q_lora=q_lora,
+                positions=positions,
+                forward_batch=forward_batch,
+                layer_id=self.layer_id,
+            )
+
+        return (
+            q_pe,
+            k_pe,
+            q_nope_out,
+            k_nope,
+            forward_batch,
+            zero_allocator,
+            positions,
+            topk_indices,
+            llama_4_scaling,
+            hidden_states,
+        )
+
+    def forward_absorb_core(
+        self,
+        q_pe,
+        k_pe,
+        q_nope_out,
+        k_nope,
+        forward_batch,
+        zero_allocator,
+        positions,
+        topk_indices,
+        llama_4_scaling,
+        hidden_states,
+    ):
+        save_kv_cache = True
+
+        if self.current_attention_backend in FORWARD_ABSORB_CORE_ATTENTION_BACKENDS:
+            extra_args = {}
+            if self._fuse_rope_for_trtllm_mla(forward_batch):
+                extra_args = {
+                    "cos_sin_cache": self.rotary_emb.cos_sin_cache,
+                    "is_neox": self.rotary_emb.is_neox_style,
+                    "llama_4_scaling": llama_4_scaling,
+                }
+
+            attn_output = self.attn_mqa(
+                q_nope_out,
+                k_nope,
+                k_nope,
+                forward_batch,
+                q_rope=q_pe,
+                k_rope=k_pe,
+                **extra_args,
+                **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
+            )
+        else:
+            if _use_aiter_gfx95:
+                cos = self.rotary_emb.cos_cache
+                sin = self.rotary_emb.sin_cache
+
+                kv_cache_dtype = (
+                    fp8_dtype if self.kv_cache_dtype == "fp8_e4m3" else q_nope_out.dtype
+                )
+
+                q, _, _, k = fused_qk_rope_cat_and_cache_mla(
+                    q_nope_out,
+                    q_pe,
+                    k_nope,
+                    k_pe,
+                    forward_batch.token_to_kv_pool.get_key_buffer(
+                        self.attn_mqa.layer_id
+                    ),
+                    forward_batch.out_cache_loc,
+                    positions,
+                    cos,
+                    sin,
+                    self.attn_mqa.k_scale,
+                    self.rotary_emb.is_neox_style,
+                    q_out_dtype=kv_cache_dtype,
+                )
+
+                save_kv_cache = False
+            else:
+                q = torch.cat([q_nope_out, q_pe], dim=-1)
+                k = torch.cat([k_nope, k_pe], dim=-1)
+
+            # Apply llama 4 scaling if provided
+            if llama_4_scaling is not None:
+                q *= llama_4_scaling
+
+            attn_output = self.attn_mqa(
+                q,
+                k,
+                k_nope,
+                forward_batch,
+                save_kv_cache=save_kv_cache,
+                **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
+            )
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        if self.use_deep_gemm_bmm:
+            attn_output_val, attn_output_scale, masked_m, expected_m, aligned_m = (
+                per_token_group_quant_mla_deep_gemm_masked_fp8(
+                    attn_output.transpose(0, 1)
+                )
+            )
+            attn_bmm_output = attn_output.new_empty(
+                (self.num_local_heads, aligned_m, self.v_head_dim)
+            )
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
+                (attn_output_val, attn_output_scale),
+                (self.w_vc, self.w_scale_v),
+                attn_bmm_output,
+                masked_m,
+                expected_m,
+            )
+            attn_bmm_output = (
+                attn_bmm_output[:, :expected_m, :].transpose(0, 1).flatten(1, 2)
+            )
+        elif _is_hip:
+            # TODO(haishaw): add bmm_fp8 to ROCm
+            if _use_aiter_gfx95 and self.w_vc.dtype == torch.uint8:
+                x = attn_output.transpose(0, 1)
+                attn_bmm_output = torch.empty(
+                    x.shape[0],
+                    x.shape[1],
+                    self.w_vc.shape[2],
+                    device=x.device,
+                    dtype=torch.bfloat16,
+                )
+                batched_gemm_afp4wfp4_pre_quant(
+                    x,
+                    self.w_vc.transpose(-2, -1),
+                    self.w_scale_v.transpose(-2, -1),
+                    torch.bfloat16,
+                    attn_bmm_output,
+                )
+            else:
+                if _use_aiter_gfx95 and self.w_kc.dtype == torch.float8_e4m3fn:
+                    attn_bmm_output = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(
+                        X=attn_output,
+                        WQ=self.w_vc.transpose(-1, -2),
+                        w_scale=self.w_scale,
+                        group_size=128,
+                        YQ=None,
+                        transpose_bm=False,
+                        transpose_bm_in=True,
+                        dtype=torch.bfloat16,
+                    )
+                else:
+                    attn_bmm_output = torch.bmm(
+                        attn_output.to(torch.bfloat16).transpose(0, 1),
+                        self.w_vc.to(torch.bfloat16) * self.w_scale,
+                    )
+
+            if self.o_proj.weight.dtype == torch.uint8:
+                attn_bmm_output = attn_bmm_output.transpose(0, 1)
+                attn_bmm_output = fused_flatten_mxfp4_quant(attn_bmm_output)
+            elif self.o_proj.weight.dtype == torch.float8_e4m3fn:
+                attn_bmm_output = attn_bmm_output.transpose(0, 1)
+                attn_bmm_output = fused_flatten_fp8_group_quant(
+                    attn_bmm_output, group_size=128, dtype_quant=torch.float8_e4m3fn
+                )
+            else:
+                attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                attn_output.transpose(0, 1),
+                (
+                    torch.zeros((1,), dtype=torch.float32, device=attn_output.device)
+                    if _is_cublas_ge_129
+                    else zero_allocator.allocate(1)
+                ),
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+            attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        else:
+            if is_in_piecewise_cuda_graph():
+                # torch dynamo requires out= op was called where output tensor was non-contiguous
+                attn_bmm_output = (
+                    torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+                    .transpose(0, 1)
+                    .flatten(1, 2)
+                )
+            else:
+                attn_bmm_output = torch.empty(
+                    (attn_output.shape[0], self.num_local_heads * self.v_head_dim),
+                    dtype=attn_output.dtype,
+                    device=attn_output.device,
+                )
+                torch.bmm(
+                    attn_output.transpose(0, 1),
+                    self.w_vc,
+                    out=attn_bmm_output.view(
+                        -1, self.num_local_heads, self.v_head_dim
+                    ).transpose(0, 1),
+                )
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_bmm_output = (
+                    attn_bmm_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_bmm_output = attn_bmm_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_bmm_output = attn_bmm_output * gate
+
+        output, _ = self.o_proj(attn_bmm_output)
+
+        return output
+
+    def forward_absorb_fused_mla_rope_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        zero_allocator: BumpAllocator,
+    ):
+        enable_rope_fusion = (
+            os.getenv("SGLANG_FUSED_MLA_ENABLE_ROPE_FUSION", "1") == "1"
+        )
+        # NOTE: hidden_states can be a tuple for some quantization paths.
+        # For shape/device/dtype, use the first tensor; still pass the original
+        # hidden_states through linear ops which may accept tuple inputs.
+        hidden_states_tensor = (
+            hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+        )
+
+        q_len = hidden_states_tensor.shape[0]
+        q_input = hidden_states_tensor.new_empty(
+            q_len, self.num_local_heads, self.kv_lora_rank + self.qk_rope_head_dim
+        )
+        if self.q_lora_rank is not None:
+            q, latent_cache = self.fused_qkv_a_proj_with_mqa(hidden_states)[0].split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+            )
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+            latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        if _is_hip:
+            # TODO(haishaw): add bmm_fp8 to ROCm
+            q_nope_out = torch.bmm(
+                q_nope.to(torch.bfloat16).transpose(0, 1),
+                self.w_kc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                q_nope.transpose(0, 1),
+                zero_allocator.allocate(1),
+                dtype=torch.float8_e4m3fn,
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+        q_input[..., : self.kv_lora_rank] = q_nope_out.transpose(0, 1)
+        v_input = latent_cache[..., : self.kv_lora_rank]
+        v_input = self.kv_a_layernorm(v_input.contiguous()).unsqueeze(1)
+        k_input = latent_cache.unsqueeze(1)
+        k_input[..., : self.kv_lora_rank] = v_input
+
+        if not enable_rope_fusion:
+            k_pe = k_input[..., self.kv_lora_rank :]
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q_input[..., self.kv_lora_rank :] = q_pe
+            k_input[..., self.kv_lora_rank :] = k_pe
+            k_pe_output = None
+        else:
+            k_pe_output = torch.empty_like(k_input[..., self.kv_lora_rank :])
+
+        q_input[..., self.kv_lora_rank :] = q_pe
+
+        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        # Use Fused ROPE with use_rope=OFF.
+        attn_output = torch.empty(
+            (q_len, self.num_local_heads, self.kv_lora_rank),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        attn_logits, _, kv_indptr, kv_indices, _, _, _ = (
+            forward_batch.attn_backend.forward_metadata
+        )
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+        num_kv_split = forward_batch.attn_backend.num_kv_splits
+        sm_scale = self.attn_mqa.scaling
+        if attn_logits is None:
+            attn_logits = torch.empty(
+                (
+                    forward_batch.batch_size,
+                    self.num_local_heads,
+                    num_kv_split,
+                    self.kv_lora_rank + 1,
+                ),
+                dtype=torch.float32,
+                device=q.device,
+            )
+
+        # save current latent cache.
+        forward_batch.token_to_kv_pool.set_kv_buffer(
+            self.attn_mqa, forward_batch.out_cache_loc, k_input, None
+        )
+        key_cache_buf = forward_batch.token_to_kv_pool.get_key_buffer(
+            self.attn_mqa.layer_id
+        )
+        val_cache_buf = key_cache_buf[..., : self.kv_lora_rank]
+
+        return (
+            q_input,
+            key_cache_buf,
+            val_cache_buf,
+            attn_output,
+            kv_indptr,
+            kv_indices,
+            k_pe_output,
+            cos_sin_cache,
+            positions,
+            attn_logits,
+            num_kv_split,
+            sm_scale,
+            enable_rope_fusion,
+            k_input,
+            forward_batch,
+            zero_allocator,
+            hidden_states,
+        )
+
+    def forward_absorb_fused_mla_rope_cpu_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        zero_allocator: BumpAllocator,
+    ):
+        assert self.q_lora_rank is not None and use_intel_amx_backend(
+            self
+        ), "forward_absorb_fused_mla_rope_cpu_prepare requires q_lora_rank is not None and use_intel_amx_backend"
+
+        q_input, k_input, v_input = (
+            torch.ops.sgl_kernel.qkv_proj_with_rope_fused_weight(
+                hidden_states,
+                self.fused_qkv_a_proj_with_mqa.weight,
+                self.q_b_proj.weight,
+                self.w_kc,
+                self.q_a_layernorm.weight,
+                self.kv_a_layernorm.weight,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.kv_a_layernorm.variance_epsilon,
+                self.qkv_proj_with_rope_is_int8,
+                self.qkv_proj_with_rope_is_fp8,
+                (
+                    self.fused_qkv_a_proj_with_mqa.weight_scale
+                    if self.qkv_proj_with_rope_is_int8
+                    else (
+                        self.fused_qkv_a_proj_with_mqa.weight_scale_inv
+                        if self.qkv_proj_with_rope_is_fp8
+                        else None
+                    )
+                ),
+                (
+                    self.q_b_proj.weight_scale
+                    if self.qkv_proj_with_rope_is_int8
+                    else (
+                        self.q_b_proj.weight_scale_inv
+                        if self.qkv_proj_with_rope_is_fp8
+                        else None
+                    )
+                ),
+                True,  # is_vnni
+                self.weight_block_size,
+                self.q_lora_rank,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+            )
+        )
+        return (q_input, k_input, v_input, forward_batch, zero_allocator, hidden_states)
+
+    def forward_absorb_fused_mla_rope_core(
+        self,
+        q_input,
+        key_cache_buf,
+        val_cache_buf,
+        attn_output,
+        kv_indptr,
+        kv_indices,
+        k_pe_output,
+        cos_sin_cache,
+        positions,
+        attn_logits,
+        num_kv_split,
+        sm_scale,
+        enable_rope_fusion,
+        k_input,
+        forward_batch,
+        zero_allocator,
+        hidden_states,
+    ):
+        decode_attention_fwd_grouped_rope(
+            q_input,
+            key_cache_buf,
+            val_cache_buf,
+            attn_output,
+            kv_indptr,
+            kv_indices,
+            k_pe_output,
+            self.kv_lora_rank,
+            self.rotary_emb.rotary_dim,
+            cos_sin_cache,
+            positions,
+            attn_logits,
+            num_kv_split,
+            sm_scale,
+            logit_cap=self.attn_mqa.logit_cap,
+            use_rope=enable_rope_fusion,
+            is_neox_style=self.rotary_emb.is_neox_style,
+        )
+
+        if enable_rope_fusion:
+            k_input[..., self.kv_lora_rank :] = k_pe_output
+            forward_batch.token_to_kv_pool.set_kv_buffer(
+                self.attn_mqa, forward_batch.out_cache_loc, k_input, None
+            )
+
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        if _is_hip:
+            # TODO(haishaw): add bmm_fp8 to ROCm
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                attn_output.transpose(0, 1),
+                zero_allocator.allocate(1),
+                dtype=torch.float8_e4m3fn,
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
+
+        return output
+
+    def forward_absorb_fused_mla_rope_cpu_core(
+        self, q_input, k_input, v_input, forward_batch, zero_allocator, hidden_states
+    ):
+        assert self.q_lora_rank is not None and use_intel_amx_backend(
+            self
+        ), "forward_absorb_fused_mla_rope_cpu_core requires q_lora_rank is not None and use_intel_amx_backend"
+
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        # [Note] Align shapes of bmm inputs.
+        # Shapes of inputs:
+        #   q_nope: [M, B, K]
+        #   original self.w_kc: [B, K, N]
+        #   current self.w_kc (which has been converted in PackWeightMethod): [B, N, K]
+
+        # Shapes of inputs to sgl_kernel.cpu.bmm:
+        #   out: [B, M, N]
+        #   mat1: [B, M, K]
+        #   mat2: [B, N, K]
+        B = self.w_vc.size(0)
+        N = self.w_vc.size(1)
+        M = attn_output.size(0)
+        output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
+        attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
+        torch.ops.sgl_kernel.bmm_cpu(
+            attn_bmm_output,
+            attn_output.transpose(0, 1),
+            self.w_vc,
+            True,  # is_vnni
+            None,  # scale
+        )
+        attn_output = output
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
+
+        return output
+
+    def forward_normal_chunked_kv_core(self, q, k, v, forward_batch, hidden_states):
+        has_extend_prefix = forward_batch.extend_prefix_lens_cpu is not None and any(
+            forward_batch.extend_prefix_lens_cpu
+        )
+        # Only initialize the info once
+        if has_extend_prefix and forward_batch.num_prefix_chunks is None:
+            forward_batch.prepare_chunked_prefix_cache_info(q.device)
+            if hasattr(forward_batch.attn_backend, "init_mha_chunk_metadata"):
+                forward_batch.attn_backend.init_mha_chunk_metadata(forward_batch)
+
+        forward_batch.mha_return_lse = has_extend_prefix
+        # Do mha for extended part without prefix
+        forward_batch.set_attn_attend_prefix_cache(False)
+        attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
+
+        # Do mha attention with chunked prefix cache if there are any sequence with prefix
+        if has_extend_prefix:
+            attn_output, lse = attn_output
+            forward_batch.set_attn_attend_prefix_cache(True)
+            attn_output = self._chunked_prefix_attn_mha(
+                q=q,
+                accum_output=attn_output,
+                accum_lse=lse,
+                forward_batch=forward_batch,
+            )
+
+        attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
+
+        if self.g_proj is not None:
+            gate, _ = self.g_proj(hidden_states)
+            gate = F.sigmoid(gate.float()).type_as(hidden_states)
+            if self.gated_attention_proj_granularity_type == "head_wise":
+                # gate shape: [seq_len, head_num]
+                attn_output = (
+                    attn_output.view(-1, self.num_local_heads, self.v_head_dim)
+                    * gate[:, :, None]
+                )
+                attn_output = attn_output.view(
+                    -1, self.num_local_heads * self.v_head_dim
+                )
+            else:
+                # gate shape: [seq_len, head_num*head_dim]
+                attn_output = attn_output * gate
+
+        output, _ = self.o_proj(attn_output)
+
+        return output
+
+    def forward_normal_one_shot_core(self, q, k, v, forward_batch, hidden_states):
+        has_extend_prefix = any(forward_batch.extend_prefix_lens_cpu)
+        # Only initialize the info once
+        if has_extend_prefix and forward_batch.num_prefix_chunks is None:
+            forward_batch.num_prefix_chunks = 0
+            if hasattr(forward_batch.attn_backend, "init_mha_chunk_metadata"):
+                forward_batch.attn_backend.init_mha_chunk_metadata(forward_batch)
+        forward_batch.mha_return_lse = False
+        # Do mha for extended part without prefix
+        forward_batch.set_attn_attend_prefix_cache(False)
+        return self.forward_normal_core(q, k, v, forward_batch, hidden_states)
 
 
 LoraConfig = None
@@ -169,11 +1196,18 @@ class BailingMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
+        config: PretrainedConfig,
         reduce_results=True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        self.use_nGPT = getattr(config, "use_nGPT", False)
+        self.config = config
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -189,6 +1223,16 @@ class BailingMLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
+
+        if self.use_nGPT:
+            self.hidden_size = config.hidden_size
+            self.swv = ScaleUpNorm(
+                intermediate_size=intermediate_size,
+                layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+            )
+
         self.act_fn = SiluAndMul()
 
     def forward(
@@ -198,6 +1242,10 @@ class BailingMLP(nn.Module):
         use_reduce_scatter: bool = False,
     ):
         x, _ = self.gate_up_proj(x)
+
+        if self.use_nGPT:
+            x = self.swv(x)
+
         x = self.act_fn(x)
         x, _ = self.down_proj(
             x,
@@ -214,6 +1262,10 @@ class BailingMoEGate(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+
+        self.use_nGPT = getattr(config, "use_nGPT", False)
+        self.scale_router_input = getattr(config, "scale_router_input", False)
+
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -223,6 +1275,12 @@ class BailingMoEGate(nn.Module):
                 dtype=self.params_dtype,
             ),
         )
+
+        if self.use_nGPT and self.scale_router_input:
+            self.router_init_value = 1.0
+            self.router_init_scaling = config.hidden_size**-0.5
+            self.router_scaling = torch.nn.Parameter(torch.ones(config.hidden_size))
+
         if getattr(config, "moe_router_enable_expert_bias", False):
             self.expert_bias = nn.Parameter(
                 torch.empty((config.num_experts,), dtype=torch.float32),
@@ -247,6 +1305,8 @@ class BailingMoE(nn.Module):
         prefix: str = "moe",
     ):
         super().__init__()
+
+        self.use_nGPT = getattr(config, "use_nGPT", False)
 
         self.layer_id = layer_id
 
@@ -319,6 +1379,8 @@ class BailingMoE(nn.Module):
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=f"{prefix}.experts",
+            use_nGPT=self.use_nGPT,
+            layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
         )
 
         if self.num_shared_experts > 0:
@@ -330,6 +1392,7 @@ class BailingMoE(nn.Module):
             self.shared_experts = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
+                config=config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -374,6 +1437,8 @@ class BailingKDA(KimiDeltaAttention):
                 "short_conv_kernel_size": config.short_conv_kernel_size,
                 "kda_layers": [],
                 "full_attn_layers": [],
+                "use_nGPT": getattr(config, "use_nGPT", False),
+                "value_norm": getattr(config, "value_norm", False),
             }
         )
         super().__init__(
@@ -396,6 +1461,9 @@ class BailingMoEAttention(nn.Module):
         prefix: str = "mha",
     ) -> None:
         super().__init__()
+        self.use_nGPT = getattr(config, "use_nGPT", False)
+        self.value_norm = getattr(config, "value_norm", False)
+        self.config = config
         self.layer_id = layer_id
 
         self.hidden_size = config.hidden_size
@@ -415,7 +1483,7 @@ class BailingMoEAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim**0.5 if self.use_nGPT else self.head_dim**-0.5
 
         self.split_qkv = getattr(config, "using_split_qkv_in_self_attention", False)
         assert not self.split_qkv, "split_qkv is not supported for now"
@@ -433,6 +1501,8 @@ class BailingMoEAttention(nn.Module):
         if self.use_qk_norm:
             self.query_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.key_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            if self.use_nGPT and self.value_norm:
+                self.value_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -489,6 +1559,10 @@ class BailingMoEAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
+            if self.use_nGPT and self.value_norm:
+                v_by_head = v.reshape(-1, self.head_dim)
+                v_by_head = self.value_layernorm(v_by_head)
+                v = v_by_head.view(v.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.dense(attn_output)
@@ -512,6 +1586,24 @@ class BailingMoELinearDecoderLayer(nn.Module):
         # todo nextn
 
         is_kda = True
+        self.use_nGPT = getattr(config, "use_nGPT", False)
+        if self.use_nGPT:
+            self.layer_group_size = getattr(config, "layer_group_size", None)
+            if self.layer_group_size is not None:
+                self.attn_alpha_init_value = (
+                    0.5
+                    if (is_kda and (layer_id + 1) < self.layer_group_size)
+                    else 0.70716 / config.num_hidden_layers
+                )
+            else:
+                self.attn_alpha_init_value = 0.70716 / config.num_hidden_layers
+            self.attn_alpha_init_scaling = config.hidden_size**-0.5
+            self.attn_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
+            self.mlp_alpha_init_value = 0.70716 / config.num_hidden_layers
+            self.mlp_alpha_init_scaling = config.hidden_size**-0.5
+            self.mlp_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
+        self.config = config
+
         if config.attention_type == 0:  # Linear layer
             self.attention = BailingKDA(
                 layer_id=self.layer_id,
@@ -538,7 +1630,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     max_position_embeddings=262144,
                     quant_config=quant_config,
                     layer_id=layer_id,
-                    reduce_results=False,
+                    reduce_results=True,
                     prefix=add_prefix("attention", prefix),
                     alt_stream=alt_stream,
                     skip_rope=(
@@ -565,10 +1657,14 @@ class BailingMoELinearDecoderLayer(nn.Module):
         is_previous_moe_layer = not (self.expert_num == 1) and (
             self.layer_id - 1 >= config.first_k_dense_replace
         )
+        is_next_layer_sparse = not (self.expert_num == 1) and (
+            self.layer_id + 1 >= config.first_k_dense_replace
+        )
         if self.expert_num == 1:
             self.mlp = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
+                config=config,
                 quant_config=quant_config,
                 prefix=prefix,
             )
@@ -586,6 +1682,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 self.mlp = BailingMLP(
                     hidden_size=self.hidden_size,
                     intermediate_size=config.intermediate_size,
+                    config=config,
                     quant_config=quant_config,
                     prefix=prefix,
                 )
@@ -598,8 +1695,10 @@ class BailingMoELinearDecoderLayer(nn.Module):
             num_layers=config.num_hidden_layers,
             is_layer_sparse=is_moe_layer,
             is_previous_layer_sparse=is_previous_moe_layer,
+            is_next_layer_sparse=is_next_layer_sparse,
         )
 
+    @torch.inference_mode()
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -634,9 +1733,25 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     positions=positions,
                     forward_batch=forward_batch,
                 )
+        if self.use_nGPT:
+            hidden_states, residual = apply_hyper_spherical_fusion(
+                hidden_states,
+                residual,
+                self.attn_alpha,
+                getattr(self.config, "layernorm_epsilon", 1e-6),
+            )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+
+        if self.use_nGPT:
+            hidden_states, residual = apply_hyper_spherical_fusion(
+                hidden_states,
+                residual,
+                self.mlp_alpha,
+                getattr(self.config, "layernorm_epsilon", 1e-6),
+            )
+
         return hidden_states, residual
 
     @staticmethod
@@ -658,6 +1773,7 @@ class BailingMoELinearModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.use_nGPT = getattr(config, "use_nGPT", False)
         self.pp_group = get_pp_group()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -764,10 +1880,16 @@ class BailingMoELinearModel(nn.Module):
             )
         else:
             if not forward_batch.forward_mode.is_idle():
-                if residual is None:
-                    hidden_states = self.norm(hidden_states)
+                if self.use_nGPT:
+                    hidden_states = hidden_states + residual
+                    hidden_states = l2norm(
+                        hidden_states, getattr(self.config, "layernorm_epsilon", 1e-6)
+                    )
                 else:
-                    hidden_states, _ = self.norm(hidden_states, residual)
+                    if residual is None:
+                        hidden_states = self.norm(hidden_states)
+                    else:
+                        hidden_states, _ = self.norm(hidden_states, residual)
             return hidden_states
 
 
@@ -781,6 +1903,19 @@ class BailingMoeV3ForCausalLM(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        self.use_nGPT = getattr(config, "use_nGPT", False)
+        if self.use_nGPT:
+            self.finalnorm_init_value = 1.0
+            self.finalnorm_init_scaling = config.hidden_size**-0.5
+            tp_size = get_tensor_model_parallel_world_size()
+            self.finalnorm = torch.nn.Parameter(
+                torch.ones(divide(config.vocab_size, tp_size), dtype=torch.float32)
+            )
+            set_weight_attrs(
+                self.finalnorm, {"weight_loader": sharded_weight_loader(0)}
+            )
+
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
@@ -790,7 +1925,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             self.lm_head = (
-                self.word_embeddings
+                self.model.word_embeddings
                 if config.tie_word_embeddings
                 else ParallelLMHead(
                     config.vocab_size,
@@ -813,6 +1948,41 @@ class BailingMoeV3ForCausalLM(nn.Module):
         return self.model.end_layer
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
+        # nGPT fusion
+        if self.use_nGPT:
+            # fuse finalnorm into lm_head weight
+            if self.pp_group.is_last_rank and self.use_nGPT:
+                self.finalnorm.data.mul_(
+                    self.finalnorm_init_value / self.finalnorm_init_scaling
+                )
+                self.lm_head.weight.data.mul_(
+                    self.finalnorm.unsqueeze(1).to(self.lm_head.weight.dtype)
+                )
+                logger.info("Fused finalnorm into lm_head weight.")
+
+            for i in range(self.start_layer, self.end_layer):
+                layer = self.model.layers[i]
+
+                # fuse router_scaling into expert weights
+                mlp = layer.mlp
+                if isinstance(mlp, BailingMoE):
+                    gate = mlp.gate
+                    if gate.scale_router_input:
+                        router_scaling = (
+                            gate.router_scaling
+                            * (gate.router_init_value / gate.router_init_scaling)
+                        ).to(gate.weight.dtype)
+                        gate.weight.data.mul_(router_scaling.unsqueeze(0))
+
+                # calculate attn_alpha and mlp_alpha
+                attn_alpha = layer.attn_alpha
+                attn_alpha.data.mul_(
+                    layer.attn_alpha_init_value / layer.attn_alpha_init_scaling
+                )
+                mlp_alpha = layer.mlp_alpha
+                mlp_alpha.data.mul_(
+                    layer.mlp_alpha_init_value / layer.mlp_alpha_init_scaling
+                )
 
         # Perform post-processing after loading weights
         if is_nextn:
@@ -1091,6 +2261,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def get_model_config_for_expert_location(cls, config):
         num_groups = getattr(config, "n_group", 0)
         from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+
         return ModelConfigForExpertLocation(
             num_layers=config.num_hidden_layers,
             num_logical_experts=config.num_experts,
@@ -1107,8 +2278,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader", self.weight_direct_load)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             if "A_log" in name:
-                self.weight_direct_load(param, loaded_weight[None, None, :, None])
-                return
+                # Temporary use this way
+                # As our A_log param's shape is different from kimi's
+                loaded_weight = loaded_weight[None, None, :, None]
             weight_loader(param, loaded_weight)
             return
 
