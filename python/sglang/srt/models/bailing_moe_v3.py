@@ -1448,6 +1448,7 @@ class BailingKDA(KimiDeltaAttention):
             quant_config,
             prefix=prefix,
             rms_norm_eps=1e-6,
+            kda_use_lora=config.use_kda_lora,
         )
 
 

@@ -646,8 +646,6 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
         A_log = kwargs["A_log"]
         dt_bias = kwargs["dt_bias"]
         b_proj = kwargs["b_proj"]
-        f_a_proj = kwargs["f_a_proj"]
-        f_b_proj = kwargs["f_b_proj"]
         hidden_states = kwargs["hidden_states"]
         head_dim = kwargs["head_dim"]
         layer_id = kwargs["layer_id"]
@@ -693,7 +691,13 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
 
         beta = b_proj(hidden_states)[0].float().sigmoid()
 
-        g = f_b_proj(f_a_proj(hidden_states)[0])[0]
+        if kwargs["kda_use_lora"]:
+            f_a_proj = kwargs["f_a_proj"]
+            f_b_proj = kwargs["f_b_proj"]
+            g = f_b_proj(f_a_proj(hidden_states)[0])[0]
+        else:
+            f_proj = kwargs["f_proj"]
+            g = f_proj(hidden_states)[0]
         g = fused_kda_gate(g, A_log, head_dim, g_bias=dt_bias)
 
         beta = beta.unsqueeze(0)
@@ -744,8 +748,6 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
         A_log = kwargs["A_log"]
         dt_bias = kwargs["dt_bias"]
         b_proj = kwargs["b_proj"]
-        f_a_proj = kwargs["f_a_proj"]
-        f_b_proj = kwargs["f_b_proj"]
         hidden_states = kwargs["hidden_states"]
         head_dim = kwargs["head_dim"]
         layer_id = kwargs["layer_id"]
@@ -810,7 +812,13 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
 
         beta = b_proj(hidden_states)[0].float().sigmoid()
 
-        g = f_b_proj(f_a_proj(hidden_states)[0])[0]
+        if kwargs["kda_use_lora"]:
+            f_a_proj = kwargs["f_a_proj"]
+            f_b_proj = kwargs["f_b_proj"]
+            g = f_b_proj(f_a_proj(hidden_states)[0])[0]
+        else:
+            f_proj = kwargs["f_proj"]
+            g = f_proj(hidden_states)[0]
         g = fused_kda_gate(g, A_log, head_dim, g_bias=dt_bias)
 
         beta = beta.unsqueeze(0)

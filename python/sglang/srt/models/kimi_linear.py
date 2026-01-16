@@ -167,6 +167,7 @@ class KimiDeltaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         rms_norm_eps: float = 1e-5,
         prefix: str = "",
+        kda_use_lora: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -182,6 +183,7 @@ class KimiDeltaAttention(nn.Module):
 
         projection_size = self.head_dim * self.num_heads
         self.conv_size = config.linear_attn_config["short_conv_kernel_size"]
+        self.kda_use_lora = kda_use_lora
 
         self.q_proj = ColumnParallelLinear(
             self.hidden_size,
@@ -205,21 +207,31 @@ class KimiDeltaAttention(nn.Module):
             prefix=f"{prefix}.v_proj",
         )
 
-        self.f_a_proj = ReplicatedLinear(
-            self.hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.f_a_proj",
-        )
+        if kda_use_lora:
+            self.f_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.f_a_proj",
+            )
 
-        self.f_b_proj = ColumnParallelLinear(
-            self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.f_b_proj",
-        )
+            self.f_b_proj = ColumnParallelLinear(
+                self.head_dim,
+                projection_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.f_b_proj",
+            )
+        else:
+            self.f_proj = ColumnParallelLinear(
+                self.hidden_size,
+                projection_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.f_proj",
+            )
+
         self.dt_bias = nn.Parameter(
             torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32)
         )
@@ -268,20 +280,30 @@ class KimiDeltaAttention(nn.Module):
         )
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
-        self.g_a_proj = ReplicatedLinear(
-            self.hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.g_a_proj",
-        )
-        self.g_b_proj = ColumnParallelLinear(
-            self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.g_b_proj",
-        )
+        if kda_use_lora:
+            self.g_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.g_a_proj",
+            )
+            self.g_b_proj = ColumnParallelLinear(
+                self.head_dim,
+                projection_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.g_b_proj",
+            )
+        else:
+            self.g_proj = ColumnParallelLinear(
+                self.hidden_size,
+                projection_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.g_proj",
+            )
+
         self.o_norm = FusedRMSNormGated(
             self.head_dim, eps=rms_norm_eps, activation="sigmoid"
         )
@@ -314,6 +336,14 @@ class KimiDeltaAttention(nn.Module):
             self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
         )
 
+        if self.kda_use_lora:
+            f_proj_args = {
+                "f_a_proj": self.f_a_proj,
+                "f_b_proj": self.f_b_proj,
+            }
+        else:
+            f_proj_args = {"f_proj": self.f_proj}
+
         kwargs = {
             "q_proj_states": q_proj_states,
             "k_proj_states": k_proj_states,
@@ -326,13 +356,12 @@ class KimiDeltaAttention(nn.Module):
             "v_conv_bias": self.v_conv1d.bias,
             "dt_bias": self.dt_bias,
             "b_proj": self.b_proj,
-            "f_a_proj": self.f_a_proj,
-            "f_b_proj": self.f_b_proj,
             "A_log": self.A_log,
             "head_dim": self.head_dim,
             "hidden_states": hidden_states,
             "layer_id": self.layer_idx,
-        }
+            "kda_use_lora": self.kda_use_lora,
+        } | f_proj_args
 
         core_attn_out = forward_batch.attn_backend.forward(
             q=None,
@@ -343,7 +372,10 @@ class KimiDeltaAttention(nn.Module):
             **kwargs,
         )
 
-        g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+        if self.kda_use_lora:
+            g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+        else:
+            g_proj_states = self.g_proj(hidden_states)[0]
         g = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
         core_attn_out = self.o_norm(core_attn_out, g)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
