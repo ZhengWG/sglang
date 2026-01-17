@@ -184,9 +184,9 @@ from sglang.srt.utils import (
     configure_logger,
     freeze_gc,
     get_available_gpu_memory,
-    get_numa_node,
     get_bool_env_var,
     get_int_env_var,
+    get_numa_node,
     get_zmq_socket,
     kill_itself_when_parent_died,
     numa_bind_to_node,
@@ -591,6 +591,7 @@ class Scheduler(
         self.is_hybrid_ssm = (
             self.tp_worker.model_runner.hybrid_gdn_config is not None
             or self.tp_worker.model_runner.mamba2_config is not None
+            or self.tp_worker.model_runner.kimi_linear_config is not None
         )
 
         if self.is_hybrid_swa:

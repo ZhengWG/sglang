@@ -167,7 +167,7 @@ class KimiDeltaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         rms_norm_eps: float = 1e-5,
         prefix: str = "",
-        kda_use_lora: bool = True,
+        no_kda_lora: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -183,7 +183,7 @@ class KimiDeltaAttention(nn.Module):
 
         projection_size = self.head_dim * self.num_heads
         self.conv_size = config.linear_attn_config["short_conv_kernel_size"]
-        self.kda_use_lora = kda_use_lora
+        self.no_kda_lora = no_kda_lora
 
         self.q_proj = ColumnParallelLinear(
             self.hidden_size,
@@ -207,7 +207,7 @@ class KimiDeltaAttention(nn.Module):
             prefix=f"{prefix}.v_proj",
         )
 
-        if kda_use_lora:
+        if not no_kda_lora:
             self.f_a_proj = ReplicatedLinear(
                 self.hidden_size,
                 self.head_dim,
@@ -280,7 +280,7 @@ class KimiDeltaAttention(nn.Module):
         )
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
-        if kda_use_lora:
+        if not no_kda_lora:
             self.g_a_proj = ReplicatedLinear(
                 self.hidden_size,
                 self.head_dim,
@@ -336,7 +336,7 @@ class KimiDeltaAttention(nn.Module):
             self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
         )
 
-        if self.kda_use_lora:
+        if not self.no_kda_lora:
             f_proj_args = {
                 "f_a_proj": self.f_a_proj,
                 "f_b_proj": self.f_b_proj,
@@ -360,7 +360,7 @@ class KimiDeltaAttention(nn.Module):
             "head_dim": self.head_dim,
             "hidden_states": hidden_states,
             "layer_id": self.layer_idx,
-            "kda_use_lora": self.kda_use_lora,
+            "no_kda_lora": self.no_kda_lora,
         } | f_proj_args
 
         core_attn_out = forward_batch.attn_backend.forward(
@@ -372,7 +372,7 @@ class KimiDeltaAttention(nn.Module):
             **kwargs,
         )
 
-        if self.kda_use_lora:
+        if not self.no_kda_lora:
             g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         else:
             g_proj_states = self.g_proj(hidden_states)[0]

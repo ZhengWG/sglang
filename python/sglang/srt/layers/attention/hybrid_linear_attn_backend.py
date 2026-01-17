@@ -691,7 +691,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
 
         beta = b_proj(hidden_states)[0].float().sigmoid()
 
-        if kwargs["kda_use_lora"]:
+        if not kwargs["no_kda_lora"]:
             f_a_proj = kwargs["f_a_proj"]
             f_b_proj = kwargs["f_b_proj"]
             g = f_b_proj(f_a_proj(hidden_states)[0])[0]
@@ -812,7 +812,7 @@ class KimiLinearAttnBackend(MambaAttnBackendBase):
 
         beta = b_proj(hidden_states)[0].float().sigmoid()
 
-        if kwargs["kda_use_lora"]:
+        if not kwargs["no_kda_lora"]:
             f_a_proj = kwargs["f_a_proj"]
             f_b_proj = kwargs["f_b_proj"]
             g = f_b_proj(f_a_proj(hidden_states)[0])[0]
