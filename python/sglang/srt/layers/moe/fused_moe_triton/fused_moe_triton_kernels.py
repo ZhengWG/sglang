@@ -514,7 +514,10 @@ def fused_moe_kernel(
             )
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+            if a_desc is not None:
+                a_scale_ptrs = a_scale_ptr + offs_token_id * stride_asm
+            else:
+                a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
             a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
         # tensor-wise
         else:

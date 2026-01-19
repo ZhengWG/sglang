@@ -6,7 +6,8 @@ import os
 import time
 from contextlib import nullcontext
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from functools import partial
+from typing import Any, Callable, Dict, List, Tuple
 
 import ray
 import torch
@@ -112,9 +113,9 @@ class KernelWrapper:
         return time_cost
 
 
-def load_topk_ids(topk_ids_dir, i: int):
-    num_layers = 61
-    dense_layers = 3
+def load_topk_ids(topk_ids_dir, first_k_dense_replace, num_hidden_layers, i: int):
+    num_layers = num_hidden_layers
+    dense_layers = first_k_dense_replace
     moe_layers = num_layers - dense_layers
     return torch.load(
         f"{topk_ids_dir}/topk_ids_layer{i % moe_layers + dense_layers}_idx{i // moe_layers}.pt"
@@ -132,6 +133,7 @@ def benchmark_config(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
+    per_channel_quant: bool,
     topk_ids_list,
     block_shape: List[int] = None,
     num_iters: int = 100,
@@ -277,7 +279,7 @@ def benchmark_config(
             B=w1,
             bias=None,
             C=intermediate_cache1,
-            A_scale=None,
+            A_scale=a1_scale,
             B_scale=w1_scale,
             B_zp=None,
             topk_weights=topk_output_.topk_weights,
@@ -290,7 +292,7 @@ def benchmark_config(
             use_int8_w8a8=False,
             use_int8_w8a16=False,
             use_int4_w4a16=False,
-            per_channel_quant=False,
+            per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             b_use_tma=moe_use_tma,
             c_sorted=moe_use_tma,
@@ -316,7 +318,7 @@ def benchmark_config(
             use_int8_w8a8=False,
             use_int8_w8a16=False,
             use_int4_w4a16=False,
-            per_channel_quant=False,
+            per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             a_use_tma=moe_use_tma,
             b_use_tma=moe_use_tma,
@@ -417,12 +419,13 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
+        per_channel_quant: bool,
         block_shape: List[int],
         cfg: Dict[str, int],
-        topk_ids_dir: str,
+        load_topk_ids_func: Callable,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(0)
-        topk_ids_list = [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+        topk_ids_list = [load_topk_ids_func(i) for i in range(100)]
         with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             kernel_time = benchmark_config(
                 cfg,
@@ -435,6 +438,7 @@ class BenchmarkWorker:
                 use_fp8_w8a8,
                 use_int8_w8a8,
                 use_int8_w8a16,
+                per_channel_quant,
                 topk_ids_list,
                 block_shape,
             )
@@ -451,13 +455,14 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
+        per_channel_quant: bool,
         block_shape: List[int],
         search_space: List[Dict[str, int]],
-        topk_ids_dir: str,
+        load_topk_ids_func: Callable,
     ) -> Dict[str, int]:
         trace0 = BestConfigTrace("kernel0", down_moe=False)
         trace1 = BestConfigTrace("kernel1", down_moe=True)
-        topk_ids_list = [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+        topk_ids_list = [load_topk_ids_func(i) for i in range(100)]
 
         with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             for config in tqdm(search_space):
@@ -473,6 +478,7 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a8,
                         use_int8_w8a16,
+                        per_channel_quant,
                         topk_ids_list,
                         block_shape,
                         num_iters=100,
@@ -516,9 +522,10 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
+        per_channel_quant: bool,
         block_shape: List[int],
         cmp_config_files: List[str],
-        topk_ids_dir: str,
+        load_topk_ids_func: Callable,
     ):
         # compare performance of different configs
         cmp_configs = []
@@ -528,7 +535,7 @@ class BenchmarkWorker:
         for i, file in enumerate(cmp_config_files):
             print(f"config {i}: {file}")
 
-        topk_ids_list = [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+        topk_ids_list = [load_topk_ids_func(i) for i in range(100)]
         torch.cuda.manual_seed_all(0)
         with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             for bs in num_tokens:
@@ -550,6 +557,7 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a8,
                         use_int8_w8a16,
+                        per_channel_quant,
                         topk_ids_list,
                         block_shape,
                     )
@@ -569,6 +577,7 @@ def save_configs_sep(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
+    per_channel_quant: bool,
     block_shape: List[int],
     down_moe: bool = False,
 ) -> None:
@@ -586,6 +595,7 @@ def save_configs_sep(
         shard_intermediate_size // 2,
         dtype_str,
         block_shape,
+        per_channel_quant=per_channel_quant,
         down_moe=down_moe,
     )
 
@@ -612,12 +622,19 @@ def main(args: argparse.Namespace):
     shard_intermediate_size = model_config["shard_intermediate_size"]
     dtype = model_config["dtype"]
     block_shape = model_config["block_shape"]
+    first_k_dense_replace = model_config["first_k_dense_replace"]
+    num_hidden_layers = model_config["num_hidden_layers"]
 
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a8 = args.dtype == "int8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
+    per_channel_quant = args.per_channel_quant
 
     topk_ids_dir = args.topk_ids_dir
+    load_topk_ids_func = partial(
+        load_topk_ids, topk_ids_dir, first_k_dense_replace, num_hidden_layers
+    )
+
     if args.batch_size is None:
         batch_sizes = get_default_batch_sizes()
         batch_sizes.reverse()
@@ -636,9 +653,10 @@ def main(args: argparse.Namespace):
             use_fp8_w8a8,
             use_int8_w8a8,
             use_int8_w8a16,
+            per_channel_quant,
             block_shape,
             args.cmp_configs,
-            topk_ids_dir,
+            load_topk_ids_func,
         )
         return
 
@@ -656,9 +674,10 @@ def main(args: argparse.Namespace):
                 use_fp8_w8a8,
                 use_int8_w8a8,
                 use_int8_w8a16,
+                per_channel_quant,
                 block_shape,
                 search_space,
-                topk_ids_dir,
+                load_topk_ids_func,
             )
         else:
             cfg = {
@@ -680,9 +699,10 @@ def main(args: argparse.Namespace):
                 use_fp8_w8a8,
                 use_int8_w8a8,
                 use_int8_w8a16,
+                per_channel_quant,
                 block_shape,
                 cfg,
-                topk_ids_dir,
+                load_topk_ids_func,
             )
             print(f"{t0=}, {t0_tma=}, {t1=}, {t1_tma=}")
         return
@@ -722,7 +742,7 @@ def main(args: argparse.Namespace):
         use_fp8_w8a8,
         use_int8_w8a8,
         use_int8_w8a16,
-        False,
+        per_channel_quant,
         block_shape,
     )
     print(
@@ -743,9 +763,10 @@ def main(args: argparse.Namespace):
                 use_fp8_w8a8,
                 use_int8_w8a8,
                 use_int8_w8a16,
+                per_channel_quant,
                 block_shape,
                 search_space,
-                topk_ids_dir,
+                load_topk_ids_func,
             )
             for batch_size in batch_sizes
         ],
@@ -770,6 +791,7 @@ def main(args: argparse.Namespace):
         use_fp8_w8a8,
         use_int8_w8a8,
         use_int8_w8a16,
+        per_channel_quant,
         block_shape,
     )
 
@@ -784,6 +806,7 @@ def main(args: argparse.Namespace):
         use_fp8_w8a8,
         use_int8_w8a8,
         use_int8_w8a16,
+        per_channel_quant,
         block_shape,
         down_moe=True,
     )
@@ -811,6 +834,7 @@ if __name__ == "__main__":
     parser.add_argument("--configs", type=int, nargs="+", required=False)
     parser.add_argument("--topk-ids-dir", type=str, required=True)
     parser.add_argument("--cmp-configs", type=str, nargs="+", required=False)
+    parser.add_argument("--per-channel-quant", action="store_true")
     args = parser.parse_args()
 
     main(args)
