@@ -15,7 +15,7 @@ from sglang.srt.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
-from sglang.srt.layers.attention.fla.kda import FusedRMSNormGated
+from sglang.srt.layers.attention.fla.kda import FusedRMSNormGated, fused_kda_gate
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -336,13 +336,16 @@ class KimiDeltaAttention(nn.Module):
             self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
         )
 
+        beta = self.b_proj(hidden_states)[0].float().sigmoid()
         if not self.no_kda_lora:
-            f_proj_args = {
-                "f_a_proj": self.f_a_proj,
-                "f_b_proj": self.f_b_proj,
-            }
+            forget_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
         else:
-            f_proj_args = {"f_proj": self.f_proj}
+            forget_gate = self.f_proj(hidden_states)[0]
+        forget_gate = fused_kda_gate(
+            forget_gate, self.A_log, self.head_dim, g_bias=self.dt_bias
+        )
+        beta = beta.unsqueeze(0)
+        forget_gate = forget_gate.unsqueeze(0)
 
         kwargs = {
             "q_proj_states": q_proj_states,
@@ -354,14 +357,11 @@ class KimiDeltaAttention(nn.Module):
             "q_conv_bias": self.q_conv1d.bias,
             "k_conv_bias": self.k_conv1d.bias,
             "v_conv_bias": self.v_conv1d.bias,
-            "dt_bias": self.dt_bias,
-            "b_proj": self.b_proj,
-            "A_log": self.A_log,
             "head_dim": self.head_dim,
-            "hidden_states": hidden_states,
             "layer_id": self.layer_idx,
-            "no_kda_lora": self.no_kda_lora,
-        } | f_proj_args
+            "beta": beta,
+            "gate": forget_gate,
+        }
 
         core_attn_out = forward_batch.attn_backend.forward(
             q=None,
@@ -376,8 +376,8 @@ class KimiDeltaAttention(nn.Module):
             g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         else:
             g_proj_states = self.g_proj(hidden_states)[0]
-        g = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
-        core_attn_out = self.o_norm(core_attn_out, g)
+        norm_gate = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
+        core_attn_out = self.o_norm(core_attn_out, norm_gate)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
 
         return self.o_proj(core_attn_out)[0]
