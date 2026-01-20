@@ -141,6 +141,8 @@ def get_model_config(
         "dtype": config.torch_dtype,
         "block_shape": block_shape,
         "architecture": architecture,
+        "first_k_dense_replace": getattr(config, "first_k_dense_replace", 0),
+        "num_hidden_layers": config.num_hidden_layers,
     }
 
 
