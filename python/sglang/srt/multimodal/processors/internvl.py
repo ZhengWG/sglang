@@ -329,14 +329,25 @@ class InternVLProcessor(BaseMultimodalProcessor):
         # ----- Images -> tiles -----
         num_patches_list: List[int] = []
         pixel_values_list: List[torch.Tensor] = []
+        image_sizes_list: List[tuple] = []  # Store (1, width, height) for each image
+        video_sizes_list: List[tuple] = (
+            []
+        )  # Store (num_frames, width, height) for each video
 
         for image in base_output.images:
+            # Get original image size
             if isinstance(image, Image.Image):
+                original_size = (1, image.size[0], image.size[1])  # (width, height)
                 img_np = np.array(image.convert("RGB"))
                 tensor = (
                     torch.from_numpy(img_np).permute(2, 0, 1).cuda().float() / 255.0
                 )
             else:
+                try:
+                    _, h, w = image.shape
+                    original_size = (1, w, h)
+                except:
+                    original_size = (1, 0, 0)
                 tensor = image.cuda()
 
             tensor = (tensor - mean) / std
@@ -345,6 +356,7 @@ class InternVLProcessor(BaseMultimodalProcessor):
             )
             pixel_values_list.append(tiles)
             num_patches_list.append(int(tiles.shape[0]))
+            image_sizes_list.append(original_size)
 
         if image_data and not pixel_values_list:
             raise ValueError(
@@ -370,6 +382,8 @@ class InternVLProcessor(BaseMultimodalProcessor):
             image_tile_cnt=int(sum(num_patches_list)) if num_patches_list else 0,
         )
 
+        frame_width = 0
+        frame_height = 0
         if base_output.videos and num_frames > 0 and self.video_token_id is not None:
             for video in base_output.videos:
                 vr = (
@@ -393,6 +407,9 @@ class InternVLProcessor(BaseMultimodalProcessor):
                         if hasattr(frame, "asnumpy")
                         else np.array(frame)
                     )
+                    if frame_width == 0 or frame_height == 0:
+                        frame_width = img_np.shape[1]
+                        frame_height = img_np.shape[0]
                     frame_t = (
                         torch.from_numpy(img_np).permute(2, 0, 1).cuda().float() / 255.0
                     )
@@ -407,6 +424,7 @@ class InternVLProcessor(BaseMultimodalProcessor):
                     per_video_tiles.append(tiles)
                     per_video_patch_cnt.append(int(tiles.shape[0]))
 
+                video_sizes_list.append((len(frame_indices), frame_width, frame_height))
                 pv = torch.cat(per_video_tiles, dim=0)
                 video_pixel_values.append(pv)
                 video_patch_lists.append(per_video_patch_cnt)
@@ -479,17 +497,18 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if image_tensor is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=image_tensor, modality=Modality.IMAGE, offsets=image_offsets
-                )
+            image_item = MultimodalDataItem(
+                feature=image_tensor, modality=Modality.IMAGE, offsets=image_offsets
             )
+            # Add image sizes to model_specific_data
+            image_item.model_specific_data["image_sizes"] = image_sizes_list
+            items.append(image_item)
         if video_tensor is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=video_tensor, modality=Modality.VIDEO, offsets=video_offsets
-                )
+            video_item = MultimodalDataItem(
+                feature=video_tensor, modality=Modality.VIDEO, offsets=video_offsets
             )
+            video_item.model_specific_data["video_sizes"] = video_sizes_list
+            items.append(video_item)
 
         return {
             "input_ids": input_ids,
@@ -535,14 +554,25 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         num_patches_list: List[int] = []
         pixel_values_list: List[torch.Tensor] = []
+        image_sizes_list: List[tuple] = []  # Store (1, width, height) for each image
+        video_sizes_list: List[tuple] = (
+            []
+        )  # Store (num_frames, width, height) for each video
 
         for image in base_output.images:
+            # Get original image size
             if isinstance(image, Image.Image):
+                original_size = image.size
                 img_np = np.array(image.convert("RGB"))
                 tensor = (
                     torch.from_numpy(img_np).permute(2, 0, 1).cuda().float() / 255.0
                 )
             else:
+                try:
+                    _, h, w = image.shape
+                    original_size = (1, w, h)
+                except:
+                    original_size = (1, 0, 0)
                 tensor = image.cuda()
 
             tensor = (tensor - mean) / std
@@ -551,6 +581,7 @@ class InternVLProcessor(BaseMultimodalProcessor):
             )
             pixel_values_list.append(tiles)
             num_patches_list.append(int(tiles.shape[0]))
+            image_sizes_list.append(original_size)
 
         if image_data and not pixel_values_list:
             raise ValueError(
@@ -592,11 +623,12 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if pixel_values is not None:
-            items.append(
-                MultimodalDataItem(
-                    feature=pixel_values, modality=Modality.IMAGE, offsets=image_offsets
-                )
+            image_item = MultimodalDataItem(
+                feature=pixel_values, modality=Modality.IMAGE, offsets=image_offsets
             )
+            # Add image sizes to model_specific_data
+            image_item.model_specific_data["image_sizes"] = image_sizes_list
+            items.append(image_item)
 
         return {
             "input_ids": input_ids,

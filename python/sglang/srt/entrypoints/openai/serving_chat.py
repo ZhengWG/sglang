@@ -213,7 +213,9 @@ class OpenAIServingChat(OpenAIServingBase):
 
         max_output_tokens = request.max_completion_tokens or request.max_tokens
         server_context_length = self.tokenizer_manager.server_args.context_length
-        enable_output_truncate = self.tokenizer_manager.server_args.allow_auto_output_truncate
+        enable_output_truncate = (
+            self.tokenizer_manager.server_args.allow_auto_output_truncate
+        )
         if (
             max_output_tokens
             and server_context_length
@@ -629,7 +631,9 @@ class OpenAIServingChat(OpenAIServingBase):
                 index = content.get("index", 0)
 
                 prompt_tokens[index] = content["meta_info"].get("prompt_tokens", 0)
-                completion_tokens[index] = content["meta_info"].get("completion_tokens", 0)
+                completion_tokens[index] = content["meta_info"].get(
+                    "completion_tokens", 0
+                )
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
 
@@ -655,15 +659,27 @@ class OpenAIServingChat(OpenAIServingBase):
                 # First chunk with role
                 if is_firsts.get(index, True):
 
-                    first_chunk_padding = self.tokenizer_manager.server_args.reasoning_padding
+                    first_chunk_padding = (
+                        self.tokenizer_manager.server_args.reasoning_padding
+                    )
 
-                    if (self.thinking_trigger and
-                        not self._get_enable_thinking_from_request(request, self.thinking_trigger)):
+                    if (
+                        self.thinking_trigger
+                        and not self._get_enable_thinking_from_request(
+                            request, self.thinking_trigger
+                        )
+                    ):
                         first_chunk_padding = ""
-                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
+                    first_chunk_content = (
+                        f"{first_chunk_padding}\n" if first_chunk_padding else ""
+                    )
 
                     is_firsts[index] = False
-                    delta = DeltaMessage(role="assistant", content=first_chunk_content, reasoning_content="")
+                    delta = DeltaMessage(
+                        role="assistant",
+                        content=first_chunk_content,
+                        reasoning_content="",
+                    )
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=delta,
@@ -684,14 +700,18 @@ class OpenAIServingChat(OpenAIServingBase):
                         chunk.usage = UsageProcessor.calculate_token_usage(
                             prompt_tokens=prompt_tokens.get(index, 0),
                             completion_tokens=0,
-                            cached_tokens=UsageProcessor._details_if_cached(
-                                cached_tokens.get(index, 0)
-                            ) if cache_report else None
+                            cached_tokens=(
+                                UsageProcessor._details_if_cached(
+                                    cached_tokens.get(index, 0)
+                                )
+                                if cache_report
+                                else None
+                            ),
                         )
                     yield f"data: {chunk.model_dump_json()}\n\n"
 
                 stream_buffer = stream_buffers.get(index, "")
-                delta = content["text"][len(stream_buffer):]
+                delta = content["text"][len(stream_buffer) :]
                 stream_buffers[index] = stream_buffer + delta
 
                 # Handle reasoning content
@@ -702,7 +722,11 @@ class OpenAIServingChat(OpenAIServingBase):
                     if reasoning_text:
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
-                            delta=DeltaMessage(role="assistant", content="", reasoning_content=reasoning_text),
+                            delta=DeltaMessage(
+                                role="assistant",
+                                content="",
+                                reasoning_content=reasoning_text,
+                            ),
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
@@ -720,9 +744,13 @@ class OpenAIServingChat(OpenAIServingBase):
                             chunk.usage = UsageProcessor.calculate_token_usage(
                                 prompt_tokens=prompt_tokens.get(index, 0),
                                 completion_tokens=completion_tokens.get(index, 0),
-                                cached_tokens=UsageProcessor._details_if_cached(
-                                    cached_tokens.get(index, 0)
-                                ) if cache_report else None
+                                cached_tokens=(
+                                    UsageProcessor._details_if_cached(
+                                        cached_tokens.get(index, 0)
+                                    )
+                                    if cache_report
+                                    else None
+                                ),
                             )
 
                         yield f"data: {chunk.model_dump_json()}\n\n"
@@ -778,9 +806,13 @@ class OpenAIServingChat(OpenAIServingBase):
                             chunk.usage = UsageProcessor.calculate_token_usage(
                                 prompt_tokens=prompt_tokens.get(index, 0),
                                 completion_tokens=completion_tokens.get(index, 0),
-                                cached_tokens=UsageProcessor._details_if_cached(
-                                    cached_tokens.get(index, 0)
-                                ) if cache_report else None
+                                cached_tokens=(
+                                    UsageProcessor._details_if_cached(
+                                        cached_tokens.get(index, 0)
+                                    )
+                                    if cache_report
+                                    else None
+                                ),
                             )
 
                         yield f"data: {chunk.model_dump_json()}\n\n"
@@ -822,9 +854,11 @@ class OpenAIServingChat(OpenAIServingBase):
                     finish_reason_chunk.usage = UsageProcessor.calculate_token_usage(
                         prompt_tokens=prompt_tokens.get(idx, 0),
                         completion_tokens=completion_tokens.get(idx, 0),
-                        cached_tokens=UsageProcessor._details_if_cached(
-                            cached_tokens.get(idx, 0)
-                        ) if self.tokenizer_manager.server_args.enable_cache_report else None
+                        cached_tokens=(
+                            UsageProcessor._details_if_cached(cached_tokens.get(idx, 0))
+                            if self.tokenizer_manager.server_args.enable_cache_report
+                            else None
+                        ),
                     )
                 yield f"data: {finish_reason_chunk.model_dump_json(exclude_none=True)}\n\n"
 
@@ -862,18 +896,28 @@ class OpenAIServingChat(OpenAIServingBase):
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
                 )
+                # Build metadata
+                metadata = {
+                    "weight_version": content["meta_info"].get("weight_version", ""),
+                    "e2e_latency": content["meta_info"].get("e2e_latency", 0.0) * 1000,
+                    "ttft_latency": content["meta_info"].get("ttft_latency", 0.0)
+                    * 1000,
+                    "queue_latency": content["meta_info"].get("queue_time", 0.0) * 1000,
+                }
+                if content["meta_info"].get("mm_meta_infos", []):
+                    metadata["mm_meta_infos"] = content["meta_info"]["mm_meta_infos"]
+                if content["meta_info"].get("total_pixels", None) is not None:
+                    metadata["total_pixels"] = content["meta_info"]["total_pixels"]
+                if content["meta_info"].get("total_vision_tokens", None) is not None:
+                    metadata["total_vision_tokens"] = content["meta_info"]["total_vision_tokens"]
+
                 usage_chunk = ChatCompletionStreamResponse(
                     id=content["meta_info"]["id"],
                     created=int(time.time()),
                     choices=[],  # Empty choices array as per OpenAI spec
                     model=request.model,
                     usage=usage,
-                    metadata={
-                        "weight_version": content["meta_info"].get("weight_version", ""),
-                        "e2e_latency": content["meta_info"].get("e2e_latency", 0.0) * 1000,
-                        "ttft_latency": content["meta_info"].get("ttft_latency", 0.0) * 1000,
-                        "queue_latency": content["meta_info"].get("queue_time", 0.0) * 1000,
-                    },
+                    metadata=metadata,
                 )
                 yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
@@ -891,7 +935,8 @@ class OpenAIServingChat(OpenAIServingBase):
             logger.exception(f"Exception in request: {e}")
             if hasattr(e, "error_code"):
                 error = self.create_streaming_error_response(
-                    str(e), status_code=e.error_code,
+                    str(e),
+                    status_code=e.error_code,
                 )
                 yield f"data: {error}\n\n"
             else:
@@ -947,8 +992,9 @@ class OpenAIServingChat(OpenAIServingBase):
 
             reasoning_padding = self.tokenizer_manager.server_args.reasoning_padding
 
-            if (self.thinking_trigger and
-                not self._get_enable_thinking_from_request(request, self.thinking_trigger)):
+            if self.thinking_trigger and not self._get_enable_thinking_from_request(
+                request, self.thinking_trigger
+            ):
                 reasoning_padding = ""
 
             if reasoning_padding and text is not None:
@@ -1019,18 +1065,27 @@ class OpenAIServingChat(OpenAIServingBase):
             enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
         )
 
+        # Build metadata
+        metadata = {
+            "weight_version": ret[0]["meta_info"].get("weight_version", ""),
+            "e2e_latency": ret[0]["meta_info"].get("e2e_latency", 0.0) * 1000,
+            "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
+            "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
+        }
+        if ret[0]["meta_info"].get("mm_meta_infos", []):
+            metadata["mm_meta_infos"] = ret[0]["meta_info"]["mm_meta_infos"]
+        if ret[0]["meta_info"].get("total_pixels", None) is not None:
+            metadata["total_pixels"] = ret[0]["meta_info"]["total_pixels"]
+        if ret[0]["meta_info"].get("total_vision_tokens", None) is not None:
+            metadata["total_vision_tokens"] = ret[0]["meta_info"]["total_vision_tokens"]
+
         return ChatCompletionResponse(
             id=ret[0]["meta_info"]["id"],
             created=created,
             model=request.model,
             choices=choices,
             usage=usage,
-            metadata={
-                "weight_version": ret[0]["meta_info"].get("weight_version", ""),
-                "e2e_latency": ret[0]["meta_info"].get("e2e_latency", 0.0) * 1000,
-                "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
-                "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
-            },
+            metadata=metadata,
         )
 
     def _process_logprobs_tokens(
@@ -1078,7 +1133,9 @@ class OpenAIServingChat(OpenAIServingBase):
     def _process_response_logprobs(self, ret_item: Dict[str, Any]) -> ChoiceLogprobs:
         """Process logprobs for non-streaming response"""
         logprobs = to_openai_style_logprobs(
-            output_token_logprobs=ret_item["meta_info"].get("output_token_logprobs", None),
+            output_token_logprobs=ret_item["meta_info"].get(
+                "output_token_logprobs", None
+            ),
             output_top_logprobs=ret_item["meta_info"].get("output_top_logprobs", None),
         )
 
@@ -1243,9 +1300,7 @@ class OpenAIServingChat(OpenAIServingBase):
         return idx
 
     def _get_enable_thinking_from_request(
-        self,
-        request: ChatCompletionRequest,
-        thinking_trigger: str = "enable_thinking"
+        self, request: ChatCompletionRequest, thinking_trigger: str = "enable_thinking"
     ) -> bool:
         """Extracts the 'enable_thinking' flag from request chat_template_kwargs.
 
@@ -1340,9 +1395,11 @@ class OpenAIServingChat(OpenAIServingBase):
                 chunk.usage = UsageProcessor.calculate_token_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    cached_tokens=UsageProcessor._details_if_cached(
-                        cached_tokens
-                    ) if cache_report else None
+                    cached_tokens=(
+                        UsageProcessor._details_if_cached(cached_tokens)
+                        if cache_report
+                        else None
+                    ),
                 )
 
             yield f"data: {chunk.model_dump_json()}\n\n"
@@ -1394,9 +1451,11 @@ class OpenAIServingChat(OpenAIServingBase):
                 chunk.usage = UsageProcessor.calculate_token_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    cached_tokens=UsageProcessor._details_if_cached(
-                        cached_tokens
-                    ) if cache_report else None
+                    cached_tokens=(
+                        UsageProcessor._details_if_cached(cached_tokens)
+                        if cache_report
+                        else None
+                    ),
                 )
 
             yield f"data: {chunk.model_dump_json()}\n\n"
@@ -1479,9 +1538,11 @@ class OpenAIServingChat(OpenAIServingBase):
                 chunk.usage = UsageProcessor.calculate_token_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    cached_tokens=UsageProcessor._details_if_cached(
-                        cached_tokens
-                    ) if cache_report else None
+                    cached_tokens=(
+                        UsageProcessor._details_if_cached(cached_tokens)
+                        if cache_report
+                        else None
+                    ),
                 )
 
             return f"data: {chunk.model_dump_json()}\n\n"
