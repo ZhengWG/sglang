@@ -20,7 +20,6 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
 from sglang.srt.layers.amx_utils import PackWeightMethod
 from sglang.srt.layers.communicator import get_attn_tp_context
 from sglang.srt.layers.dp_attention import (
-    get_attention_tp_group,
     attn_tp_all_reduce,
     get_attention_tp_rank,
     get_attention_tp_size,
@@ -220,11 +219,9 @@ class VocabParallelEmbedding(torch.nn.Module):
             if use_attn_tp_group:
                 tp_rank = get_attention_tp_rank()
                 self.tp_size = get_attention_tp_size()
-                self.tp_group = get_attention_tp_group()
             else:
                 tp_rank = get_tensor_model_parallel_rank()
                 self.tp_size = get_tensor_model_parallel_world_size()
-                self.tp_group = get_tp_group()
         else:
             assert use_attn_tp_group is False
             tp_rank = 0
@@ -496,7 +493,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                     output_parallel = attn_tp_all_reduce(output_parallel)
                 else:
                     # Reduce across all the model parallel GPUs.
-                    output_parallel = self.tp_group.all_reduce(output_parallel)
+                    output_parallel = tensor_model_parallel_all_reduce(output_parallel)
         return output_parallel
 
     def extra_repr(self) -> str:
