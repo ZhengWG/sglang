@@ -126,7 +126,7 @@ class ModelRunnerKVCacheMixin:
         elif mambaish := self.mambaish_config:
             effective_layer_ids = [
                 i
-                for i in self.mambaish_config.full_attention_layer_ids
+                for i in mambaish.full_attention_layer_ids
                 if self.start_layer <= i < self.end_layer
             ]
             num_layers = len(effective_layer_ids)
