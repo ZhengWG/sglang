@@ -439,9 +439,14 @@ class ModelConfig:
             self.head_dim = 128
             self.attention_arch = AttentionArch.MLA
             self.kv_lora_rank = self.hf_config.kv_lora_rank
-            self.qk_rope_head_dim = self.hf_config.qk_rope_head_dim
+            self.qk_rope_head_dim = (
+                0
+                if getattr(self, "use_mla_nope", False)
+                else self.hf_config.qk_rope_head_dim
+            )
             self.v_head_dim = self.hf_config.v_head_dim
             self.qk_nope_head_dim = self.hf_config.qk_nope_head_dim
+            self.scaling = 1 / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
         else:
             if (
                 "MistralModel" in self.hf_config.architectures
