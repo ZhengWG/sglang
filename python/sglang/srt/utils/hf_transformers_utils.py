@@ -55,6 +55,7 @@ from sglang.srt.configs import (
     FalconH1Config,
     JetNemotronConfig,
     JetVLMConfig,
+    KimiK25Config,
     KimiLinearConfig,
     KimiVLConfig,
     LongcatFlashConfig,
@@ -94,6 +95,7 @@ _CONFIG_REGISTRY: List[Type[PretrainedConfig]] = [
     DeepseekVLV2Config,
     JetNemotronConfig,
     JetVLMConfig,
+    KimiK25Config,
     BailingHybridConfig,
 ]
 

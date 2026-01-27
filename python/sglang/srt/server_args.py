@@ -1194,6 +1194,7 @@ class ServerArgs:
 
         if model_arch in [
             "DeepseekV3ForCausalLM",
+            "KimiK25ForConditionalGeneration",
             "MistralLarge3ForCausalLM",
             "PixtralForConditionalGeneration",
         ]:
@@ -1612,6 +1613,7 @@ class ServerArgs:
                 "Glm4MoeForCausalLM",
                 "Glm4MoeLiteForCausalLM",
                 "Qwen3MoeForCausalLM",
+                "KimiK25ForConditionalGeneration",
             ]
             and (is_sm90_supported() or is_sm100_supported())
             and not self.enable_dp_attention
