@@ -1371,7 +1371,7 @@ class OpenAIServingChat(OpenAIServingBase):
         if self.reasoning_parser in ["deepseek-v3", "kimi_k2"]:
             return (
                 request.chat_template_kwargs is not None
-                and request.chat_template_kwargs.get("thinking") is True
+                and request.chat_template_kwargs.get("thinking", self.default_thinking) is True
             )
         if self.reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1"]:
             # qwen3, glm45, nano_v3, and interns1 are reasoning by default
