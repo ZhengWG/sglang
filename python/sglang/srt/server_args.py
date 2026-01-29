@@ -145,7 +145,7 @@ ATTENTION_BACKEND_CHOICES = [
 
 LORA_BACKEND_CHOICES = ["triton", "csgmv", "ascend", "torch_native"]
 
-DISAGG_TRANSFER_BACKEND_CHOICES = ["mooncake", "nixl", "ascend", "fake"]
+DISAGG_TRANSFER_BACKEND_CHOICES = ["mooncake", "nixl", "ascend", "fake", "mori"]
 
 ENCODER_TRANSFER_BACKEND_CHOICES = ["zmq_to_scheduler", "zmq_to_tokenizer", "mooncake"]
 
@@ -1377,6 +1377,13 @@ class ServerArgs:
                     self.moe_runner_backend = "flashinfer_mxfp4"
                     logger.warning(
                         "Detected SM100 and MXFP4 quantization format for GPT-OSS model, enabling FlashInfer MXFP4 MOE kernel."
+                    )
+                elif (
+                    is_hip() and get_bool_env_var("SGLANG_USE_AITER")
+                ) and is_mxfp4_quant_format:
+                    self.moe_runner_backend = "auto"
+                    logger.warning(
+                        "Detected ROCm and MXFP4 quantization format for GPT-OSS model, enabling aiter MXFP4 MOE kernel."
                     )
                 elif self.ep_size == 1 and is_triton_kernels_available():
                     self.moe_runner_backend = "triton_kernel"
