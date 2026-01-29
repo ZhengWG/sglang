@@ -2290,6 +2290,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             else:
                 # NOTE: fallback for other scenes, not guaranteed to be correct
                 if offsets:
+                    start_idx = 0
+                    num_tokens = 0
                     for offset in offsets:
                         if isinstance(offset, (list, tuple)) and len(offset) >= 2:
                             start, end = offset[0], offset[1]

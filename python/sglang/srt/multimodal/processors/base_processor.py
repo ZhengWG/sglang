@@ -1007,6 +1007,29 @@ class BaseMultimodalProcessor(ABC):
 
         return list(items.values())
 
+    def _get_mm_meta_info(self, images=None, audios=None, videos=None):
+        """
+        Get meta info for multimodal data, only support image meta info now
+        """
+        mm_meta_info = {}
+        if images:
+            image_sizes = []
+            mm_meta_info[Modality.IMAGE] = {}
+            if isinstance(images, list) and len(images) > 0:
+                for image in images:
+                    if isinstance(image, Image.Image):
+                        w, h = image.size
+                        image_sizes.append((1, w, h))
+            elif isinstance(images, Image.Image):
+                w, h = images.size
+                image_sizes.append((1, w, h))
+            if image_sizes:
+                mm_meta_info[Modality.IMAGE]["image_sizes"] = image_sizes
+        else:
+            # TODO: add video and audio meta info
+            pass
+        return mm_meta_info
+
     def _process_and_collect_mm_items(
         self, input_text: str, images=None, audios=None, videos=None, **kwargs
     ) -> Tuple[List[MultimodalDataItem], torch.Tensor, dict]:
@@ -1076,6 +1099,19 @@ class BaseMultimodalProcessor(ABC):
             all_collected_items = collected_items
         else:
             ret = None
+
+        try:
+            mm_meta_info = self._get_mm_meta_info(
+                images=raw_images, audios=raw_audios, videos=raw_videos
+            )
+
+            for item in all_collected_items:
+                for attr_name, attr_value in mm_meta_info.get(item.modality, {}).items():
+                    setattr(item, attr_name, attr_value)
+        except Exception as e:
+            logger.warning(
+                f"Failed to add meta info to multimodal processor output: {e}"
+            )
 
         # Handle dict items (processed or precomputed)
         for modality, dict_item in dict_items:
