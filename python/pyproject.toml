@@ -90,6 +90,7 @@ dependencies = [
   "opentelemetry-api>=1.26.0", # required by tracing
   "opentelemetry-exporter-otlp>=1.26.0", # required by tracing
   "opentelemetry-semantic-conventions-ai>=0.4.1", # required by tracing
+  "addict", # required by DeepSeek-OCR-2
 ]
 
 [project.optional-dependencies]
