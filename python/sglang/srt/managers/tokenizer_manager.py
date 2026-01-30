@@ -1790,7 +1790,11 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
                 state.finish_reason = recv_obj.finished_reasons[i]["type"]
 
-                trace_req_finish(rid, ts=int(state.finished_time * 1e9), attrs=convert_to_span_attrs(state))
+                trace_req_finish(
+                    rid,
+                    ts=int(state.finished_time * 1e9),
+                    attrs=convert_to_span_attrs(state),
+                )
 
                 del self.rid_to_state[rid]
 
