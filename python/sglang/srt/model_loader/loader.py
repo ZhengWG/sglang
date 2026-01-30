@@ -276,11 +276,6 @@ def _initialize_model(
         kwargs["sparse_head"] = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.get()
         kwargs["model_path"] = model_config.model_path
 
-    hf_to_sglang_mapper = getattr(model_class, "hf_to_sglang_mapper", None)
-    # pass mappings by reference to quant_config
-    if hf_to_sglang_mapper is not None and quant_config is not None:
-        quant_config.apply_sglang_mapper(hf_to_sglang_mapper)
-
     return model_class(**kwargs)
 
 
