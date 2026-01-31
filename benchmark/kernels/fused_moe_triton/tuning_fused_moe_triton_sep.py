@@ -136,6 +136,7 @@ def benchmark_config(
     per_channel_quant: bool,
     topk_ids_list,
     block_shape: List[int] = None,
+    ep_size: int = 1,
     num_iters: int = 100,
 ) -> float:
     ncu_enable = os.getenv("NCU_ENABLE", "0") == "1"
@@ -255,6 +256,12 @@ def benchmark_config(
     def prepare(i: int, inner_iter):  # update inputs according to topk_ids
         for k in range(inner_iter):
             topk_ids = topk_ids_list[i * inner_iter + k]
+            # With EP, saved topk_ids are global expert indices; remap to local.
+            if ep_size > 1:
+                topk_ids = (topk_ids // ep_size).to(
+                    device=moe_inputs[k].topk_ids.device,
+                    dtype=moe_inputs[k].topk_ids.dtype,
+                )
             tokens, _topk = moe_inputs[k].topk_ids.shape
             moe_inputs[k].topk_ids.copy_(topk_ids[:tokens, :_topk])
             sorted_token_ids_, expert_ids_, num_tokens_post_padded_ = (
@@ -423,6 +430,7 @@ class BenchmarkWorker:
         block_shape: List[int],
         cfg: Dict[str, int],
         load_topk_ids_func: Callable,
+        ep_size: int = 1,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(0)
         topk_ids_list = [load_topk_ids_func(i) for i in range(100)]
@@ -441,6 +449,7 @@ class BenchmarkWorker:
                 per_channel_quant,
                 topk_ids_list,
                 block_shape,
+                ep_size=ep_size,
             )
         return cfg, kernel_time
 
@@ -459,6 +468,7 @@ class BenchmarkWorker:
         block_shape: List[int],
         search_space: List[Dict[str, int]],
         load_topk_ids_func: Callable,
+        ep_size: int = 1,
     ) -> Dict[str, int]:
         trace0 = BestConfigTrace("kernel0", down_moe=False)
         trace1 = BestConfigTrace("kernel1", down_moe=True)
@@ -481,6 +491,7 @@ class BenchmarkWorker:
                         per_channel_quant,
                         topk_ids_list,
                         block_shape,
+                        ep_size=ep_size,
                         num_iters=100,
                     )
                 except triton.runtime.autotuner.OutOfResources:
@@ -526,6 +537,7 @@ class BenchmarkWorker:
         block_shape: List[int],
         cmp_config_files: List[str],
         load_topk_ids_func: Callable,
+        ep_size: int = 1,
     ):
         # compare performance of different configs
         cmp_configs = []
@@ -560,6 +572,7 @@ class BenchmarkWorker:
                         per_channel_quant,
                         topk_ids_list,
                         block_shape,
+                        ep_size=ep_size,
                     )
                     kernel_times.append(kernel_time)
                 print(f"batch_size={bs=}:")
@@ -657,6 +670,7 @@ def main(args: argparse.Namespace):
             block_shape,
             args.cmp_configs,
             load_topk_ids_func,
+            args.ep_size,
         )
         return
 
@@ -678,6 +692,7 @@ def main(args: argparse.Namespace):
                 block_shape,
                 search_space,
                 load_topk_ids_func,
+                args.ep_size,
             )
         else:
             cfg = {
@@ -703,6 +718,7 @@ def main(args: argparse.Namespace):
                 block_shape,
                 cfg,
                 load_topk_ids_func,
+                args.ep_size,
             )
             print(f"{t0=}, {t0_tma=}, {t1=}, {t1_tma=}")
         return
@@ -767,6 +783,7 @@ def main(args: argparse.Namespace):
                 block_shape,
                 search_space,
                 load_topk_ids_func,
+                args.ep_size,
             )
             for batch_size in batch_sizes
         ],
