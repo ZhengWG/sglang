@@ -32,7 +32,6 @@ from http import HTTPStatus
 from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
 import fastapi
-import orjson
 import torch
 import uvloop
 import zmq
@@ -1793,9 +1792,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 state.finish_reason = recv_obj.finished_reasons[i]["type"]
 
                 trace_req_finish(
-                    rid,
-                    ts=int(state.finished_time * 1e9),
-                    attrs=convert_to_span_attrs(state),
+                    rid, 
+                    ts=int(state.finished_time * 1e9), 
+                    attrs=self.convert_to_span_attrs(state, recv_obj, i),
                 )
 
                 del self.rid_to_state[rid]
@@ -2714,6 +2713,198 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         ):
             self.mm_receiver.send_encode_request(obj)
 
+    def convert_to_span_attrs(
+        self,
+        state: ReqState,
+        recv_obj: Union[
+            BatchStrOutput,
+            BatchEmbeddingOutput,
+            BatchMultimodalOutput,
+            BatchTokenIDOutput,
+        ],
+        i: int,
+    ) -> Dict[str, Any]:
+        """Convert attributes to span attributes."""
+        span_attrs = {}
+
+        if not self.enable_trace:
+            return span_attrs
+
+        # Token usage attributes
+        span_attrs[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = (
+            recv_obj.completion_tokens[i]
+        )
+        span_attrs[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = recv_obj.prompt_tokens[
+            i
+        ]
+        span_attrs[SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS] = recv_obj.cached_tokens[
+            i
+        ]
+
+        # Request identifiers
+        span_attrs[SpanAttributes.GEN_AI_REQUEST_ID] = (
+            str(state.obj.rid) if state.obj.rid else None
+        )
+
+        # Sampling parameters
+        sampling_params = state.obj.sampling_params or {}
+
+        if max_new_tokens := sampling_params.get("max_new_tokens"):
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS] = max_new_tokens
+
+        if top_p := sampling_params.get("top_p"):
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_TOP_P] = top_p
+
+        if temperature := sampling_params.get("temperature"):
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_TEMPERATURE] = temperature
+
+        if top_k := sampling_params.get("top_k"):
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_TOP_K] = top_k
+
+        if n := sampling_params.get("n"):
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_N] = n
+
+        # Response attributes
+        span_attrs[SpanAttributes.GEN_AI_RESPONSE_MODEL] = self.served_model_name
+
+        finish_reason = (
+            recv_obj.finished_reasons[i].get("type")
+            if recv_obj.finished_reasons[i]
+            else None
+        )
+        if finish_reason:
+            span_attrs[SpanAttributes.GEN_AI_RESPONSE_FINISH_REASONS] = orjson_dumps(
+                [finish_reason]
+            )
+
+        # Latency attributes
+        if state.first_token_time and state.created_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = (
+                state.first_token_time - state.created_time
+            )
+
+        if state.finished_time and state.created_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] = (
+                state.finished_time - state.created_time
+            )
+
+        if state.first_token_time_perf and state.finished_time_perf:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = (
+                state.finished_time_perf - state.first_token_time_perf
+            )
+
+        if state.request_sent_to_scheduler_ts and state.finished_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = (
+                state.finished_time - state.request_sent_to_scheduler_ts
+            )
+
+        if state.request_sent_to_scheduler_ts and state.first_token_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = (
+                state.first_token_time - state.request_sent_to_scheduler_ts
+            )
+
+        min_p = sampling_params.get('min_p')
+        if min_p is not None:
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_MIN_P] = min_p
+        repetition_penalty = sampling_params.get('repetition_penalty')
+        if repetition_penalty is not None:
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_REPETITION_PENALTY] = repetition_penalty
+        frequency_penalty = sampling_params.get('frequency_penalty')
+        if frequency_penalty is not None:
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY] = frequency_penalty
+        presence_penalty = sampling_params.get('presence_penalty')
+        if presence_penalty is not None:
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY] = presence_penalty
+        
+        span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS] = state.cached_tokens
+        span_attrs[SpanAttributes.ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING] = state.input_process_finish_time - state.created_time
+        if state.scheduler_req_metric:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] = state.scheduler_req_metric.get_queueing_time()
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD] = state.scheduler_req_metric.get_forward_time()
+            if state.output_ids and len(state.output_ids) > 1:
+                completion_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.completion_time
+                span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = completion_time_ts - state.first_token_time
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = state.scheduler_req_metric.completion_time - state.scheduler_req_metric.forward_entry_time
+            if state.scheduler_req_metric.prefill_bootstrap_queue_entry_time > 0.0:
+                span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = 0.0
+                state.first_token_time = state.finished_time
+            forward_entry_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.forward_entry_time
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = state.first_token_time - forward_entry_time_ts
+        if state.first_token_time and state.created_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = state.first_token_time - state.created_time
+        if state.finished_time and state.created_time:
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] = state.finished_time - state.created_time
+
+        # level 2
+        if state.scheduler_req_metric:
+            req_metrics_dict = state.scheduler_req_metric.to_selected_dict()
+            if state.obj and hasattr(state.obj, 'metrics'):
+                req_metrics_dict.update(state.obj.metrics)
+                req_metrics_dict['request_sent_to_scheduler_ts'] = state.request_sent_to_scheduler_ts
+            span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = orjson_dumps(req_metrics_dict)
+            if tokens_generation_time := state.scheduler_req_metric.tokens_generation_time:
+                req_created_time = state.created_time
+                span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME] = (
+                    orjson_dumps(
+                        [round(x - req_created_time, 4) for x in tokens_generation_time]
+                    )
+                )
+            if tokens_scheduled_time := state.scheduler_req_metric.tokens_scheduled_time:
+                req_created_time = state.created_time
+                span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_SCHEDULED_TIME] = (
+                    orjson_dumps(
+                        [round(x - req_created_time, 4) for x in tokens_scheduled_time]
+                    )
+                )
+            if tokens_iter_batch_size := state.scheduler_req_metric.tokens_iter_batch_size:
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE] = orjson_dumps(tokens_iter_batch_size)
+            if tokens_iter_total_token := state.scheduler_req_metric.tokens_iter_total_token:
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS] = orjson_dumps(tokens_iter_total_token)
+            if tokens_iter_waiting_size := state.scheduler_req_metric.tokens_iter_waiting_size:
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE] = orjson_dumps(tokens_iter_waiting_size)
+            # GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS
+            if state.output_ids and len(state.output_ids) >= state.completion_tokens:
+                span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS] = orjson_dumps(([id for id in state.output_ids[-state.completion_tokens:]]))
+                # GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS
+                decode_tokens = state.text_in_list
+                if decode_tokens and len(decode_tokens) >= state.completion_tokens:
+                    span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS] = orjson_dumps([token_name for token_name in decode_tokens[-state.completion_tokens:]])
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = ENHANCED_TRACE_LEVEL
+        else:
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE_LEVEL
+
+        # Ant Group specific
+        if sampling_params:
+            span_attrs[SpanAttributes.ALIPAY_REQUEST_PARAMS] = orjson_dumps(sampling_params)
+        span_attrs[SpanAttributes.APP_NAME] = APP_NAME
+        if env_info := get_env_info():
+            if pod_ip := env_info.pod_ip:
+                span_attrs[SpanAttributes.POD_IP] = pod_ip
+            if idc := env_info.idc:
+                span_attrs[SpanAttributes.IDC] = idc
+            if model_instance_id := env_info.model_instance_id:
+                span_attrs[SpanAttributes.MODEL_INSTANCE_ID] = model_instance_id
+            if model_service_id := env_info.model_service_id:
+                span_attrs[SpanAttributes.MODEL_SERVICE_ID] = model_service_id
+            if model_instance_name := env_info.model_instance_name:
+                span_attrs[SpanAttributes.MODEL_INSTANCE_NAME] = model_instance_name
+            if pod_name := env_info.pod_name:
+                span_attrs[SpanAttributes.POD_NAME] = pod_name
+            if hostname := env_info.hostname:
+                span_attrs[SpanAttributes.HOSTNAME] = hostname
+        if trace_headers := getattr(state.obj, "external_trace_headers", None):
+            sofa_trace_info = get_sofa_trace_info(trace_headers)
+            if sofa_trace_id := sofa_trace_info.sofa_trace_id:
+                span_attrs[SpanAttributes.SOFA_TRACE_ID] = sofa_trace_id
+            if sofa_rpc_id := sofa_trace_info.sofa_rpc_id:
+                span_attrs[SpanAttributes.SOFA_RPC_ID] = sofa_rpc_id
+            if request_id := sofa_trace_info.request_id:
+                span_attrs[SpanAttributes.REQUEST_ID] = request_id
+            if api_key_id := sofa_trace_info.aigw_app_key_id:
+                span_attrs[SpanAttributes.API_KEY_ID] = api_key_id
+
+        return span_attrs
+
 
 class ServerStatus(Enum):
     Up = "Up"
@@ -2790,131 +2981,6 @@ class SignalHandler:
         )
         self.tokenizer_manager.dump_requests_before_crash()
         kill_process_tree(os.getpid())
-
-
-def convert_to_span_attrs(state: ReqState) -> Dict[str, Any]:
-    """Convert attributes to span attributes."""
-    span_attrs = {}
-    span_attrs[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = state.completion_tokens
-    span_attrs[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = state.prompt_tokens
-    span_attrs[SpanAttributes.GEN_AI_REQUEST_ID] = str(state.obj.rid) if state.obj.rid else None
-    sampling_params = state.obj.sampling_params
-    max_new_tokens = sampling_params.get('max_new_tokens')
-    if max_new_tokens is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS] = max_new_tokens
-    top_p = sampling_params.get('top_p')
-    if top_p is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_TOP_P] = top_p
-    temperature = sampling_params.get('temperature')
-    if temperature is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_TEMPERATURE] = temperature
-    top_k = sampling_params.get('top_k')
-    if top_k is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_TOP_K] = top_k
-    min_p = sampling_params.get('min_p')
-    if min_p is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_MIN_P] = min_p
-    repetition_penalty = sampling_params.get('repetition_penalty')
-    if repetition_penalty is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_REPETITION_PENALTY] = repetition_penalty
-    frequency_penalty = sampling_params.get('frequency_penalty')
-    if frequency_penalty is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY] = frequency_penalty
-    presence_penalty = sampling_params.get('presence_penalty')
-    if presence_penalty is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY] = presence_penalty
-    n = sampling_params.get('n')
-    if n is not None:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_N] = n
-    if finish_reason := state.finish_reason:
-        span_attrs[SpanAttributes.GEN_AI_RESPONSE_FINISH_REASON] = orjson_dumps([finish_reason])
-    span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS] = state.cached_tokens
-    span_attrs[SpanAttributes.ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING] = state.input_process_finish_time - state.created_time
-    if state.scheduler_req_metric:
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] = state.scheduler_req_metric.get_queueing_time()
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD] = state.scheduler_req_metric.get_forward_time()
-        if state.output_ids and len(state.output_ids) > 1:
-            completion_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.completion_time
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = completion_time_ts - state.first_token_time
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = state.scheduler_req_metric.completion_time - state.scheduler_req_metric.forward_entry_time
-        if state.scheduler_req_metric.prefill_bootstrap_queue_entry_time > 0.0:
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = 0.0
-            state.first_token_time = state.finished_time
-        forward_entry_time_ts = state.scheduler_req_metric.arrive_time_ts - state.scheduler_req_metric.arrive_time + state.scheduler_req_metric.forward_entry_time
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = state.first_token_time - forward_entry_time_ts
-    if state.first_token_time and state.created_time:
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = state.first_token_time - state.created_time
-    if state.finished_time and state.created_time:
-        span_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] = state.finished_time - state.created_time
-
-    # level 2
-    if state.scheduler_req_metric:
-        req_metrics_dict = state.scheduler_req_metric.to_selected_dict()
-        if state.obj and hasattr(state.obj, 'metrics'):
-            req_metrics_dict.update(state.obj.metrics)
-            req_metrics_dict['request_sent_to_scheduler_ts'] = state.request_sent_to_scheduler_ts
-        span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = orjson.dumps(req_metrics_dict)
-        if tokens_generation_time := state.scheduler_req_metric.tokens_generation_time:
-            req_created_time = state.created_time
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME] = (
-                orjson_dumps(
-                    [round(x - req_created_time, 4) for x in tokens_generation_time]
-                )
-            )
-        if tokens_scheduled_time := state.scheduler_req_metric.tokens_scheduled_time:
-            req_created_time = state.created_time
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_SCHEDULED_TIME] = (
-                orjson_dumps(
-                    [round(x - req_created_time, 4) for x in tokens_scheduled_time]
-                )
-            )
-        if tokens_iter_batch_size := state.scheduler_req_metric.tokens_iter_batch_size:
-            span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE] = orjson_dumps(tokens_iter_batch_size)
-        if tokens_iter_total_token := state.scheduler_req_metric.tokens_iter_total_token:
-            span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS] = orjson_dumps(tokens_iter_total_token)
-        if tokens_iter_waiting_size := state.scheduler_req_metric.tokens_iter_waiting_size:
-            span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE] = orjson_dumps(tokens_iter_waiting_size)
-        # GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS
-        if state.output_ids and len(state.output_ids) >= state.completion_tokens:
-            span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS] = orjson_dumps(([id for id in state.output_ids[-state.completion_tokens:]]))
-            # GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS
-            decode_tokens = state.text_in_list
-            if decode_tokens and len(decode_tokens) >= state.completion_tokens:
-                span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS] = orjson_dumps([token_name for token_name in decode_tokens[-state.completion_tokens:]])
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = ENHANCED_TRACE_LEVEL
-    else:
-        span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE_LEVEL
-
-    # Ant Group specific
-    if sampling_params:
-        span_attrs[SpanAttributes.ALIPAY_REQUEST_PARAMS] = orjson_dumps(sampling_params)
-    span_attrs[SpanAttributes.APP_NAME] = APP_NAME
-    if env_info := get_env_info():
-        if pod_ip := env_info.pod_ip:
-            span_attrs[SpanAttributes.POD_IP] = pod_ip
-        if idc := env_info.idc:
-            span_attrs[SpanAttributes.IDC] = idc
-        if model_instance_id := env_info.model_instance_id:
-            span_attrs[SpanAttributes.MODEL_INSTANCE_ID] = model_instance_id
-        if model_service_id := env_info.model_service_id:
-            span_attrs[SpanAttributes.MODEL_SERVICE_ID] = model_service_id
-        if model_instance_name := env_info.model_instance_name:
-            span_attrs[SpanAttributes.MODEL_INSTANCE_NAME] = model_instance_name
-        if pod_name := env_info.pod_name:
-            span_attrs[SpanAttributes.POD_NAME] = pod_name
-        if hostname := env_info.hostname:
-            span_attrs[SpanAttributes.HOSTNAME] = hostname
-    if trace_headers := getattr(state.obj, "external_trace_headers", None):
-        sofa_trace_info = get_sofa_trace_info(trace_headers)
-        if sofa_trace_id := sofa_trace_info.sofa_trace_id:
-            span_attrs[SpanAttributes.SOFA_TRACE_ID] = sofa_trace_id
-        if sofa_rpc_id := sofa_trace_info.sofa_rpc_id:
-            span_attrs[SpanAttributes.SOFA_RPC_ID] = sofa_rpc_id
-        if request_id := sofa_trace_info.request_id:
-            span_attrs[SpanAttributes.REQUEST_ID] = request_id
-        if api_key_id := sofa_trace_info.aigw_app_key_id:
-            span_attrs[SpanAttributes.API_KEY_ID] = api_key_id
-    return span_attrs
 
 
 # Note: request abort handling logic
