@@ -1312,11 +1312,15 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         if not abort_all and rid not in self.rid_to_state:
             return
         req = AbortReq(rid=rid, abort_all=abort_all)
+
+        req_state = self.rid_to_state.get(rid, None)
+        lora_path = getattr(req_state.obj, "lora_path", None) if req_state else None
+
         self.send_to_scheduler.send_pyobj(req)
         if self.enable_metrics:
             # TODO: also use custom_labels from the request
             self.metrics_collector.observe_one_aborted_request(
-                self.metrics_collector.labels
+                {**self.metrics_collector.labels, "lora_adapter": str(lora_path or "base")}
             )
 
     async def pause_generation(self):
