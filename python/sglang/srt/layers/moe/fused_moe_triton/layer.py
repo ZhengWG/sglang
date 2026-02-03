@@ -1000,10 +1000,18 @@ class FusedMoE(torch.nn.Module):
                 .to(device="cuda")
             )
 
-        combine_input = self.run_moe_core(
-            dispatch_output=dispatch_output,
-            _scale_up_norm=self.swv,
-        )
+        # nGPT(for Bailing moe v3) only supports Basic Fusedmoe now,
+        # not available for any subclass of FusedMoE
+        # Here check whether swlf.swv is not None to determine
+        if self.swv is not None:
+            combine_input = self.run_moe_core(
+                dispatch_output=dispatch_output,
+                _scale_up_norm=self.swv,
+            )
+        else:
+            combine_input = self.run_moe_core(
+                dispatch_output=dispatch_output,
+            )
 
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
