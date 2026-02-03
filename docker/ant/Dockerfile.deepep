@@ -18,11 +18,16 @@ COPY ./docker/ant/.xccl_env.sh /root/.xccl_env.sh
 COPY ./docker/ant/.bashrc /root/.bashrc
 #RUN echo -e '\n#初始化XCCL相关网络环境变量\nsource /root/.xccl_env.sh\n' >> /root/.bashrc
 
-RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistudio%2Fgpu%2Frdma-a100.tgz" && \
-    ls -alh rdma-a100.tgz && \
-    tar --no-same-owner -xvf rdma-a100.tgz && \
-    rpm -Uvh --force rdma-a100/nic-libs-mellanox-rdma-5.2-2.x86_64.rpm && \
-    rm -rf rdma-a100 rdma-a100.tgz
+# 更新rdma-core版本，支持torch2.9.1
+RUN rpm -e nic-libs-mellanox-rdma && \
+    yum install -y pciutils && \
+    wget "https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/ant-deep-ep/rdma-core-2504-mayi.tar.gz" && \
+    tar  --no-same-owner -zxf rdma-core-2504-mayi.tar.gz && \
+    cd rdma-core-2504-mayi && \
+    ls -alh && \
+    bash check-installed.sh && \
+    bash install.sh
+
 # 安装nvshmem3, 不安装，以免deepep出错
 # RUN yum install -y libnvshmem3-cuda-12 libnvshmem3-devel-cuda-12 libnvshmem3-static-cuda-12 && yum clean all
 

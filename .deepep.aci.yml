@@ -8,7 +8,7 @@ parameters: #（选填）定义全局变量
   transfer_engine_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.6rc1-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl'
   kvpool_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-kvpool-store-only/ant_kvpool_store_only-0.3.3-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl'
   flashmla_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/flash-mla/flash_mla-1.0.0+de6beec-cp310-cp310-linux_x86_64.whl'
-  deepep_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep/ant_deep_ep-1.1.0+77d3b44-cp310-cp310-linux_x86_64.whl'
+  deepep_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-deep-ep-test-torch29/ant_deep_ep_test_torch29-1.2.1+805e925-cp310-cp310-linux_x86_64.whl'
   deepgemm_whl_url: 'https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/deep-gemm/deep_gemm-1.0.0+e2d6a10-py3-none-any.whl'
   runtime_version: '1.1.15'
   runtime_llm_version: '1.1.9'
