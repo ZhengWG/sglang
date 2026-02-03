@@ -76,40 +76,34 @@ from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
-from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP, _is_hip
+from sglang.srt.models.deepseek_common.utils import (
+    FORWARD_ABSORB_CORE_ATTENTION_BACKENDS,
+    _is_cpu,
+    _is_cpu_amx_available,
+    _is_cublas_ge_129,
+    _is_cuda,
+    _is_gfx95_supported,
+    _is_hip,
+    _use_aiter,
+    _use_aiter_gfx95,
+)
+from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
     bind_or_assign,
-    cpu_has_amx_support,
     get_bool_env_var,
-    get_device_sm,
-    is_cpu,
     is_cuda,
     is_flashinfer_available,
-    is_gfx95_supported,
-    is_hip,
-    is_npu,
-    is_nvidia_cublas_cu12_version_ge_12_9,
     is_sm100_supported,
     make_layers,
     set_weight_attrs,
     use_intel_amx_backend,
 )
 
-_is_hip = is_hip()
-_is_cuda = is_cuda()
-_is_npu = is_npu()
 _is_fp8_fnuz = is_fp8_fnuz()
-_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
-_is_cpu_amx_available = cpu_has_amx_support()
-_is_cpu = is_cpu()
-_device_sm = get_device_sm()
-_is_gfx95_supported = is_gfx95_supported()
-
-_use_aiter_gfx95 = _use_aiter and _is_gfx95_supported
 
 if _use_aiter_gfx95:
 
@@ -146,18 +140,8 @@ else:
 if _is_hip:
     pass
 
-_is_cublas_ge_129 = is_nvidia_cublas_cu12_version_ge_12_9()
 _is_flashinfer_available = is_flashinfer_available()
 _is_sm100_supported = is_cuda() and is_sm100_supported()
-
-FORWARD_ABSORB_CORE_ATTENTION_BACKENDS = [
-    "fa3",
-    "nsa",
-    "flashinfer",
-    "cutlass_mla",
-    "trtllm_mla",
-    "ascend",
-]
 
 
 class DsV3MLA(DeepseekV2AttentionMLA):
@@ -231,7 +215,7 @@ class DsV3MLA(DeepseekV2AttentionMLA):
             self.g_proj = None
 
     def forward_normal_prepare(
-        self,
+        self: DeepseekV2AttentionMLA,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
@@ -250,10 +234,34 @@ class DsV3MLA(DeepseekV2AttentionMLA):
             # NSA Indexer: cache quantized keys, auto-skip topk for sequences <= nsa_index_topk
 
             if self.use_nsa:
-                q_lora = self.q_a_layernorm(q)
-                q = self.q_b_proj(q_lora)[0].view(
-                    -1, self.num_local_heads, self.qk_head_dim
-                )
+                # NSA requires unquantized q_lora for the indexer. When q_b_proj is FP8
+                # on gfx95, we can still use fused RMSNorm+FP8 quant, but MUST request
+                # the unquantized output for q_lora; otherwise q_lora becomes the (fp8,scale)
+                # tuple.
+                if (
+                    _use_aiter_gfx95
+                    and self.q_b_proj.weight.dtype == torch.float8_e4m3fn
+                ):
+                    q_quanted, q_lora, _, _ = fused_rms_fp8_group_quant(
+                        q,
+                        self.q_a_layernorm.weight,
+                        self.q_a_layernorm.variance_epsilon,
+                        None,
+                        None,
+                        None,
+                        group_size=128,
+                        dtype_quant=torch.float8_e4m3fn,
+                        res1=None,
+                        output_unquantized_inp1=True,
+                    )
+                    q = self.q_b_proj(q_quanted)[0].view(
+                        -1, self.num_local_heads, self.qk_head_dim
+                    )
+                else:
+                    q_lora = self.q_a_layernorm(q)
+                    q = self.q_b_proj(q_lora)[0].view(
+                        -1, self.num_local_heads, self.qk_head_dim
+                    )
                 _ = self.indexer(
                     x=hidden_states,
                     q_lora=q_lora,
@@ -320,8 +328,6 @@ class DsV3MLA(DeepseekV2AttentionMLA):
         else:
             kv_a = self.kv_a_layernorm(kv_a)
 
-        # kv_a = self.kv_a_layernorm(kv_a)
-
         k_pe = latent_cache[:, :, self.kv_lora_rank :]
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
@@ -334,7 +340,7 @@ class DsV3MLA(DeepseekV2AttentionMLA):
         ):
             if self.use_nsa and self.kv_cache_dtype == "fp8_e4m3":
                 # FP8 path: dequantize NSA-specific FP8 format to BF16
-                kv_a, k_pe = self._get_mla_kv_buffer_from_fp8(forward_batch)
+                kv_a, k_pe = self._get_mla_kv_buffer_from_fp8_for_nsa(forward_batch)
             else:
                 # BF16/FP16 path: directly fetch from cache
                 kv_a, k_pe = self._get_mla_kv_buffer(
@@ -389,6 +395,7 @@ class DsV3MLA(DeepseekV2AttentionMLA):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 
         q_lora = None
+        topk_indices = None
         if self.q_lora_rank is not None:
             q, latent_cache = (
                 get_attn_tp_context()
@@ -419,23 +426,38 @@ class DsV3MLA(DeepseekV2AttentionMLA):
                         self.kv_a_layernorm.variance_epsilon,
                     )
                 else:
+                    q_lora = None
                     if (
                         _use_aiter_gfx95
                         and self.q_b_proj.weight.dtype == torch.float8_e4m3fn
                     ):
-
-                        q, _, k_nope, _ = fused_rms_fp8_group_quant(
-                            q,
-                            self.q_a_layernorm.weight,
-                            self.q_a_layernorm.variance_epsilon,
-                            k_nope,
-                            self.kv_a_layernorm.weight,
-                            self.kv_a_layernorm.variance_epsilon,
-                            group_size=128,
-                            dtype_quant=torch.float8_e4m3fn,
-                            res1=None,
-                            output_unquantized_inp1=False,
-                        )
+                        if self.use_nsa:
+                            q_quanted, q_lora, k_nope, _ = fused_rms_fp8_group_quant(
+                                q,
+                                self.q_a_layernorm.weight,
+                                self.q_a_layernorm.variance_epsilon,
+                                k_nope,
+                                self.kv_a_layernorm.weight,
+                                self.kv_a_layernorm.variance_epsilon,
+                                group_size=128,
+                                dtype_quant=torch.float8_e4m3fn,
+                                res1=None,
+                                output_unquantized_inp1=True,
+                            )
+                            q = q_quanted
+                        else:
+                            q, _, k_nope, _ = fused_rms_fp8_group_quant(
+                                q,
+                                self.q_a_layernorm.weight,
+                                self.q_a_layernorm.variance_epsilon,
+                                k_nope,
+                                self.kv_a_layernorm.weight,
+                                self.kv_a_layernorm.variance_epsilon,
+                                group_size=128,
+                                dtype_quant=torch.float8_e4m3fn,
+                                res1=None,
+                                output_unquantized_inp1=False,
+                            )
 
                     else:
                         q = self.q_a_layernorm(q)
@@ -443,10 +465,42 @@ class DsV3MLA(DeepseekV2AttentionMLA):
 
             # q_lora needed by indexer
             if self.use_nsa:
-                q_lora = q
+                if q_lora is None:
+                    q_lora = q
 
-            k_nope = k_nope.unsqueeze(1)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            # overlap q_b_proj and indexer during decode
+            if (
+                self.alt_stream is not None
+                and get_is_capture_mode()
+                and forward_batch.forward_mode.is_decode_or_idle()
+                and q_lora is not None
+            ):
+                current_stream = torch.cuda.current_stream()
+                self.alt_stream.wait_stream(current_stream)
+                with torch.cuda.stream(self.alt_stream):
+                    k_nope = k_nope.unsqueeze(1)
+                    q = self.q_b_proj(q)[0].view(
+                        -1, self.num_local_heads, self.qk_head_dim
+                    )
+                topk_indices = self.indexer(
+                    x=hidden_states,
+                    q_lora=q_lora,
+                    positions=positions,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                )
+                current_stream.wait_stream(self.alt_stream)
+            else:
+                k_nope = k_nope.unsqueeze(1)
+                q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+                if q_lora is not None:
+                    topk_indices = self.indexer(
+                        x=hidden_states,
+                        q_lora=q_lora,
+                        positions=positions,
+                        forward_batch=forward_batch,
+                        layer_id=self.layer_id,
+                    )
         else:
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
@@ -540,15 +594,6 @@ class DsV3MLA(DeepseekV2AttentionMLA):
             # support allgather+rerrange
             k_nope, k_pe = self.rebuild_cp_kv_cache(
                 latent_cache, forward_batch, k_nope, k_pe
-            )
-        topk_indices = None
-        if q_lora is not None:
-            topk_indices = self.indexer(
-                x=hidden_states,
-                q_lora=q_lora,
-                positions=positions,
-                forward_batch=forward_batch,
-                layer_id=self.layer_id,
             )
 
         return (
@@ -1086,7 +1131,14 @@ class DsV3MLA(DeepseekV2AttentionMLA):
 
         return output
 
-    def forward_normal_chunked_kv_core(self, q, k, v, forward_batch, hidden_states):
+    def forward_normal_chunked_kv_core(
+        self: DeepseekV2AttentionMLA,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        forward_batch: ForwardBatch,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
         has_extend_prefix = forward_batch.extend_prefix_lens_cpu is not None and any(
             forward_batch.extend_prefix_lens_cpu
         )
@@ -1131,10 +1183,16 @@ class DsV3MLA(DeepseekV2AttentionMLA):
                 attn_output = attn_output * gate
 
         output, _ = self.o_proj(attn_output)
-
         return output
 
-    def forward_normal_one_shot_core(self, q, k, v, forward_batch, hidden_states):
+    def forward_normal_one_shot_core(
+        self: DeepseekV2AttentionMLA,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        forward_batch: ForwardBatch,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
         has_extend_prefix = any(forward_batch.extend_prefix_lens_cpu)
         # Only initialize the info once
         if has_extend_prefix and forward_batch.num_prefix_chunks is None:
@@ -1149,7 +1207,6 @@ class DsV3MLA(DeepseekV2AttentionMLA):
 
 LoraConfig = None
 logger = logging.getLogger(__name__)
-_is_cpu = is_cpu()
 
 
 def is_linear_layer(layer_idx, layer_group_size):
@@ -1439,7 +1496,8 @@ class BailingKDA(KimiDeltaAttention):
                 "full_attn_layers": [],
                 "use_nGPT": getattr(config, "use_nGPT", False),
                 "value_norm": getattr(config, "value_norm", False),
-            }
+            },
+            v_head_dim=getattr(config, "v_head_dim", None),
         )
         super().__init__(
             layer_id,
