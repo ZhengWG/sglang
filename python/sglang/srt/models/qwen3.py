@@ -497,7 +497,11 @@ class Qwen3ForCausalLM(nn.Module):
             # Use async multi-threading only for host memory (CPU) tensors to overlap data transfer.
             # For device memory (GPU) tensors, multi-threading adds overhead without benefit.
             use_async_loading = loaded_weight.device.type == "cpu"
-            if "Embedding" in self.config.name_or_path:
+            if not name.startswith("model.") and (
+                name.startswith("layers.")
+                or name.startswith("embed_tokens.")
+                or name.startswith("norm.")
+            ):
                 name = add_prefix(name, "model")
 
             if name == "model.embed_tokens.weight":

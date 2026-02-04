@@ -1697,6 +1697,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     }
                 )
                 state.cached_tokens = recv_obj.cached_tokens[i]
+                # Add detailed cache breakdown if available
+                if (
+                    hasattr(recv_obj, "cached_tokens_details")
+                    and recv_obj.cached_tokens_details
+                ):
+                    meta_info["cached_tokens_details"] = recv_obj.cached_tokens_details[
+                        i
+                    ]
 
             if getattr(recv_obj, "output_hidden_states", None):
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
@@ -1796,8 +1804,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 state.finish_reason = recv_obj.finished_reasons[i]["type"]
 
                 trace_req_finish(
-                    rid, 
-                    ts=int(state.finished_time * 1e9), 
+                    rid,
+                    ts=int(state.finished_time * 1e9),
                     attrs=self.convert_to_span_attrs(state, recv_obj, i),
                 )
 
@@ -2396,6 +2404,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 else 0
             )
 
+            # Get detailed cache breakdown if available
+            cached_tokens_details = None
+            if (
+                hasattr(recv_obj, "cached_tokens_details")
+                and recv_obj.cached_tokens_details
+            ):
+                cached_tokens_details = recv_obj.cached_tokens_details[i]
+
             self.metrics_collector.observe_one_finished_request(
                 labels,
                 recv_obj.prompt_tokens[i],
@@ -2405,6 +2421,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 self._request_has_grammar(state.obj),
                 retraction_count,
                 state.finish_reason,
+                cached_tokens_details,
             )
 
     def dump_requests(self, state: ReqState, out_dict: dict):
@@ -2819,7 +2836,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         presence_penalty = sampling_params.get('presence_penalty')
         if presence_penalty is not None:
             span_attrs[SpanAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY] = presence_penalty
-        
+
         span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS] = state.cached_tokens
         span_attrs[SpanAttributes.ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING] = state.input_process_finish_time - state.created_time
         if state.scheduler_req_metric:
