@@ -406,6 +406,7 @@ class Envs:
     SGLANG_MM_PRECOMPUTE_HASH = EnvBool(False)
     SGLANG_VIT_ENABLE_CUDA_GRAPH = EnvBool(False)
     SGLANG_MM_SKIP_COMPUTE_HASH = EnvBool(False)
+    SGLANG_PREPROCESS_USE_IMAGE_TENSOR = EnvBool(False)
 
 
     # VLM Item CUDA IPC Transport

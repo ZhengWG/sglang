@@ -89,6 +89,8 @@ from torch import nn
 from torch.library import Library
 from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils._contextlib import _DecoratorContextManager
+from torchvision.io import ImageReadMode, decode_image, read_image
+from torchvision.transforms.v2 import functional as F
 from typing_extensions import Literal
 
 from sglang.srt.environ import envs
@@ -111,6 +113,7 @@ torch_release = pkg_version.parse(torch.__version__).release
 COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 # List of compile cache dirs for save/load to speed up engine launch.
 COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
+
 
 # https://pytorch.org/docs/stable/notes/hip.html#checking-for-hip
 @lru_cache(maxsize=1)
@@ -507,6 +510,7 @@ def calculate_time(show=False, min_cost_ms=0.0):
 
     return wrapper
 
+
 def get_numa_node(gpu_id):
     try:
         device = get_device()
@@ -527,6 +531,7 @@ def get_numa_node(gpu_id):
     except Exception as e:
         logger.error(f"Error: {e}")
         return None
+
 
 def get_available_gpu_memory(
     device, gpu_id, distributed=False, empty_cache=True, cpu_group=None
@@ -955,6 +960,134 @@ def load_image(
     return image, image_size
 
 
+def _decode_image_from_bytes(
+    img_bytes: bytes, discard_alpha_channel: bool = True
+) -> torch.Tensor:
+    """
+    Decode image from bytes, prioritizing torchvision for hardware acceleration.
+
+    Args:
+        img_bytes: Raw image bytes
+        discard_alpha_channel: If True, force RGB mode (no alpha channel)
+
+    Returns:
+        Image tensor in shape [C, H, W]
+    """
+    # Try torchvision first (faster, hardware-accelerated)
+    try:
+        img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
+        # ImageReadMode.RGB automatically discards alpha channel
+        read_mode = (
+            ImageReadMode.RGB if discard_alpha_channel else ImageReadMode.UNCHANGED
+        )
+        return decode_image(img_tensor_bytes, mode=read_mode)
+    except Exception:
+        # Fallback to PIL
+        image = Image.open(BytesIO(img_bytes))
+        if discard_alpha_channel and image.mode != "RGB":
+            image = image.convert("RGB")
+        return F.pil_to_tensor(image)
+
+
+def _decode_image_from_file(
+    file_path: str, discard_alpha_channel: bool = True
+) -> torch.Tensor:
+    """
+    Decode image from file path, prioritizing torchvision for hardware acceleration.
+
+    Args:
+        file_path: Path to image file
+        discard_alpha_channel: If True, force RGB mode (no alpha channel)
+
+    Returns:
+        Image tensor in shape [C, H, W]
+    """
+    # Try torchvision first (fastest for local files)
+    try:
+        read_mode = (
+            ImageReadMode.RGB if discard_alpha_channel else ImageReadMode.UNCHANGED
+        )
+        return read_image(file_path, mode=read_mode)
+    except Exception:
+        # Fallback to PIL
+        image = Image.open(file_path)
+        if discard_alpha_channel and image.mode != "RGB":
+            image = image.convert("RGB")
+        return F.pil_to_tensor(image)
+
+
+def load_image_tensor(
+    image_file: Union[Image.Image, str, ImageData, bytes],
+    discard_alpha_channel: bool = True,
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    """
+    Load image from various sources and return as tensor.
+
+    Args:
+        image_file: Image source (PIL Image, file path, URL, bytes, or base64)
+        discard_alpha_channel: If True, convert to RGB (no alpha channel)
+
+    Returns:
+        tuple: (image_tensor [C, H, W], image_size (width, height))
+    """
+    # Normalize ImageData to string
+    if isinstance(image_file, ImageData):
+        image_file = image_file.url
+
+    img_tensor = image_size = None
+
+    # Handle PIL Image object
+    if isinstance(image_file, Image.Image):
+        # Already a PIL Image object
+        image = image_file
+        image_size = (image.width, image.height)
+        if discard_alpha_channel and image.mode != "RGB":
+            image = image.convert("RGB")
+        img_tensor = F.pil_to_tensor(image)
+
+    # Handle bytes
+    elif isinstance(image_file, bytes):
+        img_tensor = _decode_image_from_bytes(image_file, discard_alpha_channel)
+
+    # Handle string types
+    elif isinstance(image_file, str):
+        # Handle HTTP/HTTPS URL
+        if image_file.startswith("http://") or image_file.startswith("https://"):
+            timeout = int(os.getenv("REQUEST_TIMEOUT", "4"))
+            response = requests.get(image_file, stream=True, timeout=timeout)
+            try:
+                response.raise_for_status()
+                img_bytes = response.content
+                img_tensor = _decode_image_from_bytes(img_bytes, discard_alpha_channel)
+            finally:
+                response.close()
+
+        # Handle local file path
+        elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
+            img_tensor = _decode_image_from_file(image_file, discard_alpha_channel)
+
+        # Handle data URL format: data:image/jpeg;base64,/9j/4AAQ...
+        elif image_file.startswith("data:"):
+            base64_str = image_file.split(",")[1]
+            img_bytes = pybase64.b64decode(base64_str, validate=True)
+            img_tensor = _decode_image_from_bytes(img_bytes, discard_alpha_channel)
+
+        # Handle pure base64 string
+        else:
+            img_bytes = pybase64.b64decode(image_file, validate=True)
+            img_tensor = _decode_image_from_bytes(img_bytes, discard_alpha_channel)
+
+    else:
+        raise ValueError(f"Invalid image: {image_file}")
+
+    # Calculate image_size from tensor if not already set
+    if image_size is None and img_tensor is not None:
+        # Tensor shape: [C, H, W] -> size: (width, height)
+        image_size = (img_tensor.shape[2], img_tensor.shape[1])
+
+    return img_tensor, image_size
+
+
 def get_image_bytes(image_file: Union[str, bytes]):
     if isinstance(image_file, bytes):
         return image_file
@@ -1011,6 +1144,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
             elif video_file.startswith("data:"):
                 media_type, encoded = video_file.split(",", 1)
                 if media_type.startswith("data:video/jpeg;"):
+
                     def load_video_frame(frame_data):
                         image_frame = pybase64.b64decode(frame_data, validate=True)
                         image = Image.open(BytesIO(image_frame))
@@ -1018,7 +1152,10 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                         return image.convert("RGB")
 
                     return np.stack(
-                        [np.asarray(load_video_frame(frame_data)) for frame_data in encoded.split(",")]
+                        [
+                            np.asarray(load_video_frame(frame_data))
+                            for frame_data in encoded.split(",")
+                        ]
                     )
                 video_bytes = pybase64.b64decode(encoded, validate=True)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -1238,6 +1375,7 @@ def rank0_log(msg: str):
 
 class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
+
     def __init__(self, fmt, datefmt=None, style="%"):
         logging.Formatter.__init__(self, fmt, datefmt, style)
 
@@ -1261,6 +1399,7 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     import concurrent_log_handler  # noqa: F401
+
     _FORMAT = f"%(asctime)s.%(msecs)03d %(levelname)s %(process)d [{prefix} %(filename)s:%(lineno)d] %(message)s"
     _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
     DEFAULT_LOGGING_CONFIG = {
@@ -1289,7 +1428,7 @@ def configure_logger(server_args, prefix: str = ""):
             },
         },
         "version": 1,
-        "disable_existing_loggers": False
+        "disable_existing_loggers": False,
     }
     logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
 
@@ -4284,23 +4423,23 @@ def bind_to_closest_numa_node_cuda():
 
 
 def extract_numa_id(device_id):
-    return device_id.split(':')[0]
+    return device_id.split(":")[0]
 
 
 def check_device_cross_numa_node(visible_device_idx=None) -> bool:
     """Check if the GPU devices are on different NUMA nodes.
-       Assuming the device id format is like 00000001:8A:00.0
-       For example, for "00000001:8A:00.0", the NUMA node ID might be "01".
+    Assuming the device id format is like 00000001:8A:00.0
+    For example, for "00000001:8A:00.0", the NUMA node ID might be "01".
     """
     try:
         result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=pci.bus_id', '--format=csv,noheader'],
+            ["nvidia-smi", "--query-gpu=pci.bus_id", "--format=csv,noheader"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
-            text=True
+            text=True,
         )
-        device_ids = result.stdout.strip().split('\n')
+        device_ids = result.stdout.strip().split("\n")
         if visible_device_idx is not None:
             valid_indices = [i for i in visible_device_idx if 0 <= i < len(device_ids)]
             device_ids = [device_ids[i] for i in valid_indices]
@@ -4328,7 +4467,9 @@ def get_process_uptime() -> float:
 # Get model path from model-manager.
 def get_model_path(with_weights: bool) -> str:
     if not envs.SGLANG_ASYNC_MODEL_MOUNT.get():
-        logger.warn("get_model_path() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return.")
+        logger.warn(
+            "get_model_path() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return."
+        )
         return ""
 
     return get_model_path_from_manager(with_weights)
@@ -4338,7 +4479,9 @@ def get_model_path(with_weights: bool) -> str:
 # model_path to it.
 def link_model_at(link_path: str, with_weights: bool) -> None:
     if not envs.SGLANG_ASYNC_MODEL_MOUNT.get():
-        logger.warn("link_model_at() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return.")
+        logger.warn(
+            "link_model_at() called with SGLANG_ASYNC_MODEL_MOUNT unset, just return."
+        )
         return
 
     model_path = get_model_path_from_manager(with_weights)

@@ -28,6 +28,7 @@ from sglang.srt.utils import (
     is_xpu,
     load_audio,
     load_image,
+    load_image_tensor,
     load_video,
     logger,
 )
@@ -43,6 +44,7 @@ _is_npu = is_npu()
 _is_xpu = is_xpu()
 
 SGL_USE_CUDA_IPC = envs.SGLANG_USE_CUDA_IPC_TRANSPORT.get()
+SGL_PREPROCESS_USE_IMAGE_TENSOR = envs.SGLANG_PREPROCESS_USE_IMAGE_TENSOR.get()
 
 
 @dataclasses.dataclass
@@ -435,9 +437,12 @@ class BaseMultimodalProcessor(ABC):
         start_time = time.perf_counter()
         try:
             if modality == Modality.IMAGE:
-                img, _ = load_image(data)
-                if discard_alpha_channel and img.mode != "RGB":
-                    img = img.convert("RGB")
+                if SGL_PREPROCESS_USE_IMAGE_TENSOR:
+                    img, _ = load_image_tensor(data, discard_alpha_channel)
+                else:
+                    img, _ = load_image(data)
+                    if discard_alpha_channel and img.mode != "RGB":
+                        img = img.convert("RGB")
                 return img
             elif modality == Modality.VIDEO:
                 return load_video(data, frame_count_limit)
@@ -1106,7 +1111,9 @@ class BaseMultimodalProcessor(ABC):
             )
 
             for item in all_collected_items:
-                for attr_name, attr_value in mm_meta_info.get(item.modality, {}).items():
+                for attr_name, attr_value in mm_meta_info.get(
+                    item.modality, {}
+                ).items():
                     setattr(item, attr_name, attr_value)
         except Exception as e:
             logger.warning(

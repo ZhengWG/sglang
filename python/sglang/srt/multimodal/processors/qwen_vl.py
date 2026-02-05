@@ -1,6 +1,5 @@
 import asyncio
 import math
-import os
 import re
 import time
 from typing import Dict, List, Union
@@ -13,6 +12,7 @@ from torchvision.transforms import InterpolationMode
 
 from sglang.srt.environ import envs
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+from sglang.srt.managers.io_struct import MMProcessMetrics
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
@@ -24,7 +24,6 @@ from sglang.srt.multimodal.processors.base_processor import (
 )
 from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 from sglang.utils import logger
-from sglang.srt.managers.io_struct import MMProcessMetrics
 
 MAX_RATIO = 200
 RESIZE_RESAMPLE = getattr(Image, envs.SGLANG_RESIZE_RESAMPLE.get(), None)
@@ -54,9 +53,13 @@ def smart_resize_for_video(
     3. The aspect ratio of the image is maintained as closely as possible.
     """
     if num_frames < temporal_factor:
-        raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
+        raise ValueError(
+            f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}"
+        )
     if height < factor or width < factor:
-        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+        raise ValueError(
+            f"height:{height} or width:{width} must be larger than factor:{factor}"
+        )
     elif max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
             f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
@@ -116,16 +119,24 @@ def resize_image(
     max_pixels: int,
     size_factor: int,
     mm_sampling_kwargs: dict = {},
-) -> Image.Image:
-    width, height = image.size
+) -> Union[Image.Image, torch.Tensor]:
+    if isinstance(image, torch.Tensor):
+        _, height, width = image.shape
+    else:
+        width, height = image.size
 
     # 自定义长宽
-    if (mm_sampling_kwargs and "resized_height" in mm_sampling_kwargs
-        and "resized_width" in mm_sampling_kwargs):
+    if (
+        mm_sampling_kwargs
+        and "resized_height" in mm_sampling_kwargs
+        and "resized_width" in mm_sampling_kwargs
+    ):
         resized_height = mm_sampling_kwargs["resized_height"]
         resized_width = mm_sampling_kwargs["resized_width"]
         if resized_height > 0 and resized_width > 0:
-            logger.info(f"Resize image to {height}x{width} -> {resized_height}x{resized_width}")
+            logger.info(
+                f"Resize image to {height}x{width} -> {resized_height}x{resized_width}"
+            )
             height = resized_height
             width = resized_width
 
@@ -136,7 +147,14 @@ def resize_image(
         min_pixels=min_pixels,
         max_pixels=max_pixels,
     )
-    image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
+    if isinstance(image, Image.Image):
+        image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
+    else:
+        image = torchvision.transforms.functional.resize(
+            image,
+            [resized_height, resized_width],
+            interpolation=InterpolationMode.BILINEAR,
+        )
     return image
 
 
@@ -162,7 +180,13 @@ async def resize_image_async(
     size_factor: int,
     mm_sampling_kwargs: dict = {},
 ):
-    return resize_image(image, min_pixels, max_pixels, size_factor, mm_sampling_kwargs=mm_sampling_kwargs)
+    return resize_image(
+        image,
+        min_pixels,
+        max_pixels,
+        size_factor,
+        mm_sampling_kwargs=mm_sampling_kwargs,
+    )
 
 
 def smart_nframes(
@@ -359,8 +383,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         # FIXME(yudian.zy): 临时把qwen2.5-vl的单图大小限制为1k*1k，防止rank0 OOM
         self.MAX_PIXELS = int(self.MAX_PIXELS // 12.25)
 
-        self.VIDEO_MIN_PIXELS = 4 * 28 * 28 # 3136
-        self.VIDEO_MAX_PIXELS = 16384 * 28 * 28 # 12845056
+        self.VIDEO_MIN_PIXELS = 4 * 28 * 28  # 3136
+        self.VIDEO_MAX_PIXELS = 16384 * 28 * 28  # 12845056
         self.FPS = 2.0
         self.FPS_MIN_FRAMES = 4
         self.FPS_MAX_FRAMES = 768
@@ -457,11 +481,18 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
         # Qwen-specific: resize images if they are raw Image objects
-        if (self.model_type != "paddleocr_vl" and base_output.images and
-            isinstance(base_output.images[0], Image.Image)):
+        if (
+            self.model_type != "paddleocr_vl"
+            and base_output.images
+            and isinstance(base_output.images[0], (Image.Image, torch.Tensor))
+        ):
             resize_tasks = [
                 resize_image_async(
-                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR, mm_sampling_kwargs=mm_sampling_kwargs,
+                    image,
+                    self.MIN_PIXELS,
+                    self.MAX_PIXELS,
+                    self.IMAGE_FACTOR,
+                    mm_sampling_kwargs=mm_sampling_kwargs,
                 )
                 for image in base_output.images
             ]
@@ -560,7 +591,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mrope_positions = mrope_positions.squeeze(1)
         mm_metric.mm_get_rope_index_time = time.perf_counter()
 
-        if hasattr(request_obj,"metrics") and isinstance(request_obj.metrics, Dict):
+        if hasattr(request_obj, "metrics") and isinstance(request_obj.metrics, Dict):
             request_obj.metrics.update(mm_metric.to_dict())
 
         logger.info(
@@ -583,4 +614,3 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             "mrope_positions": mrope_positions,
             "mrope_position_delta": mrope_position_delta,
         }
-
