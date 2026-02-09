@@ -94,12 +94,14 @@ class RequestLogger:
         obj: Union["GenerateReqInput", "EmbeddingReqInput"],
         tokenizer: Any = None,
         request: Optional["fastapi.Request"] = None,
+        skip_names: Optional[Set[str]] = None,
     ) -> None:
         if not self.log_requests:
             return
 
-        max_length, skip_names, _ = self.metadata
+        max_length, skip_names_meta, _ = self.metadata
         headers = _extract_whitelisted_headers(request)
+        skip_names = skip_names_meta if skip_names is None else skip_names | skip_names_meta
         if self.log_requests_format == "json":
             log_data = {
                 "rid": obj.rid,
@@ -138,6 +140,7 @@ class RequestLogger:
         out: Any,
         is_multimodal_gen: bool = False,
         request: Optional["fastapi.Request"] = None,
+        skip_names: Optional[Set[str]] = None,
     ) -> None:
         if not self.log_requests:
             return
@@ -146,8 +149,10 @@ class RequestLogger:
         if self.log_exceeded_ms > 0 and e2e_latency_ms < self.log_exceeded_ms:
             return
 
-        max_length, skip_names, out_skip_names = self.metadata
+        max_length, skip_names_meta, out_skip_names_meta = self.metadata
         headers = _extract_whitelisted_headers(request)
+        skip_names = skip_names_meta if skip_names is None else skip_names | skip_names_meta
+        out_skip_names = out_skip_names_meta if skip_names is None else skip_names | out_skip_names_meta
         if self.log_requests_format == "json":
             log_data = {
                 "rid": obj.rid,
