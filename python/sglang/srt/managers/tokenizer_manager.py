@@ -581,7 +581,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             "audio_data",
             "video_data",
         } if request and "X-Mask-Content" in request.headers else set()
-        self.request_logger.log_received_request(log_obj, self.tokenizer, request, req_skip_names)
+        self.request_logger.log_received_request(obj, self.tokenizer, request, req_skip_names)
 
         async with self.is_pause_cond:
             await self.is_pause_cond.wait_for(lambda: not self.is_pause)
