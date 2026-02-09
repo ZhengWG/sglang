@@ -123,6 +123,15 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_REQ_SKIP_NAMES = {
+    "text",
+    "input_ids",
+    "input_embeds",
+    "output_ids",
+    "image_data",
+    "audio_data",
+    "video_data",
+}
 
 def _determine_tensor_transport_mode(server_args: ServerArgs) -> TensorTransportMode:
     is_cross_node = server_args.dist_init_addr
@@ -475,6 +484,8 @@ class TokenizerManager(TokenizerCommunicatorMixin):
 
         if self.log_requests:
             max_length, skip_names, _ = self.log_request_metadata
+            req_skip_names = DEFAULT_REQ_SKIP_NAMES if request and "X-Mask-Content" in request.headers else set()
+            skip_names = (skip_names or set()) | req_skip_names
             logger.info(
                 f"Receive: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)!r}"
             )
@@ -1126,6 +1137,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     ] = state.response_sent_to_client_ts
                 if self.log_requests:
                     max_length, skip_names, out_skip_names = self.log_request_metadata
+                    req_skip_names = DEFAULT_REQ_SKIP_NAMES if request and "X-Mask-Content" in request.headers else set()
+                    skip_names =  (skip_names or set()) | req_skip_names
+                    out_skip_names =  (out_skip_names or set()) | req_skip_names
                     if self.model_config.is_multimodal_gen:
                         msg = f"Finish: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)}"
                     else:
