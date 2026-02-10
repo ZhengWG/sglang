@@ -7,6 +7,7 @@ from typing import Dict, List, Union
 import numpy as np
 import torch
 import torchvision
+from decord import VideoReader
 from PIL import Image
 from torchvision.transforms import InterpolationMode
 
@@ -16,6 +17,10 @@ from sglang.srt.managers.io_struct import MMProcessMetrics
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
+from sglang.srt.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+)
 from sglang.srt.models.qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from sglang.srt.models.qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
@@ -262,6 +267,7 @@ async def preprocess_video(
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     try:
+        # preprocessed video
         entry_time = time.perf_counter()
         ele = {}
         if mm_sampling_kwargs:
@@ -270,6 +276,8 @@ async def preprocess_video(
         video = vr
         total_frames = video_fps = idx = None
         if not isinstance(vr, np.ndarray):
+            if not isinstance(vr, VideoReader):
+                return vr
             total_frames, video_fps = len(vr), vr.get_avg_fps()
             nframes = smart_nframes(
                 ele,
@@ -359,6 +367,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         Qwen2_5_VLForConditionalGeneration,
         Qwen3VLForConditionalGeneration,
         Qwen3VLMoeForConditionalGeneration,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5MoeForConditionalGeneration,
         Qwen3OmniMoeForConditionalGeneration,
     ]
 
@@ -521,7 +531,12 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_metric.mm_preprocess_time = time.perf_counter()
 
         # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
-        if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        if self.model_type in (
+            "qwen3_vl",
+            "qwen3_vl_moe",
+            "qwen3_5",
+            "qwen3_5_moe",
+        ):
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output,
                 self.mm_tokens,
