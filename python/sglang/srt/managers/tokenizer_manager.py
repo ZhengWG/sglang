@@ -1086,6 +1086,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 rid=obj.rid,
                 priority=obj.priority,
                 dimensions=obj.dimensions,
+                lora_id=obj.lora_id,
                 http_worker_ipc=obj.http_worker_ipc,
             )
 
