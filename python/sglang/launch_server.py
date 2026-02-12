@@ -10,7 +10,10 @@ from sglang.srt.utils import (
     COMPILE_CACHE_DIRS,
     COMPILE_CACHE_ROOT,
 )
+from sglang.srt.utils.common import suppress_noisy_warnings
 from sglang.srt.utils.compile_cache import prepare_compile_cache
+
+suppress_noisy_warnings()
 
 
 def run_server(server_args):
