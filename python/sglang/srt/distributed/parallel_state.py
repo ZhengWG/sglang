@@ -1490,15 +1490,16 @@ def graph_capture(stream: Optional[torch.cuda.Stream] = None):
     with get_tp_group().graph_capture(
         stream=stream
     ) as context, get_pp_group().graph_capture(context):
-        from sglang.srt.layers.dp_attention import (
-            get_attention_tp_group,
-        )
-
-        if attention_tp_all_reduce_enabled():
-            with get_attention_tp_group().graph_capture(context):
-                yield context
-        else:
-            yield context
+        yield context
+        # from sglang.srt.layers.dp_attention import (
+        #     get_attention_tp_group,
+        # )
+        #
+        # if attention_tp_all_reduce_enabled():
+        #     with get_attention_tp_group().graph_capture(context):
+        #         yield context
+        # else:
+        #     yield context
 
 
 logger = logging.getLogger(__name__)
@@ -1734,7 +1735,7 @@ def initialize_model_parallel(
             group_name="attn_cp",
         )
 
-    global _ATTN_TP_ENABLE_ALL_REDUCE
+    # global _ATTN_TP_ENABLE_ALL_REDUCE
 
     from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
 
@@ -1758,14 +1759,14 @@ def initialize_model_parallel(
                 )
                 ranks = list(range(st, en))
                 group_ranks.append(ranks)
-        _ATTN_TP_ENABLE_ALL_REDUCE = attn_dp_size > 1 and attn_tp_size != 1
+        # _ATTN_TP_ENABLE_ALL_REDUCE = attn_dp_size > 1 and attn_tp_size != 1
         _ATTN_TP = init_model_parallel_group(
             group_ranks,
             get_world_group().local_rank,
             backend,
             use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
             use_mscclpp_allreduce=False,
-            use_custom_allreduce=_ATTN_TP_ENABLE_ALL_REDUCE,
+            use_custom_allreduce=False,
             use_torch_symm_mem_allreduce=False,
             group_name="attention_tp",
         )
@@ -1867,9 +1868,9 @@ def initialize_model_parallel(
     )
 
 
-def attention_tp_all_reduce_enabled():
-    assert _ATTN_TP_ENABLE_ALL_REDUCE is not None, "dp attention not initialized!"
-    return _ATTN_TP_ENABLE_ALL_REDUCE
+# def attention_tp_all_reduce_enabled():
+#     assert _ATTN_TP_ENABLE_ALL_REDUCE is not None, "dp attention not initialized!"
+#     return _ATTN_TP_ENABLE_ALL_REDUCE
 
 def create_custom_parallel_group(
     group_ranks: List[int], backend: str = "gloo"
