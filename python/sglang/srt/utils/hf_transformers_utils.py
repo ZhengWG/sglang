@@ -78,6 +78,7 @@ from sglang.srt.utils.patch_tokenizer import patch_tokenizer
 
 _CONFIG_REGISTRY: List[Type[PretrainedConfig]] = [
     AfmoeConfig,
+    BailingHybridConfig,
     ChatGLMConfig,
     DbrxConfig,
     ExaoneConfig,

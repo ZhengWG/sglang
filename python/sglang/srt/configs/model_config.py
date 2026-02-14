@@ -312,6 +312,7 @@ class ModelConfig:
         if is_draft_model and self.hf_config.architectures[0] in [
             "BailingMoeForCausalLM",
             "BailingMoeV2ForCausalLM",
+            "BailingMoeV2_5ForCausalLM",
             "BailingMoeV3ForCausalLM",
         ]:
             self.hf_config.architectures[0] = "BailingMoeForCausalLMNextN"
@@ -487,6 +488,25 @@ class ModelConfig:
             self.qk_rope_head_dim = self.hf_config.qk_rope_head_dim
             self.v_head_dim = self.hf_config.v_head_dim
             self.qk_nope_head_dim = self.hf_config.qk_nope_head_dim
+        elif (
+            "BailingMoeV2_5ForCausalLM" in self.hf_config.architectures
+            or "BailingMoeForCausalLMNextN" in self.hf_config.architectures
+        ):
+            self.head_dim = self.hf_text_config.head_dim
+            self.attention_arch = AttentionArch.MLA
+            self.kv_lora_rank = self.hf_text_config.kv_lora_rank
+            self.qk_nope_head_dim = self.hf_text_config.qk_nope_head_dim
+            self.qk_rope_head_dim = self.hf_text_config.qk_rope_head_dim
+            self.v_head_dim = self.hf_config.v_head_dim
+            # Handle rope scaling with yarn
+            self.scaling = 1 / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
+            if self.hf_config.rope_scaling:
+                mscale_all_dim = self.hf_config.rope_scaling.get(
+                    "mscale_all_dim", False
+                )
+                scaling_factor = self.hf_config.rope_scaling["factor"]
+                mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+                self.scaling = self.scaling * mscale * mscale
         elif "BailingMoeV3ForCausalLM" in self.hf_config.architectures:
             self.head_dim = 128
             self.attention_arch = AttentionArch.MLA

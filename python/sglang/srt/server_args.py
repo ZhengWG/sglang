@@ -60,12 +60,12 @@ from sglang.srt.utils.common import (
     is_triton_kernels_available,
     is_valid_ipv6_address,
     json_list_type,
+    link_model_at,
     nullable_str,
     parse_connector_type,
     torch_release,
     wait_port_available,
     xpu_has_xmx_support,
-    link_model_at,
 )
 from sglang.srt.utils.hf_transformers_utils import check_gguf_file
 from sglang.utils import is_in_ci
@@ -1532,7 +1532,7 @@ class ServerArgs:
             logger.info(
                 f"Using {self.attention_backend} as attention backend for {model_arch}."
             )
-        elif model_arch in ["KimiLinearForCausalLM"]:
+        elif model_arch in ["KimiLinearForCausalLM", "BailingMoeV2_5ForCausalLM"]:
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,
                 support_mamba_cache=False,
@@ -2360,6 +2360,7 @@ class ServerArgs:
                 "GlmMoeDsaForCausalLM",
                 "BailingMoeForCausalLM",
                 "BailingMoeV2ForCausalLM",
+                "BailingMoeV2_5ForCausalLM",
                 "MistralLarge3ForCausalLM",
                 "PixtralForConditionalGeneration",
                 "BailingMoeV3ForCausalLM",
@@ -3671,7 +3672,7 @@ class ServerArgs:
             "--default-thinking",
             default=ServerArgs.default_thinking,
             action="store_true",
-            help="The default mode for hybird reasoning models.",
+            help="The default mode for hybrid reasoning models.",
         )
 
         # Data parallelism
@@ -5744,6 +5745,7 @@ def auto_choose_speculative_params(self: ServerArgs):
         "GlmMoeDsaForCausalLM",
         "BailingMoeForCausalLM",
         "BailingMoeV2ForCausalLM",
+        "BailingMoeV2_5ForCausalLM",
         "MistralLarge3ForCausalLM",
         "PixtralForConditionalGeneration",
         "MiMoV2FlashForCausalLM",

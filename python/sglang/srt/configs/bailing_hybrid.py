@@ -15,11 +15,17 @@
 """BailingHybrid model configuration"""
 
 import enum
+from typing import Union
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from sglang.srt.configs.mamba_utils import KimiLinearCacheParams, KimiLinearStateShape
+from sglang.srt.configs.mamba_utils import (
+    KimiLinearCacheParams,
+    KimiLinearStateShape,
+    Mamba2CacheParams,
+    Mamba2StateShape,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -134,15 +140,21 @@ class BailingHybridConfig(PretrainedConfig):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.rope_interleave = rope_interleave
         self.no_kda_lora = no_kda_lora
+        self.for_nextn_model = False
         super().__init__(
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+        # TODO: use better way to identify kda or lightning
+        self.use_kda = getattr(self, "short_conv_kernel_size")
 
     @property
     def layers_block_type(self):
+        if self.for_nextn_model:
+            return [HybridLayerType.full_attention.value]
+
         layer_type_list = []
 
         if isinstance(self.layer_group_size, int):
@@ -180,14 +192,27 @@ class BailingHybridConfig(PretrainedConfig):
         ]
 
     @property
-    def mamba2_cache_params(self) -> KimiLinearCacheParams:
+    def mamba2_cache_params(self) -> Union[KimiLinearCacheParams, Mamba2CacheParams]:
         from sglang.srt.layers.dp_attention import get_attention_tp_size
 
-        shape = KimiLinearStateShape.create(
-            tp_world_size=get_attention_tp_size(),
-            num_heads=self.num_attention_heads,  # tptest v_heads?
-            head_dim=self.head_dim,
-            conv_kernel_size=self.short_conv_kernel_size,
-        )
+        if self.use_kda:
+            shape = KimiLinearStateShape.create(
+                tp_world_size=get_attention_tp_size(),
+                num_heads=self.num_attention_heads,  # tptest v_heads?
+                head_dim=self.head_dim,
+                conv_kernel_size=self.short_conv_kernel_size,
+            )
 
-        return KimiLinearCacheParams(shape=shape, layers=self.linear_layer_ids)
+            return KimiLinearCacheParams(shape=shape, layers=self.linear_layer_ids)
+        else:
+            shape = Mamba2StateShape.create(
+                tp_world_size=get_attention_tp_size(),
+                intermediate_size=0,
+                n_groups=0,
+                num_heads=self.num_linear_key_value_heads,
+                head_dim=self.head_dim,
+                state_size=self.head_dim,
+                conv_kernel=1,
+            )
+
+            return Mamba2CacheParams(shape=shape, layers=self.linear_layer_ids)

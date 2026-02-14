@@ -31,6 +31,7 @@ from sglang.srt.configs.step3p5 import Step3p5Config
 
 __all__ = [
     "AfmoeConfig",
+    "BailingHybridConfig",
     "ExaoneConfig",
     "ChatGLMConfig",
     "DbrxConfig",

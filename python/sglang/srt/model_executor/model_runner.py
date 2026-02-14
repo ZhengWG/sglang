@@ -32,6 +32,7 @@ import torch.distributed as dist
 from torch import nn
 
 from sglang.srt.configs import (
+    BailingHybridConfig,
     FalconH1Config,
     JetNemotronConfig,
     JetVLMConfig,
@@ -156,6 +157,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     get_cpu_ids_by_node,
     get_local_ip_auto,
+    get_model_path,
     init_custom_process_group,
     is_hip,
     is_host_cpu_arm64,
@@ -168,7 +170,6 @@ from sglang.srt.utils import (
     reserve_rope_cache_for_long_sequences,
     set_cuda_arch,
     slow_rank_detector,
-    get_model_path,
 )
 from sglang.srt.utils.nvtx_pytorch_hooks import PytHooks
 from sglang.srt.utils.offloader import (
@@ -1608,6 +1609,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
+    def hybrid_lightning_config(self):
+        config = self.model_config.hf_config
+        if isinstance(config, BailingHybridConfig) and not config.use_kda:
+            return config
+        return None
+
+    @property
     def hybrid_gdn_config(self):
         config = self.model_config.hf_config.get_text_config()
         if isinstance(
@@ -1649,13 +1657,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     @property
     def kimi_linear_config(self):
         config = self.model_config.hf_config
-        if isinstance(config, KimiLinearConfig | BailingHybridConfig):
+        if isinstance(config, KimiLinearConfig):
+            return config
+        if isinstance(config, BailingHybridConfig) and config.use_kda:
             return config
         return None
 
     @property
     def mambaish_config(self):
-        return self.mamba2_config or self.hybrid_gdn_config or self.kimi_linear_config
+        return (
+            self.mamba2_config
+            or self.hybrid_gdn_config
+            or self.kimi_linear_config
+            or self.hybrid_lightning_config
+        )
 
     def can_run_piecewise_cuda_graph(self):
         if self.is_draft_worker:

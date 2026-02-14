@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
@@ -18,7 +17,6 @@ from sglang.srt.managers.io_struct import (
     ReqMetric,
 )
 from sglang.srt.managers.schedule_batch import (
-    FINISH_ABORT,
     BaseFinishReason,
     Req,
     RequestStage,
@@ -164,19 +162,7 @@ class SchedulerOutputProcessorMixin:
             # Check finish conditions
             logprob_pt = 0
 
-            deadline = -1
-            if (timeout_ms := envs.SGLANG_FORWARD_TIMEOUT_MS.get()) > 0:
-                deadline = time.perf_counter() - timeout_ms / 1000.0
-
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
-                if (
-                    not req.finished()
-                    and 0 < req.time_stats.forward_entry_time < deadline
-                ):
-                    req.to_finish = FINISH_ABORT(
-                        "Forward timeout.", HTTPStatus.SERVICE_UNAVAILABLE
-                    )
-
                 if req.finished() or req.is_retracted:
                     # decode req in mixed batch or retracted req
                     continue
@@ -342,7 +328,9 @@ class SchedulerOutputProcessorMixin:
         if self.enable_metrics and self.enable_trace and batch and batch.reqs:
             total_tokens = sum(r.seqlen for r in batch.reqs)
             for req in batch.reqs:
-                req.log_token_time_stats(len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size)
+                req.log_token_time_stats(
+                    len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size
+                )
 
         self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
 
@@ -464,19 +452,9 @@ class SchedulerOutputProcessorMixin:
         # NOTE: in any case, we should check finish here
         # if finished, also clean up committed kv cache and over-allocated kv cache here
 
-        deadline = -1
-        if (timeout_ms := envs.SGLANG_FORWARD_TIMEOUT_MS.get()) > 0:
-            deadline = time.perf_counter() - timeout_ms / 1000.0
-
         # Check finish condition
         for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
             req: Req
-
-            if not req.finished() and 0 < req.time_stats.forward_entry_time < deadline:
-                # req.set_finish_with_abort()
-                req.to_finish = FINISH_ABORT(
-                    "Forward timeout.", HTTPStatus.SERVICE_UNAVAILABLE
-                )
 
             if self.enable_overlap and (req.finished() or req.is_retracted):
                 # NOTE: This (req.finished() or req.is_retracted) should only happen when overlap scheduling is enabled.
@@ -557,7 +535,9 @@ class SchedulerOutputProcessorMixin:
         if self.enable_metrics and self.enable_trace and batch and batch.reqs:
             total_tokens = sum(r.seqlen for r in batch.reqs)
             for req in batch.reqs:
-                req.log_token_time_stats(len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size)
+                req.log_token_time_stats(
+                    len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size
+                )
 
         self.stream_output(batch.reqs, batch.return_logprob)
         self.token_to_kv_pool_allocator.free_group_end()
@@ -1175,22 +1155,22 @@ class SchedulerOutputProcessorMixin:
                 and self.enable_metrics
                 and self.enable_trace
             ):
-                req_metric = ReqMetric(tokens_generation_time=req.time_stats.tokens_generation_time,
-                                       tokens_scheduled_time=req.time_stats.tokens_scheduled_time,
-                                       tokens_iter_batch_size=req.time_stats.tokens_iter_batch_size,
-                                       tokens_iter_waiting_size=req.time_stats.tokens_iter_waiting_size,
-                                       tokens_iter_total_token=req.time_stats.tokens_iter_total_token,
-                                       forward_entry_time=req.time_stats.forward_entry_time,
-                                       completion_time=req.time_stats.completion_time,
-                                       arrive_time=req.time_stats.arrive_time,
-                                       arrive_time_ts=req.time_stats.arrive_time_ts,
-                                       wait_queue_entry_time=req.time_stats.wait_queue_entry_time,
-                                       prefill_bootstrap_queue_entry_time=req.time_stats.prefill_bootstrap_queue_entry_time,
-                                       prefill_transfer_queue_entry_time=req.time_stats.prefill_transfer_queue_entry_time,
-                                       decode_prealloc_queue_entry_time=req.time_stats.decode_prealloc_queue_entry_time,
-                                       decode_transfer_queue_entry_time=req.time_stats.decode_transfer_queue_entry_time,
-                                       wait_queue_size=req.time_stats.wait_queue_size,
-
+                req_metric = ReqMetric(
+                    tokens_generation_time=req.time_stats.tokens_generation_time,
+                    tokens_scheduled_time=req.time_stats.tokens_scheduled_time,
+                    tokens_iter_batch_size=req.time_stats.tokens_iter_batch_size,
+                    tokens_iter_waiting_size=req.time_stats.tokens_iter_waiting_size,
+                    tokens_iter_total_token=req.time_stats.tokens_iter_total_token,
+                    forward_entry_time=req.time_stats.forward_entry_time,
+                    completion_time=req.time_stats.completion_time,
+                    arrive_time=req.time_stats.arrive_time,
+                    arrive_time_ts=req.time_stats.arrive_time_ts,
+                    wait_queue_entry_time=req.time_stats.wait_queue_entry_time,
+                    prefill_bootstrap_queue_entry_time=req.time_stats.prefill_bootstrap_queue_entry_time,
+                    prefill_transfer_queue_entry_time=req.time_stats.prefill_transfer_queue_entry_time,
+                    decode_prealloc_queue_entry_time=req.time_stats.decode_prealloc_queue_entry_time,
+                    decode_transfer_queue_entry_time=req.time_stats.decode_transfer_queue_entry_time,
+                    wait_queue_size=req.time_stats.wait_queue_size,
                 )
                 req_metrics[req.rid] = req_metric
 
