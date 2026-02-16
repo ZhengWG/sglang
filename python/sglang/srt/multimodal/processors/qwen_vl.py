@@ -402,14 +402,15 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.FPS_MAX_FRAMES = 768
         self.TEMPORAL_PATCH_SIZE = 2
 
-        if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        if self.model_type in ("qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"):
             image_processor = getattr(_processor, "image_processor", None)
             self.IMAGE_FACTOR = image_processor.patch_size * image_processor.merge_size
 
             # FIXME(yudian.zy): 临时把qwen3-vl的单图大小限制为1k*1k，防止rank0 OOM
-            image_longest_edge = image_processor.size["longest_edge"]
-            if image_longest_edge >= (32 * self.IMAGE_FACTOR) ** 2:
-                image_processor.size["longest_edge"] = image_longest_edge // 16
+            if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+                image_longest_edge = image_processor.size["longest_edge"]
+                if image_longest_edge >= (32 * self.IMAGE_FACTOR) ** 2:
+                    image_processor.size["longest_edge"] = image_longest_edge // 16
             self.MIN_PIXELS = image_processor.size["shortest_edge"]
             self.MAX_PIXELS = image_processor.size["longest_edge"]
 
