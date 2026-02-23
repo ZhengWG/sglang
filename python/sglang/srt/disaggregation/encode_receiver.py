@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import pickle
 import random
 import threading
@@ -306,6 +307,14 @@ class MMReceiverHTTP(MMReceiverBase):
             self.waiting_list: List[WaitingImageRequest] = []
             self.scheduler = scheduler
             self.wait_timeout = envs.SGLANG_ENCODER_RECV_TIMEOUT.get()
+            # Lock protecting waiting_list access between scheduler and bg thread
+            self._waiting_lock = threading.Lock()
+            # Rate-limit all_reduce: min seconds between calls across all tp ranks.
+            # Configurable via SGLANG_ENCODER_ALLREDUCE_INTERVAL_MS (default 2 ms).
+            self._last_allreduce_time = 0.0
+            self._allreduce_interval = (
+                float(os.getenv("SGLANG_ENCODER_ALLREDUCE_INTERVAL_MS", "2")) / 1000.0
+            )
             if hf_config is not None:
                 transport_mode = _determine_tensor_transport_mode(server_args)
                 import_processors("sglang.srt.multimodal.processors")
@@ -340,6 +349,12 @@ class MMReceiverHTTP(MMReceiverBase):
                     transport_mode,
                     skip_mm_pool=True,
                 )
+            # Background thread: polls ZMQ sockets so the scheduler event loop
+            # is never blocked waiting for embeddings.
+            self._bg_recv_thread = threading.Thread(
+                target=self._bg_recv_loop, daemon=True, name="epd-zmq-recv"
+            )
+            self._bg_recv_thread.start()
 
     def create_req(self, recv_req):
         req = Req(
@@ -377,7 +392,41 @@ class MMReceiverHTTP(MMReceiverBase):
         return req
 
     # For zmq_to_scheduler
+    def _bg_recv_loop(self):
+        """Background thread: continuously poll all pending ZMQ PULL sockets.
+
+        This moves the ZMQ recv work entirely off the scheduler event loop.
+        Each WaitingImageRequest owns its own PULL socket; the thread calls
+        _try_recv_mm_data() (NOBLOCK) and updates waiting_req.status in-place.
+        The scheduler event loop only reads status (via all_reduce) and never
+        blocks on ZMQ.
+        """
+        while True:
+            with self._waiting_lock:
+                snapshot = list(self.waiting_list)
+
+            if not snapshot:
+                time.sleep(0.0001)  # 0.1 ms idle sleep — avoids busy spin
+                continue
+
+            current_time = time.time()
+            for waiting_req in snapshot:
+                if waiting_req.status != WaitingImageRequestStatus.PENDING:
+                    continue
+                waiting_req._try_recv_mm_data()
+                if current_time - waiting_req.start_time > self.wait_timeout:
+                    waiting_req.status = WaitingImageRequestStatus.TIMEOUT
+
+    # For zmq_to_scheduler
     def process_waiting_requests(self, recv_reqs):
+        """Advance requests that are waiting for embeddings from the encoder.
+
+        ZMQ polling and timeout checking have been moved to _bg_recv_loop so
+        this method never blocks on I/O.  The all_reduce is rate-limited to at
+        most once per _allreduce_interval seconds: every TP rank uses the same
+        interval, so they all reach the barrier within a few µs of each other,
+        eliminating the rank-skew stall that grows with tp_size.
+        """
         new_recv_reqs = []
         for recv_req in recv_reqs:
             if (
@@ -393,35 +442,53 @@ class MMReceiverHTTP(MMReceiverBase):
                     receive_count=self.tp_size,
                 )
                 waiting_req.send_encode_request()
-                self.waiting_list.append(waiting_req)
+                with self._waiting_lock:
+                    self.waiting_list.append(waiting_req)
             else:
                 new_recv_reqs.append(recv_req)
 
-        if len(self.waiting_list) == 0:
+        with self._waiting_lock:
+            has_pending = bool(self.waiting_list)
+        if not has_pending:
             return new_recv_reqs, []
 
-        current_time = time.time()
-        local_status = []
-        for waiting_req in self.waiting_list:
-            waiting_req._try_recv_mm_data()
-            if current_time - waiting_req.start_time > self.wait_timeout:
-                waiting_req.status = WaitingImageRequestStatus.TIMEOUT
-            local_status.append(waiting_req.status)
+        # --- Rate-limit the all_reduce barrier ---
+        # All TP ranks share the same wall-clock and run the same code path, so
+        # their timers fire within a few µs of each other.  The all_reduce then
+        # acts as a lightweight barrier, waiting at most for the natural rank
+        # skew (~0.5 ms) rather than many full scheduler-loop iterations.
+        now = time.time()
+        if now - self._last_allreduce_time < self._allreduce_interval:
+            return new_recv_reqs, []
+        self._last_allreduce_time = now
 
-        local_status = torch.tensor(local_status, device="cpu", dtype=torch.int32)
+        # Snapshot waiting_list under lock so the bg thread can keep appending
+        with self._waiting_lock:
+            waiting_snapshot = list(self.waiting_list)
 
-        torch.distributed.all_reduce(
-            local_status,
-            op=torch.distributed.ReduceOp.MIN,
-            group=self.tp_group.cpu_group,
+        if not waiting_snapshot:
+            return new_recv_reqs, []
+
+        # Statuses are written by the bg thread (CPython GIL guarantees atomic
+        # reads of simple attribute assignments).
+        local_status = torch.tensor(
+            [w.status for w in waiting_snapshot], device="cpu", dtype=torch.int32
         )
 
-        new_waiting = []
+        if self.tp_size > 1:
+            torch.distributed.all_reduce(
+                local_status,
+                op=torch.distributed.ReduceOp.MIN,
+                group=self.tp_group.cpu_group,
+            )
+
+        completed_rids: set = set()
         abort_reqs = []
-        for i, waiting_req in enumerate(self.waiting_list):
+        for i, waiting_req in enumerate(waiting_snapshot):
             status_value = local_status[i].item()
             if status_value == WaitingImageRequestStatus.SUCCESS:
                 new_recv_reqs.append(waiting_req.recv_req)
+                completed_rids.add(waiting_req.rid)
             elif status_value == WaitingImageRequestStatus.FAIL:
                 logger.error(
                     f"Waiting request {waiting_req.rid} failed: {waiting_req.error_msg} {waiting_req.error_code = }"
@@ -433,6 +500,7 @@ class MMReceiverHTTP(MMReceiverBase):
                         waiting_req.error_code,
                     )
                 )
+                completed_rids.add(waiting_req.rid)
             elif status_value == WaitingImageRequestStatus.TIMEOUT:
                 logger.error(
                     f"Timed out waiting for image embeddings for request {waiting_req.rid}"
@@ -444,10 +512,15 @@ class MMReceiverHTTP(MMReceiverBase):
                         HTTPStatus.REQUEST_TIMEOUT,
                     )
                 )
-            else:  # status_value == WaitingImageRequestStatus.PENDING
-                new_waiting.append(waiting_req)
+                completed_rids.add(waiting_req.rid)
+            # else: PENDING — stays in waiting_list
 
-        self.waiting_list = new_waiting
+        if completed_rids:
+            with self._waiting_lock:
+                self.waiting_list = [
+                    w for w in self.waiting_list if w.rid not in completed_rids
+                ]
+
         return new_recv_reqs, abort_reqs
 
     # For zmq_to_scheduler
