@@ -188,14 +188,17 @@ class WaitingImageRequest:
                     else:
                         logger.debug(f"Request {i} succeeded.")
 
-        asyncio.run(
-            send_embedding_port(
-                self.recv_req.rid,
-                self.receive_count,
-                self.host_name,
-                self.embedding_port,
+        def _run():
+            asyncio.run(
+                send_embedding_port(
+                    self.recv_req.rid,
+                    self.receive_count,
+                    self.host_name,
+                    self.embedding_port,
+                )
             )
-        )
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _try_recv_mm_data(self):
         if self.status != WaitingImageRequestStatus.PENDING:
