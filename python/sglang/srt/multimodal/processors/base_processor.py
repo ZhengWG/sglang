@@ -755,7 +755,7 @@ class BaseMultimodalProcessor(ABC):
                 )
             )
 
-        logger.debug("[load_mm_data(simple)] total futures submitted: %d", len(futures))
+        logger.info("[load_mm_data(simple)] total futures submitted: %d", len(futures))
 
         images: List[Any] = [None] * len(image_data) if image_data else []
         videos: List[Any] = [None] * len(video_data) if video_data else []
@@ -770,9 +770,13 @@ class BaseMultimodalProcessor(ABC):
                     modality.name,
                     idx,
                 )
-                raise RuntimeError(
+                rte = RuntimeError(
                     f"An exception occurred while loading {modality.name} data at index {idx}: {e}"
                 )
+                error_code = getattr(e, "error_code", 400)
+                if isinstance(error_code, int):
+                    rte.error_code = error_code
+                raise rte
 
             if modality == Modality.IMAGE:
                 images[idx] = result
@@ -781,7 +785,7 @@ class BaseMultimodalProcessor(ABC):
             elif modality == Modality.AUDIO:
                 audios[idx] = result
 
-        logger.debug(
+        logger.info(
             "[load_mm_data(simple)] loaded counts: images=%d, videos=%d, audios=%d",
             len(images),
             len(videos),
