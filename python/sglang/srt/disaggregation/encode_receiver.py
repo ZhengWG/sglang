@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, wait
 from enum import IntEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
@@ -77,8 +78,7 @@ class EmbeddingData:
     def get_embedding(self, is_concat=False):
         if is_concat:
             return torch.concat([embedding.cuda() for embedding in self.embedding_list])
-        else:
-            return self.embedding_list
+        return self.embedding_list
 
     def get_img_grid(self):
         return torch.concatenate(self.image_grid_dim_list)
@@ -114,6 +114,9 @@ class WaitingImageRequestStatus(IntEnum):
 
 # For zmq_to_scheduler
 class WaitingImageRequest:
+    # Per-thread CUDA stream: .cuda() in recv path runs in parallel per worker (thread-safe)
+    _thread_local = threading.local()
+
     def __init__(
         self,
         rid: str,
@@ -122,6 +125,7 @@ class WaitingImageRequest:
         encoder_urls,
         host_name,
         receive_count,
+        processor_lock: Optional[threading.Lock] = None,
     ):
         self.rid = rid
         self.recv_req = recv_req
@@ -132,6 +136,7 @@ class WaitingImageRequest:
         self.encoder_urls = encoder_urls
         self.host_name = host_name
         self.receive_count = receive_count
+        self.processor_lock = processor_lock
         self.num_items_assigned = recv_req.num_items_assigned
         self.embedding_port, self.recv_socket = get_zmq_socket_on_host(
             zmq.Context(), zmq.PULL
@@ -197,6 +202,29 @@ class WaitingImageRequest:
             )
         )
 
+    def _get_cuda_stream(self):
+        """Return per-thread CUDA stream for parallel .cuda() (thread-safe)."""
+        if not torch.cuda.is_available():
+            return None
+        if not hasattr(self._thread_local, "stream"):
+            self._thread_local.stream = torch.cuda.Stream()
+        return self._thread_local.stream
+
+    def _buffer_to_cuda(self, buffer, dtype, shape):
+        """Copy buffer to GPU in per-thread stream (thread-safe, parallel across workers)."""
+        cpu_tensor = torch.frombuffer(buffer, dtype=dtype).reshape(shape)
+        stream = self._get_cuda_stream()
+        if stream is not None:
+            with torch.cuda.stream(stream):
+                return cpu_tensor.cuda()
+        return cpu_tensor.cuda()
+
+    def _sync_cuda_stream(self):
+        """Sync per-thread stream so subsequent concat/get_mm_data see GPU data."""
+        stream = self._get_cuda_stream()
+        if stream is not None:
+            torch.cuda.current_stream().wait_stream(stream)
+
     def _try_recv_mm_data(self):
         if self.status != WaitingImageRequestStatus.PENDING:
             return
@@ -218,8 +246,8 @@ class WaitingImageRequest:
                 return
 
             buffer = parts[1].buffer if hasattr(parts[1], "buffer") else parts[1]
-            recv_obj.embedding = torch.frombuffer(buffer, dtype=recv_obj.dtype).reshape(
-                recv_obj.shape
+            recv_obj.embedding = self._buffer_to_cuda(
+                buffer, recv_obj.dtype, recv_obj.shape
             )
             recv_obj.embedding_list[recv_obj.part_idx] = recv_obj.embedding
             if self.recv_embedding_data is None:
@@ -227,16 +255,25 @@ class WaitingImageRequest:
             else:
                 self.recv_embedding_data.add(recv_obj)
 
-        recv_embedding = self.recv_embedding_data.get_embedding(is_concat=True)
-        img_grid_thw = self.recv_embedding_data.get_img_grid()
+        self._sync_cuda_stream()
 
-        mm_inputs = self.mm_processor.get_mm_data(
-            self.recv_req.input_text, recv_embedding, img_grid_thw
-        )
-        self.recv_req.mm_inputs = mm_inputs
-        self.recv_req.input_ids = mm_inputs["input_ids"]
-        self.status = WaitingImageRequestStatus.SUCCESS
-        self.recv_socket.close()
+        def _concat_and_get_mm_data():
+            recv_embedding = self.recv_embedding_data.get_embedding(is_concat=True)
+            img_grid_thw = self.recv_embedding_data.get_img_grid()
+            mm_inputs = self.mm_processor.get_mm_data(
+                self.recv_req.input_text, recv_embedding, img_grid_thw
+            )
+            self.recv_req.mm_inputs = mm_inputs
+            self.recv_req.input_ids = mm_inputs["input_ids"]
+            self.status = WaitingImageRequestStatus.SUCCESS
+            self.recv_socket.close()
+
+        # using lock to ensure thread safety in
+        if self.processor_lock is not None:
+            with self.processor_lock:
+                _concat_and_get_mm_data()
+        else:
+            _concat_and_get_mm_data()
 
 
 def _determine_tensor_transport_mode(server_args):
@@ -340,6 +377,43 @@ class MMReceiverHTTP(MMReceiverBase):
                     transport_mode,
                     skip_mm_pool=True,
                 )
+                # Background thread: polls ZMQ sockets so the scheduler event loop
+                self._bg_recv_thread = threading.Thread(
+                    target=self._bg_recv_loop,
+                    daemon=True,
+                    name="epd-zmq-recv-loop",
+                )
+                # Lock protecting waiting_list access by background thread
+                self._waiting_lock = threading.Lock()
+                # Serialize get_mm_data (tokenizer etc. may not be thread-safe)
+                self._processor_lock = threading.Lock()
+                # Pool so _try_recv_mm_data runs in parallel per request (avoids one slow recv blocking others)
+                self._recv_executor = ThreadPoolExecutor(
+                    max_workers=8,
+                    thread_name_prefix="epd-recv",
+                )
+                self._bg_recv_thread.start()
+
+    # For zmq_to_scheduler
+    def _bg_recv_loop(self):
+        """Background thread: poll pending ZMQ PULL sockets in parallel via thread pool."""
+        _poll_interval = 0.001  # 1ms, avoid busy spin and reduce CPU/lock contention
+        while True:
+            with self._waiting_lock:
+                snapshot = list(self.waiting_list)
+            if not snapshot:
+                time.sleep(_poll_interval)
+                continue
+
+            pending = [
+                w for w in snapshot if w.status == WaitingImageRequestStatus.PENDING
+            ]
+            if pending:
+                futures = [
+                    self._recv_executor.submit(w._try_recv_mm_data) for w in pending
+                ]
+                wait(futures)
+            time.sleep(_poll_interval)  # yield CPU, avoid contention with scheduler
 
     def create_req(self, recv_req: TokenizedGenerateReqInput):
         req = Req(
@@ -392,24 +466,30 @@ class MMReceiverHTTP(MMReceiverBase):
                     encoder_urls=self.encode_urls,
                     host_name=self.hostname,
                     receive_count=self.tp_size,
+                    processor_lock=self._processor_lock,
                 )
                 waiting_req.send_encode_request()
-                self.waiting_list.append(waiting_req)
+                with self._waiting_lock:
+                    self.waiting_list.append(waiting_req)
             else:
                 new_recv_reqs.append(recv_req)
 
-        if len(self.waiting_list) == 0:
+        with self._waiting_lock:
+            waiting_snapshot = list(self.waiting_list)
+        if len(waiting_snapshot) == 0:
             return new_recv_reqs, []
 
-        current_time = time.time()
-        local_status = []
-        for waiting_req in self.waiting_list:
-            waiting_req._try_recv_mm_data()
-            if current_time - waiting_req.start_time > self.wait_timeout:
-                waiting_req.status = WaitingImageRequestStatus.TIMEOUT
-            local_status.append(waiting_req.status)
+        # current_time = time.time()
+        # local_status = []
+        # for waiting_req in self.waiting_list:
+        #     waiting_req._try_recv_mm_data()
+        #     if current_time - waiting_req.start_time > self.wait_timeout:
+        #         waiting_req.status = WaitingImageRequestStatus.TIMEOUT
+        #     local_status.append(waiting_req.status)
 
-        local_status = torch.tensor(local_status, device="cpu", dtype=torch.int32)
+        local_status = torch.tensor(
+            [w.status for w in waiting_snapshot], device="cpu", dtype=torch.int32
+        )
 
         torch.distributed.all_reduce(
             local_status,
@@ -417,12 +497,13 @@ class MMReceiverHTTP(MMReceiverBase):
             group=self.tp_group.cpu_group,
         )
 
-        new_waiting = []
+        completed_rids: set = set()
         abort_reqs = []
-        for i, waiting_req in enumerate(self.waiting_list):
+        for i, waiting_req in enumerate(waiting_snapshot):
             status_value = local_status[i].item()
             if status_value == WaitingImageRequestStatus.SUCCESS:
                 new_recv_reqs.append(waiting_req.recv_req)
+                completed_rids.add(waiting_req.rid)
             elif status_value == WaitingImageRequestStatus.FAIL:
                 logger.error(
                     f"Waiting request {waiting_req.rid} failed: {waiting_req.error_msg} {waiting_req.error_code = }"
@@ -445,10 +526,14 @@ class MMReceiverHTTP(MMReceiverBase):
                         HTTPStatus.REQUEST_TIMEOUT,
                     )
                 )
-            else:  # status_value == WaitingImageRequestStatus.PENDING
-                new_waiting.append(waiting_req)
+            # else: pending — stays in waiting_list
 
-        self.waiting_list = new_waiting
+        if completed_rids:
+            with self._waiting_lock:
+                self.waiting_list = [
+                    w for w in self.waiting_list if w.rid not in completed_rids
+                ]
+
         return new_recv_reqs, abort_reqs
 
     # For zmq_to_scheduler
