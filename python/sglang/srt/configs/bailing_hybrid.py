@@ -148,7 +148,7 @@ class BailingHybridConfig(PretrainedConfig):
             **kwargs,
         )
         # TODO: use better way to identify kda or lightning
-        self.use_kda = getattr(self, "short_conv_kernel_size")
+        self.use_kda = hasattr(self, "short_conv_kernel_size")
 
     @property
     def layers_block_type(self):
