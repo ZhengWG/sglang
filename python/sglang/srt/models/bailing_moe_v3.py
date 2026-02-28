@@ -2345,8 +2345,21 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+            # Fused path
+            (".fused_qkvbfg_a_proj", ".q_proj", 0),
+            (".fused_qkvbfg_a_proj", ".k_proj", 1),
+            (".fused_qkvbfg_a_proj", ".v_proj", 2),
+            (".fused_qkvbfg_a_proj", ".b_proj", 3),
+            (".fused_qkvbfg_a_proj", ".f_a_proj", 4),
+            (".fused_qkvbfg_a_proj", ".g_a_proj", 5),
+            (".fused_fg_b_proj", ".f_b_proj", 0),
+            (".fused_fg_b_proj", ".g_b_proj", 1),
+            # Unfused path: separate qkv_proj (when do_fuse_qkvbfg=False)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
         ]
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
@@ -2386,13 +2399,25 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         continue
                     if "mlp.experts" in name:
                         continue
-
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Check if this mapping targets a fused projection (only apply fusion check to fused params)
+                    if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj"}:
+                        layer_id = int(name.split(".")[2])
+                        layer = self.model.layers[layer_id]
+                        if is_pp_missing_parameter(name, layer):
+                            continue
+                        layer_attn = layer.attention
+                        # Only load to fused projection if fusion is enabled
+                        if not getattr(layer_attn, "do_fuse_qkvbfg", False):
+                            continue
+                    if weight_name in {".q_proj", ".k_proj", ".v_proj"}:
+                        layer_id = int(name.split(".")[2])
+                    
                     name = name.replace(weight_name, param_name)
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     if name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
                         continue
 
                     param = params_dict[name]
@@ -2401,7 +2426,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
-
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in name:
