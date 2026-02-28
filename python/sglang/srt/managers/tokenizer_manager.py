@@ -74,7 +74,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
-from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
@@ -1776,7 +1776,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     else time.time()
                 )
                 meta_info["ttft_latency"] = first_token_time - state.time_stats.created_time
-                meta_info["queue_time"] = state.scheduler_req_metric.get_queueing_time()
+                if state.scheduler_req_metric:
+                    meta_info["queue_time"] = state.scheduler_req_metric.get_queueing_time()
 
                 del self.rid_to_state[rid]
 
@@ -2045,6 +2046,208 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 meta_info["spec_accept_histogram"] = recv_obj.spec_acceptance_histogram[
                     i
                 ]
+
+    def _extract_mm_metadata(self, tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]) -> Optional[List[Dict[str, Any]]]:
+        """Extract multimodal metadata from mm_items.
+
+        Args:
+            tokenized_obj: The tokenized request object containing mm_inputs
+
+        Returns:
+            List of dictionaries containing metadata for each mm_item, or None if no mm_inputs
+        """
+        if not hasattr(tokenized_obj, "mm_inputs") or not tokenized_obj.mm_inputs:
+            return None
+
+        mm_inputs = tokenized_obj.mm_inputs
+        if not isinstance(mm_inputs, dict) or "mm_items" not in mm_inputs:
+            return None
+
+        mm_items = mm_inputs.get("mm_items", [])
+        if not mm_items:
+            return None
+
+        metadata_list = []
+        for item in mm_items:
+            if not hasattr(item, "modality"):
+                continue
+
+            # Store modality as string for serialization
+            modality = item.modality
+            modality_str = (
+                modality.name.lower()
+                if hasattr(modality, "name")
+                else str(modality).lower()
+            )
+
+            item_metadata = {
+                "modality": modality_str,
+            }
+
+            # Extract image_grid_thw from model_specific_data
+            if modality in [Modality.IMAGE, Modality.MULTI_IMAGES]:
+                image_grid_thw = None
+                if hasattr(item, "image_grid_thw") and item.image_grid_thw is not None:
+                    image_grid_thw = item.image_grid_thw
+                    if isinstance(image_grid_thw, torch.Tensor):
+                        image_grid_thw = image_grid_thw.tolist()
+                item_metadata["image_grid_thw"] = image_grid_thw
+                if hasattr(item, "image_sizes") and item.image_sizes is not None:
+                    item_metadata["image_sizes"] = item.image_sizes
+            elif item.modality == Modality.VIDEO:
+                video_grid_thw = None
+                if hasattr(item, "video_grid_thw") and item.video_grid_thw is not None:
+                    video_grid_thw = item.video_grid_thw
+                    if isinstance(video_grid_thw, torch.Tensor):
+                        video_grid_thw = video_grid_thw.tolist()
+                item_metadata["video_grid_thw"] = video_grid_thw
+                if hasattr(item, "video_sizes") and item.video_sizes is not None:
+                    item_metadata["video_sizes"] = item.video_sizes
+            # Extract offsets for mm_tokens calculation
+            if hasattr(item, "offsets") and item.offsets:
+                item_metadata["offsets"] = item.offsets
+
+            metadata_list.append(item_metadata)
+
+        return metadata_list if metadata_list else None
+
+    def _add_multimodal_metadata(self, state: "ReqState", meta_info: Dict[str, Any]) -> None:
+        """Add multimodal metadata to meta_info if the request contains multimodal data.
+
+        Args:
+            state: The request state containing the request object
+            meta_info: The dictionary to add multimodal metadata to
+        """
+        if not state.mm_items_metadata:
+            return
+
+        mm_meta_infos = []
+        total_pixels = 0
+        total_vision_tokens = 0
+
+        patch_size = None
+        if self.mm_processor:
+            try:
+                if hasattr(self.mm_processor, "patch_size"):
+                    patch_size = self.mm_processor.patch_size
+                elif hasattr(self.mm_processor, "vision_config") and hasattr(self.mm_processor.vision_config, "patch_size"):
+                    patch_size = self.mm_processor.vision_config.patch_size
+                elif hasattr(self.mm_processor, "_processor"):
+                    _processor = self.mm_processor._processor
+                    if hasattr(_processor, "image_processor") and hasattr(_processor.image_processor, "patch_size"):
+                        patch_size = _processor.image_processor.patch_size
+                    else:
+                        patch_size = _processor.patch_size
+            except Exception:
+                pass
+
+        for item_metadata in state.mm_items_metadata:
+            modality_str = item_metadata.get("modality", None)
+
+            if not modality_str:
+                continue
+
+            offsets = item_metadata.get("offsets", [])
+            grid_thws = []
+
+            if modality_str == "image":
+                grid_thws = item_metadata.get("image_grid_thw", None)
+                sizes = item_metadata.get("image_sizes", None)
+            elif modality_str == "video":
+                grid_thws = item_metadata.get("video_grid_thw", None)
+                sizes = item_metadata.get("video_sizes", None)
+
+            # Create one dict per grid_thw entry
+            if grid_thws:
+                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(offsets, grid_thws)
+                if offsets_start_idxs is None or offsets_end_idxs is None:
+                    logger.warning(f"No support for offsets and grid_thws length mismatch, {offsets=}, {grid_thws=}")
+                    return
+                for item_idx, grid_thw in enumerate(grid_thws):
+                    # Calculate size from grid_thw if patch_size is available, for qwen-series models
+                    size = None
+                    if grid_thw and patch_size:
+                        try:
+                            if isinstance(grid_thw, (list, tuple)) and len(grid_thw) > 2:
+                                # n_frames, width, height
+                                size = (grid_thw[0], grid_thw[2] * patch_size, grid_thw[1] * patch_size)
+                        except Exception:
+                            pass
+
+                    # Calculate num_tokens from offsets for this grid_thw
+                    num_tokens = 0
+                    start_idx = 0
+                    offsets_start_idx = offsets_start_idxs[item_idx]
+                    offsets_end_idx = offsets_end_idxs[item_idx]
+                    start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
+                    if size:
+                        total_pixels += size[0] * size[1] * size[2]
+                    if num_tokens:
+                        total_vision_tokens += num_tokens
+
+                    mm_meta_infos.append({
+                        "modality": modality_str,
+                        "grid_thw": grid_thw,
+                        "size": size,
+                        "num_tokens": num_tokens,
+                        "start_idx": start_idx
+                    })
+            elif sizes:
+                # No grid_thw for some models, for example, internvl-series
+                num_tokens = 0
+                start_idx = 0
+                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(offsets, sizes)
+                if offsets_start_idxs is None or offsets_end_idxs is None:
+                    logger.warning(f"No support for offsets and sizes length mismatch, {offsets=}, {sizes=}")
+                    return
+
+                for item_idx, size in enumerate(sizes):
+                    offsets_start_idx = offsets_start_idxs[item_idx]
+                    offsets_end_idx = offsets_end_idxs[item_idx]
+                    start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
+                    if size:
+                        total_pixels += size[0] * size[1] * size[2]
+                    if num_tokens:
+                        total_vision_tokens += num_tokens
+                    mm_meta_infos.append({
+                        "modality": modality_str,
+                        "grid_thw": None,
+                        "size": size,
+                        "num_tokens": num_tokens,
+                        "start_idx": start_idx
+                    })
+            else:
+                # NOTE: fallback for other scenes, not guaranteed to be correct
+                if offsets:
+                    start_idx = 0
+                    num_tokens = 0
+                    for offset in offsets:
+                        if isinstance(offset, (list, tuple)) and len(offset) >= 2:
+                            start, end = offset[0], offset[1]
+                            if start_idx == 0 or start < start_idx:
+                                start_idx = start
+                            num_tokens += end - start
+                    if num_tokens:
+                        total_vision_tokens += num_tokens
+                    mm_meta_infos.append({
+                        "modality": modality_str,
+                        "grid_thw": None,
+                        "size": None,
+                        "num_tokens": num_tokens,
+                        "start_idx": start_idx
+                    })
+
+        # Sort by offset start_idx
+        mm_meta_infos.sort(key=lambda x: x.get("start_idx", 0))
+        for item in mm_meta_infos:
+            item.pop("start_idx", None)
+
+        if mm_meta_infos:
+            meta_info["mm_meta_infos"] = mm_meta_infos
+        if total_pixels:
+            meta_info["total_pixels"] = total_pixels
+        if total_vision_tokens:
+            meta_info["total_vision_tokens"] = total_vision_tokens
 
     def _request_has_grammar(self, obj: GenerateReqInput) -> bool:
         return (
