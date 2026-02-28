@@ -176,7 +176,6 @@ class SchedulerOutputProcessorMixin:
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
-                        # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
 
                     self.maybe_collect_customized_info(i, req, logits_output)
@@ -461,6 +460,13 @@ class SchedulerOutputProcessorMixin:
             req.check_finished(new_accepted_len)
 
             if req.finished():
+                # delete feature to save memory
+                if req.multimodal_inputs is not None:
+                    for mm_item in req.multimodal_inputs.mm_items:
+                        pixel_values = mm_item.feature
+                        if isinstance(pixel_values, torch.Tensor):
+                            mm_item.feature = None
+                            del pixel_values
                 self.maybe_collect_routed_experts(req)
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
@@ -543,7 +549,11 @@ class SchedulerOutputProcessorMixin:
             mamba_track_interval = get_global_server_args().mamba_track_interval
             if batch.spec_algorithm.is_none() and seq_len % mamba_track_interval == 0:
                 # for non-spec decode, we update mamba_last_track_seqlen at the end of each track interval
-                req.mamba_next_track_idx = 1 - req.mamba_next_track_idx
+                req.mamba_next_track_idx = (
+                    batch.req_to_token_pool.get_mamba_ping_pong_other_idx(
+                        req.mamba_next_track_idx
+                    )
+                )
                 req.mamba_last_track_seqlen = seq_len
             elif (
                 not batch.spec_algorithm.is_none()
@@ -556,6 +566,11 @@ class SchedulerOutputProcessorMixin:
                     != (actual_seq_len - result.accept_length_per_req_cpu[i])
                     // mamba_track_interval
                 ):
+                    req.mamba_next_track_idx = (
+                        batch.req_to_token_pool.get_mamba_ping_pong_other_idx(
+                            req.mamba_next_track_idx
+                        )
+                    )
                     req.mamba_last_track_seqlen = (
                         actual_seq_len // mamba_track_interval * mamba_track_interval
                     )
@@ -1149,6 +1164,8 @@ class SchedulerOutputProcessorMixin:
             if req.finished():
                 req.release_mm_resources()
 
+        dp_ranks = [self.dp_rank] * len(rids) if rids else None
+
         # Send to detokenizer
         if reqs or is_idle_batch:
             if self.model_config.is_multimodal_gen:
@@ -1193,6 +1210,7 @@ class SchedulerOutputProcessorMixin:
                     placeholder_tokens_val=None,
                     retraction_counts=retraction_counts,
                     load=load,
+                    dp_ranks=dp_ranks,
                     req_metrics=req_metrics,
                 )
             )
