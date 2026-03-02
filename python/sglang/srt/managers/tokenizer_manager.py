@@ -1307,6 +1307,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     "image_data",
                     "audio_data",
                     "video_data",
+                    "output_ids",
                 } if request and "X-Mask-Content" in request.headers else set()
                 self.request_logger.log_finished_request(
                     obj,

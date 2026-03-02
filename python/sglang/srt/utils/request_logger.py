@@ -101,7 +101,7 @@ class RequestLogger:
 
         max_length, skip_names_meta, _ = self.metadata
         headers = _extract_whitelisted_headers(request)
-        skip_names = skip_names_meta if skip_names is None else skip_names | skip_names_meta
+        skip_names = skip_names_meta if skip_names is None else skip_names if skip_names_meta is None else skip_names | skip_names_meta
         if self.log_requests_format == "json":
             log_data = {
                 "rid": obj.rid,
@@ -179,8 +179,8 @@ class RequestLogger:
 
         max_length, skip_names_meta, out_skip_names_meta = self.metadata
         headers = _extract_whitelisted_headers(request)
-        skip_names = skip_names_meta if skip_names is None else skip_names | skip_names_meta
-        out_skip_names = out_skip_names_meta if skip_names is None else skip_names | out_skip_names_meta
+        skip_names = skip_names_meta if skip_names is None else skip_names if skip_names_meta is None else skip_names | skip_names_meta
+        out_skip_names = out_skip_names_meta if skip_names is None else skip_names if out_skip_names_meta is None else skip_names | out_skip_names_meta
         if self.log_requests_format == "json":
             log_data = {
                 "rid": obj.rid,
