@@ -1757,6 +1757,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
         positions,
         topk_indices,
         llama_4_scaling,
+        gate=None,
     ):
         save_kv_cache = True
 
@@ -1928,6 +1929,8 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                         -1, self.num_local_heads, self.v_head_dim
                     ).transpose(0, 1),
                 )
+        if gate is not None:
+            attn_bmm_output = self._apply_gated(attn_bmm_output, gate)
         output, _ = self.o_proj(attn_bmm_output)
 
         return output
@@ -2122,6 +2125,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
         k_input,
         forward_batch,
         zero_allocator,
+        gate=None,
     ):
         decode_attention_fwd_grouped_rope(
             q_input,
@@ -2173,12 +2177,14 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
         else:
             attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        if gate is not None:
+            attn_output = self._apply_gated(attn_output, gate)
         output, _ = self.o_proj(attn_output)
 
         return output
 
     def forward_absorb_fused_mla_rope_cpu_core(
-        self, q_input, k_input, v_input, forward_batch, zero_allocator
+        self, q_input, k_input, v_input, forward_batch, zero_allocator, gate=None
     ):
         assert self.q_lora_rank is not None and use_intel_amx_backend(
             self
@@ -2210,6 +2216,8 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
             None,  # scale
         )
         attn_output = output
+        if gate is not None:
+            self._apply_gated(attn_output, gate)
         output, _ = self.o_proj(attn_output)
 
         return output
