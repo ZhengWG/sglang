@@ -1070,9 +1070,6 @@ class BatchTokenIDOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):
     # DP rank of the scheduler that processed each request
     dp_ranks: Optional[List[int]] = None
 
-    # For observability
-    time_stats: Optional[List[SchedulerReqTimeStats]] = None
-
     # todo: 只保留 time_stats
     # rid->req metrics mapping
     req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
@@ -1169,9 +1166,6 @@ class BatchStrOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):
     cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
     # DP rank of the scheduler that processed each request
     dp_ranks: Optional[List[int]] = None
-
-    # For observability
-    time_stats: Optional[List[SchedulerReqTimeStats]] = None
 
     # todo: 只保留 time_stats
     # rid->req metrics mapping

@@ -584,6 +584,7 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             "prefill_run_batch_end_time": self.prefill_run_batch_end_time,
             "prefill_finished_time": self.prefill_finished_time,
             "diff_realtime_monotonic": global_diff_realtime_monotonic,
+            "enable_metrics": self.enable_metrics,
         }
         return state
 

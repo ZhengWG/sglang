@@ -1779,11 +1779,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 first_token_time = (
                     state.time_stats.first_token_time
                     if state.time_stats.first_token_time > 0.0
-                    else time.time()
+                    else time.perf_counter()
                 )
                 meta_info["ttft_latency"] = first_token_time - state.time_stats.created_time
-                if state.scheduler_req_metric:
-                    meta_info["queue_time"] = state.scheduler_req_metric.get_queueing_time()
 
                 del self.rid_to_state[rid]
 
