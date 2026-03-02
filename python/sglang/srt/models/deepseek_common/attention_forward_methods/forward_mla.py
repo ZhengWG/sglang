@@ -295,6 +295,7 @@ class DeepseekMLAForwardMixin:
         positions,
         topk_indices,
         llama_4_scaling,
+        gate=None,
     ):
         save_kv_cache = True
 
@@ -466,6 +467,8 @@ class DeepseekMLAForwardMixin:
                         -1, self.num_local_heads, self.v_head_dim
                     ).transpose(0, 1),
                 )
+        if gate is not None:
+            attn_bmm_output = self._apply_gated(attn_bmm_output, gate)
         output, _ = self.o_proj(attn_bmm_output)
 
         return output
