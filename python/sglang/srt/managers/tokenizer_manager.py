@@ -1085,8 +1085,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 http_worker_ipc=obj.http_worker_ipc,
             )
 
-        tokenized_obj.time_stats = self.rid_to_state[obj.rid].time_stats
-        self.rid_to_state[obj.rid].time_stats.set_tokenize_finish_time()
+        state = self.rid_to_state[obj.rid]
+        tokenized_obj.time_stats = state.time_stats
+        state.time_stats.set_tokenize_finish_time()
+
+        try:
+            state.mm_items_metadata = self._extract_mm_metadata(tokenized_obj)
+        except Exception as e:
+            logger.warning(f"Failed to extract mm metadata: {e}")
 
         return tokenized_obj
 
