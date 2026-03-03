@@ -1370,6 +1370,13 @@ class BailingMoeV3ForCausalLM(nn.Module):
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            # no_kda_lora
+            (".fused_qkvbfg_proj", ".q_proj", 0),
+            (".fused_qkvbfg_proj", ".k_proj", 1),
+            (".fused_qkvbfg_proj", ".v_proj", 2),
+            (".fused_qkvbfg_proj", ".b_proj", 3),
+            (".fused_qkvbfg_proj", ".f_proj", 4),
+            (".fused_qkvbfg_proj", ".g_proj", 5),
             # Fused path
             (".fused_qkvbfg_a_proj", ".q_proj", 0),
             (".fused_qkvbfg_a_proj", ".k_proj", 1),
@@ -1408,6 +1415,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 layer_idx = None
                 if "model.layers." in name:
                     layer_idx = int(name.split(".")[2])
+                    # todo, check nextn
+                    if layer_idx >= self.config.num_hidden_layers:
+                        continue
                 if (
                     ("v_head" in name)
                     or ("inv_freq" in name)
@@ -1425,25 +1435,21 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Check if this mapping targets a fused projection (only apply fusion check to fused params)
-                    if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj"}:
+                    if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj", ".fused_qkvbfg_proj"}:
                         layer_id = int(name.split(".")[2])
                         layer = self.model.layers[layer_id]
                         if is_pp_missing_parameter(name, layer):
                             continue
                         layer_attn = layer.attention
                         # Only load to fused projection if fusion is enabled
-                        if not getattr(layer_attn, "do_fuse_qkvbfg", False):
+                        if not getattr(layer_attn, "do_fuse_qkvbfg", False) and not self.config.no_kda_lora:
                             continue
-                    if weight_name in {".q_proj", ".k_proj", ".v_proj"}:
-                        layer_id = int(name.split(".")[2])
 
-                    name = name.replace(weight_name, param_name)
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if name not in params_dict:
+                    new_name = name.replace(weight_name, param_name)
+                    if new_name not in params_dict:
                         continue
 
-                    param = params_dict[name]
+                    param = params_dict[new_name]
                     weight_loader = param.weight_loader
                     found = True
                     weight_loader(param, loaded_weight, shard_id)
