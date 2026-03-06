@@ -834,6 +834,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         img_data=obj.image_data,
                         mm_processor=self.mm_processor,
                         prompt=(input_text or input_ids),
+                        need_wait_for_image=obj.need_wait_for_image,
                     )
                 if mm_inputs is None:
                     if self.enable_metrics:
@@ -850,6 +851,20 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         preprocessing_time = (
                             preprocessing_end_time - preprocessing_start_time
                         )
+            elif (
+                self.server_args.language_only
+                and self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
+                and not obj.need_wait_for_image
+            ):
+                # In language_only mode with zmq_to_scheduler, if we didn't dispatch
+                # to encoder (e.g., only one image), process locally like non-language_only mode
+                mm_inputs: Dict = await self.mm_data_processor.process(
+                    image_data=obj.image_data,
+                    audio_data=obj.audio_data,
+                    input_text_or_ids=(input_text or input_ids),
+                    request_obj=obj,
+                    max_req_input_len=self.max_req_input_len,
+                )
 
             # mm_inputs增加词表大小属性，为后续mm_data_item的hash -> pad_value
             # 增加offset防止pad_value跟正常的词表token冲突
@@ -2714,16 +2729,60 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     )
                 time_stats.set_created_time(created_time)
 
+    def _should_dispatch_to_encoder(
+        self, obj: Union[GenerateReqInput, EmbeddingReqInput]
+    ) -> bool:
+        """Check if the request should be dispatched to encoder for processing.
+
+        Returns True if the request should be dispatched to encoder (multiple multimodal items),
+        False if it should be processed locally (single multimodal item or no multimodal items).
+
+        Args:
+            obj: The request input object
+
+        Returns:
+            bool: True if should dispatch to encoder, False otherwise
+        """
+        if obj.batch_size > 1:
+            logger.warning(
+                "Batch request (batch_size=%d) is not supported in EPD disaggregation mode; skipping encoder dispatch.",
+                obj.batch_size,
+            )
+            return False
+        if not isinstance(obj, GenerateReqInput) or not obj.contains_mm_input():
+            return False
+
+        # Count image / video / audio items for dispatch threshold
+        def _count_mm_items(data):
+            return (
+                len(data) if isinstance(data, list) else (1 if data is not None else 0)
+            )
+
+        total_mm_items = (
+            _count_mm_items(getattr(obj, "image_data", None))
+            + _count_mm_items(getattr(obj, "video_data", None))
+            + _count_mm_items(getattr(obj, "audio_data", None))
+        )
+        return total_mm_items >= envs.SGLANG_ENCODER_DISPATCH_MIN_ITEMS.get()
+
     def _handle_epd_disaggregation_encode_request(
         self, obj: Union[GenerateReqInput, EmbeddingReqInput]
     ):
         """Handle EPD-disaggregation mode encoding request."""
-        if (
-            isinstance(obj, GenerateReqInput)
-            and self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
-            and obj.contains_mm_input()
-        ):
-            self.mm_receiver.send_encode_request(obj)
+        if isinstance(obj, GenerateReqInput) and obj.contains_mm_input():
+            # dispatch to encoder by default
+            should_dispatch = True
+            if self.server_args.enable_adaptive_dispatch_to_encoder:
+                should_dispatch = self._should_dispatch_to_encoder(obj)
+
+            # Set need_wait_for_image flag based on whether we dispatch to encoder
+            # This flag will be used in _tokenize_one_request to determine processing path
+            if should_dispatch:
+                obj.need_wait_for_image = True
+                if self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+                    self.mm_receiver.send_encode_request(obj)
+            else:
+                obj.need_wait_for_image = False
 
     def convert_to_span_attrs(
         self,
