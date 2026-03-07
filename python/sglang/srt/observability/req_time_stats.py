@@ -184,17 +184,6 @@ class RequestStage:
         metrics_is_observed=True,
     )
 
-    # mini lb
-    MINI_LB_LAUNCH = RequestStageConfig(
-        "mini_lb_launch",
-        level=2,
-    )
-
-    WAIT_PD_FINISH = RequestStageConfig(
-        "wait_pd_finish",
-        level=2,
-    )
-
     # other
     ANONYMOUS = RequestStageConfig("")
 
