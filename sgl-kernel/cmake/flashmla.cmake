@@ -25,7 +25,7 @@ if(${CUDA_VERSION} VERSION_GREATER 12.4)
         "-gencode=arch=compute_90a,code=sm_90a"
     )
 endif()
-if(${CUDA_VERSION} VERSION_GREATER_EQUAL "12.8")
+if(${CUDA_VERSION} VERSION_GREATER 12.8)
     list(APPEND FLASHMLA_CUDA_FLAGS
         "-gencode=arch=compute_100a,code=sm_100a"
     )
@@ -135,9 +135,9 @@ set(FlashMLA_SOURCES
 )
 
 Python_add_library(flashmla_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${FlashMLA_SOURCES})
-set_property(TARGET flashmla_ops PROPERTY CXX_STANDARD 20)
-set_property(TARGET flashmla_ops PROPERTY CUDA_STANDARD 20)
 target_compile_options(flashmla_ops PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
+    $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>
     $<$<COMPILE_LANGUAGE:CUDA>:${FLASHMLA_CUDA_FLAGS}>
 )
 target_include_directories(flashmla_ops PRIVATE
