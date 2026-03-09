@@ -1691,6 +1691,14 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     # proactively delete to avoid slow gc.
                     # 这里到CudaIpcTensorTransportProxy的引用已经断掉了，防止gc慢主动del
                     del pixel_values
+                if get_global_server_args().language_only:
+                    precomputed_embeddings = getattr(
+                        mm_item, "precomputed_embeddings", None
+                    )
+                    if isinstance(precomputed_embeddings, torch.Tensor):
+                        mm_item.precomputed_embeddings = precomputed_embeddings.to(
+                            self.device, non_blocking=True
+                        )
         self.multimodal_inputs = multimodal_inputs
         self.token_type_ids = token_type_ids_tensor
         self.seq_lens_sum = sum(seq_lens)

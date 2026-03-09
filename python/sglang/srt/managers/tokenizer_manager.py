@@ -146,6 +146,7 @@ class ReqState:
     obj: Union[GenerateReqInput, EmbeddingReqInput]
     time_stats: APIServerReqTimeStats
     last_completion_tokens: int = 1
+    ttft_observed: bool = False
     finish_reason: str = ""
     input_process_finish_time: float = 0.0
 
@@ -1784,14 +1785,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
             state.finished = recv_obj.finished_reasons[i] is not None
 
+            # Set first_token_time on the first output batch.
+            # This is the single write point for first_token_time.
+            if state.time_stats.first_token_time == 0.0:
+                state.time_stats.set_first_token_time()
+
             if state.finished:
                 if getattr(recv_obj, "req_metrics", None):
                     state.scheduler_req_metric = recv_obj.req_metrics.get(rid, None)
-                # Ensure first_token_time is set before computing decode_throughput.
-                # Without this, requests that finish on their first output batch
-                # would have first_token_time=0.0, producing bogus throughput.
-                if state.time_stats.first_token_time == 0.0:
-                    state.time_stats.set_first_token_time()
                 state.time_stats.trace_ctx.trace_set_root_attrs(
                     self.convert_to_span_attrs(state, recv_obj, i)
                 )
@@ -2345,10 +2346,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         if lora_path:
             labels["lora_adapter"] = lora_path
         if (
-            state.time_stats.first_token_time == 0.0
+            not state.ttft_observed
             and self.disaggregation_mode != DisaggregationMode.PREFILL
         ):
-            state.time_stats.set_first_token_time()
+            state.ttft_observed = True
             state.last_completion_tokens = completion_tokens
             self.metrics_collector.observe_time_to_first_token(
                 labels, state.time_stats.get_first_token_latency()
