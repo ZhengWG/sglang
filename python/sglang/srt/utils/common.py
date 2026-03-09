@@ -516,28 +516,6 @@ def calculate_time(show=False, min_cost_ms=0.0):
     return wrapper
 
 
-def get_numa_node(gpu_id):
-    try:
-        device = get_device()
-        if device == "cuda":
-            # obtain GPU PCI ID
-            cmd = f"nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i {gpu_id}"
-            bus_id = subprocess.check_output(cmd, shell=True).decode().strip().lower()
-            # 0000:ab:cd.f or 00000000:ab:cd.f
-            pci_path = f"/sys/bus/pci/devices/{bus_id}/numa_node"
-            if not os.path.exists(pci_path):
-                pci_path = f"/sys/bus/pci/devices/{bus_id[4:]}/numa_node"
-            with open(pci_path) as f:
-                node = int(f.read().strip())
-                return node if node >= 0 else None
-        else:
-            logger.info(f"Now only supports NVIDIA devices")
-            return None
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return None
-
-
 def get_available_gpu_memory(
     device, gpu_id, distributed=False, empty_cache=True, cpu_group=None
 ):
