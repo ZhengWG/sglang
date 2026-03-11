@@ -154,6 +154,13 @@ RUN yum install -y gdb && \
 ARG MODEL_MANAGER_VERSION="0.0.2"
 RUN pip3 install --no-cache-dir https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/model-manager/model-manager-${MODEL_MANAGER_VERSION}.tar.gz
 
+# 安装modctl和aistudio-modelhub
+RUN rpm -ivh https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/ant_7_x86_64_current/modctl/modctl-0.1.2-linux-noarch.rpm
+RUN pip3 install --no-cache-dir aistudio-modelhub==0.0.0.6
+
+# 安装sglang-router
+RUN pip3 install https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/simple-dev/sglang-router/sglang_router-0.1.9-py3-none-any.whl
+
 ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
     ENGINE_TYPE=sglang
