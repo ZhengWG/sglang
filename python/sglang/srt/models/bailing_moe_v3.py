@@ -1390,6 +1390,10 @@ class BailingMoeV3ForCausalLM(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            # qkv conv fuse
+            (".qkv_conv1d", ".q_conv1d", 0),
+            (".qkv_conv1d", ".k_conv1d", 1),
+            (".qkv_conv1d", ".v_conv1d", 2),
         ]
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
@@ -1435,14 +1439,21 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Check if this mapping targets a fused projection (only apply fusion check to fused params)
-                    if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj", ".fused_qkvbfg_proj"}:
+                    if param_name in {
+                        ".fused_qkvbfg_a_proj",
+                        ".fused_fg_b_proj",
+                        ".fused_qkvbfg_proj",
+                    }:
                         layer_id = int(name.split(".")[2])
                         layer = self.model.layers[layer_id]
                         if is_pp_missing_parameter(name, layer):
                             continue
                         layer_attn = layer.attention
                         # Only load to fused projection if fusion is enabled
-                        if not getattr(layer_attn, "do_fuse_qkvbfg", False) and not self.config.no_kda_lora:
+                        if (
+                            not getattr(layer_attn, "do_fuse_qkvbfg", False)
+                            and not self.config.no_kda_lora
+                        ):
                             continue
 
                     new_name = name.replace(weight_name, param_name)
