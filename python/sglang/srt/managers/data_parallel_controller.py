@@ -336,7 +336,7 @@ class DataParallelController:
 
     def _receive_ports_as_client(self, endpoint: str, node_rank: int) -> List[int]:
         """Receive worker ports from the server node."""
-        logger.debug(f"Connecting to node 0 to receive worker ports")
+        logger.info(f"Connecting to node 0 to receive worker ports")
 
         req_socket = get_zmq_socket(self.context, zmq.REQ, endpoint, False)
         req_socket.setsockopt(zmq.RCVTIMEO, 600 * 1000)  # 10 minute timeout
@@ -348,7 +348,7 @@ class DataParallelController:
 
             # Receive worker ports
             worker_ports = req_socket.recv_pyobj()
-            logger.debug(f"Received {len(worker_ports)} worker ports from node 0")
+            logger.info(f"Received {len(worker_ports)} worker ports from node 0")
             return worker_ports
         except zmq.Again:
             logger.error("Timeout waiting for worker ports from node 0")
@@ -368,7 +368,7 @@ class DataParallelController:
                 port_and_socket = get_zmq_socket(self.context, zmq.PUSH)
                 worker_ports.append(port_and_socket[0])
                 self.workers[dp_rank] = port_and_socket[1]
-                logger.debug(f"Assigned port {port_and_socket[0]} to worker {dp_rank}")
+                logger.info(f"Assigned port {port_and_socket[0]} to worker {dp_rank}")
 
         broadcasted_ports = self._broadcast_worker_ports(
             server_args, worker_ports if worker_ports else None
@@ -495,8 +495,9 @@ class DataParallelController:
 
     def maybe_external_dp_rank_routing(self, req: Req):
         if req.routed_dp_rank is not None:
-            logger.debug(f"Direct routing to DP rank {req.routed_dp_rank}")
-            self.workers[req.routed_dp_rank].send_pyobj(req)
+            target_dp_rank = req.routed_dp_rank % len(self.workers)
+            logger.info(f"Direct routing {req.routed_dp_rank} to DP rank {target_dp_rank}")
+            self.workers[target_dp_rank].send_pyobj(req)
             return True
         return False
 
@@ -506,7 +507,7 @@ class DataParallelController:
 
         while True:
             if self.status[self.round_robin_counter]:
-                logger.debug(f"Choose worker {self.round_robin_counter}")
+                logger.info(f"Choose worker {self.round_robin_counter}")
                 self.workers[self.round_robin_counter].send_pyobj(req)
                 self.round_robin_counter = (self.round_robin_counter + 1) % len(
                     self.workers
