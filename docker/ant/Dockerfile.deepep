@@ -124,9 +124,9 @@ RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_g
     rm -rf deep_gemm_cache_common1216.tar
 
 # 安装flashinfer-jit-cache
-RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/flashinfer_jit_cache/flashinfer_jit_cache_064_cu128.tar" && \
-    tar -xf flashinfer_jit_cache_064_cu128.tar && pip3 install flashinfer_jit_cache-0.6.4+cu128-cp39-abi3-manylinux_2_28_x86_64.whl && \
-    rm -rf flashinfer_jit_cache_064_cu128.tar flashinfer_jit_cache-0.6.4+cu128-cp39-abi3-manylinux_2_28_x86_64.whl
+RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/flashinfer_jit_cache/flashinfer_jit_cache_066_cu128.tar" && \
+    tar -xf flashinfer_jit_cache_066_cu128.tar && pip3 install flashinfer_jit_cache-0.6.6+cu128-cp39-abi3-manylinux_2_28_x86_64.whl && \
+    rm -rf flashinfer_jit_cache_066_cu128.tar flashinfer_jit_cache-0.6.6+cu128-cp39-abi3-manylinux_2_28_x86_64.whl
 
 # checkpoint-engine
 RUN mkdir -p /root/checkpoint_engine
