@@ -39,8 +39,8 @@ import copy
 import dataclasses
 import logging
 import re
-from concurrent.futures import Future
 import time
+from concurrent.futures import Future
 from dataclasses import field
 from enum import Enum, auto
 from http import HTTPStatus
@@ -84,7 +84,6 @@ from sglang.srt.observability.req_time_stats import (
     APIServerReqTimeStats,
     DPControllerReqTimeStats,
     SchedulerReqTimeStats,
-    convert_time_to_realtime,
 )
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -96,8 +95,8 @@ if TYPE_CHECKING:
     from typing import Any, Dict
 
     from sglang.srt.configs.model_config import ModelConfig
-    from sglang.srt.observability.session_controller import Session
     from sglang.srt.observability.scheduler_metrics_mixin import PrefillStats
+    from sglang.srt.observability.session_controller import Session
     from sglang.srt.speculative.eagle_info import EagleDraftInput
     from sglang.srt.speculative.spec_info import SpecInput, SpeculativeAlgorithm
 
@@ -283,7 +282,9 @@ class MultimodalDataItem:
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
         if self.pad_value <= self.model_vocab_size:
-            logger.warning(f"{self.pad_value=} conflict, add vocab offset {self.model_vocab_size=}")
+            logger.warning(
+                f"{self.pad_value=} conflict, add vocab offset {self.model_vocab_size=}"
+            )
             self.pad_value += self.model_vocab_size
 
     def is_modality(self, modality: Modality) -> bool:
@@ -1168,10 +1169,18 @@ class Req(ReqDllmMixin):
             self.extend_input_len,
         )
 
-    def log_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0, batch_create_time: float = 0.0, waiting_size: int = 0):
+    def log_token_time_stats(
+        self,
+        batch_size: int = 0,
+        total_tokens: int = 0,
+        batch_create_time: float = 0.0,
+        waiting_size: int = 0,
+    ):
         if batch_create_time <= 0.0:
             return
-        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
+        num_new_tokens = len(self.output_ids) - len(
+            self.time_stats.tokens_generation_time
+        )
         if num_new_tokens <= 0:
             return
 
@@ -1185,8 +1194,13 @@ class Req(ReqDllmMixin):
             reqTimeStats.tokens_iter_waiting_size.append(waiting_size)
 
     def log_disaggregation_decode_first_token_time_stats(self):
-        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
-        if num_new_tokens <= 0 or self.time_stats.decode_prealloc_queue_entry_time <= 0.0:
+        num_new_tokens = len(self.output_ids) - len(
+            self.time_stats.tokens_generation_time
+        )
+        if (
+            num_new_tokens <= 0
+            or self.time_stats.decode_prealloc_queue_entry_time <= 0.0
+        ):
             return
         self.time_stats.tokens_generation_time.append(time.time())
         self.time_stats.tokens_scheduled_time.append(self.time_stats.arrive_time_ts)
@@ -1194,12 +1208,23 @@ class Req(ReqDllmMixin):
         self.time_stats.tokens_iter_total_token.append(0)
         self.time_stats.tokens_iter_waiting_size.append(self.time_stats.wait_queue_size)
 
-    def log_disaggregation_prefill_first_token_time_stats(self, batch_size: int = 0, total_tokens: int = 0):
-        num_new_tokens = len(self.output_ids) - len(self.time_stats.tokens_generation_time)
-        if num_new_tokens <= 0 or self.time_stats.prefill_bootstrap_queue_entry_time <= 0.0:
+    def log_disaggregation_prefill_first_token_time_stats(
+        self, batch_size: int = 0, total_tokens: int = 0
+    ):
+        num_new_tokens = len(self.output_ids) - len(
+            self.time_stats.tokens_generation_time
+        )
+        if (
+            num_new_tokens <= 0
+            or self.time_stats.prefill_bootstrap_queue_entry_time <= 0.0
+        ):
             return
         self.time_stats.tokens_generation_time.append(time.time())
-        self.time_stats.tokens_scheduled_time.append(self.time_stats.arrive_time_ts - self.time_stats.arrive_time + self.time_stats.wait_queue_entry_time)
+        self.time_stats.tokens_scheduled_time.append(
+            self.time_stats.arrive_time_ts
+            - self.time_stats.arrive_time
+            + self.time_stats.wait_queue_entry_time
+        )
         self.time_stats.tokens_iter_batch_size.append(batch_size)
         self.time_stats.tokens_iter_total_token.append(total_tokens)
 
@@ -1365,11 +1390,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     prefill_stats: Optional[PrefillStats] = None
 
     # batch creation time
-    create_time : float = field(default_factory=time.time)
+    create_time: float = field(default_factory=time.time)
     # batch end time
-    end_time : float = 0.0
+    end_time: float = 0.0
     # num of waiting requests
-    waiting_size : int = 0
+    waiting_size: int = 0
 
     @classmethod
     def init_new(
@@ -1828,7 +1853,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     # See _force_track_h() for more details.
                     mamba_track_seqlen = _force_track_h(req.mamba_branching_seqlen)
                     mamba_track_seqlen_aligned = req.mamba_branching_seqlen
-            req.mamba_last_track_seqlen = mamba_track_seqlen_aligned
+            req.mamba_last_track_seqlen = (
+                mamba_track_seqlen
+                if get_global_server_args().mamba_extra_buffer_no_aligned
+                else mamba_track_seqlen_aligned
+            )
         mamba_track_seqlens_cpu.append(mamba_track_seqlen)
 
     def prepare_for_split_prefill(self):

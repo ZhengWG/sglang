@@ -668,6 +668,7 @@ class Scheduler(
             self.tp_worker.model_runner.hybrid_gdn_config is not None
             or self.tp_worker.model_runner.mamba2_config is not None
             or self.tp_worker.model_runner.kimi_linear_config is not None
+            or self.tp_worker.model_runner.hybrid_lightning_config is not None
         )
 
         self.sliding_window_size = None
@@ -1831,7 +1832,9 @@ class Scheduler(
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
             req.time_stats.set_arrive_time()
-            req.time_stats.set_wait_queue_entry_time(queue_size=len(self.waiting_queue) - 1)
+            req.time_stats.set_wait_queue_entry_time(
+                queue_size=len(self.waiting_queue) - 1
+            )
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
             queue_size = len(self.waiting_queue) + len(
@@ -1849,7 +1852,9 @@ class Scheduler(
             self.disagg_decode_prealloc_queue.add(req, is_retracted=is_retracted)
             if not is_retracted:
                 req.time_stats.set_arrive_time()
-                req.time_stats.set_decode_prealloc_queue_entry_time(queue_size=queue_size)
+                req.time_stats.set_decode_prealloc_queue_entry_time(
+                    queue_size=queue_size
+                )
             else:
                 req.time_stats.set_retract_time()
         else:
