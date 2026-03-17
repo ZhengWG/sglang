@@ -275,13 +275,21 @@ class SeedOssDetector(BaseReasoningFormatDetector):
             If True, streams reasoning content as it arrives.
     """
 
-    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = True):
+    def __init__(
+        self,
+        stream_reasoning: bool = True,
+        force_reasoning: bool = True,
+        continue_final_message: bool = False,
+        previous_content: str = "",
+    ):
         # SeedOSS is assumed to be reasoning until `</seed:think>` token
         super().__init__(
             "<seed:think>",
             "</seed:think>",
             force_reasoning=True,
             stream_reasoning=stream_reasoning,
+            continue_final_message=continue_final_message,
+            previous_content=previous_content,
         )
 
 
@@ -326,13 +334,21 @@ class Glm45Detector(BaseReasoningFormatDetector):
             If True, streams reasoning content as it arrives.
     """
 
-    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+    def __init__(
+        self,
+        stream_reasoning: bool = True,
+        force_reasoning: bool = False,
+        continue_final_message: bool = False,
+        previous_content: str = "",
+    ):
         super().__init__(
             "<think>",
             "</think>",
             force_reasoning=force_reasoning,
             stream_reasoning=stream_reasoning,
             tool_start_token="<tool_call>",
+            continue_final_message=continue_final_message,
+            previous_content=previous_content,
         )
 
 
