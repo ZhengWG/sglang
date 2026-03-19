@@ -100,6 +100,7 @@ class DeepseekMLACpuForwardMixin:
                         else None
                     )
                 ),
+                self.w_scale,
                 True,  # is_vnni
                 self.weight_block_size,
                 self.q_lora_rank,
@@ -145,7 +146,7 @@ class DeepseekMLACpuForwardMixin:
             attn_output.transpose(0, 1),
             self.w_vc,
             True,  # is_vnni
-            None,  # scale
+            self.w_scale,  # scale
         )
         attn_output = output
         if gate is not None:
