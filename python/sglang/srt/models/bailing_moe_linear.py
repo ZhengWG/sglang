@@ -414,7 +414,6 @@ class BailingMoELinearAttention(nn.Module):
         self.tp_heads = self.total_num_heads // self.tp_size
 
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = getattr(config, "rope_theta", 600000)
 
         self.tp_kv_heads = self.total_kv_heads // self.tp_size
         self.q_size_per_rank = self.head_dim * self.tp_heads
@@ -504,8 +503,8 @@ class BailingMoELinearAttention(nn.Module):
             self.head_dim,
             rotary_dim=rotary_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=config.rope_scaling,
+            base=config.rope_parameters.get("rope_theta", 600000),
+            rope_scaling=config.rope_parameters,
             is_neox_style=True,
             device=get_global_server_args().device,
             dtype=torch.float32,
@@ -648,13 +647,12 @@ class BailingMoEAttention(nn.Module):
         else:
             self.rotary_dim = self.head_dim
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = getattr(config, "rope_theta", 600000)
         self.rotary_emb = get_rope_wrapper(
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=config.rope_scaling,
+            base=config.rope_parameters.get("rope_theta", 600000),
+            rope_scaling=config.rope_parameters,
             device=get_global_server_args().device,
         )
         self.attn = RadixAttention(

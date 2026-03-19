@@ -111,17 +111,15 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
 
+        rope_scaling = config.rope_parameters
         self.is_mrope_enabled = (
-            hasattr(config, "rope_scaling")
-            and config.rope_scaling is not None
-            and "mrope_section" in config.rope_scaling
+            rope_scaling is not None and "mrope_section" in rope_scaling
         )
         # fix rope_scaling for qwen2.5-vl/qwen3-vl
         if self.is_mrope_enabled:
-            rope_scaling = config.rope_scaling
             self.mrope_interleaved = rope_scaling.setdefault("mrope_interleaved", False)
             if not self.mrope_interleaved:
-                rope_scaling["rope_type"] = "default"
+                config.rope_parameters["rope_type"] = "default"
         else:
             self.mrope_interleaved = False
 

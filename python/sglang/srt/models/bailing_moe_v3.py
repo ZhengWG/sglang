@@ -600,13 +600,12 @@ class BailingMoEAttention(nn.Module):
         else:
             self.rotary_dim = self.head_dim
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = getattr(config, "rope_theta", 600000)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=config.rope_scaling,
+            base=config.rope_parameters.get("rope_theta", 600000),
+            rope_scaling=config.rope_parameters,
             dtype=torch.float32,
         )
         self.attn = RadixAttention(
@@ -707,8 +706,8 @@ class BailingMoELinearDecoderLayer(nn.Module):
                         config.q_lora_rank if hasattr(config, "q_lora_rank") else None
                     ),
                     kv_lora_rank=config.kv_lora_rank,
-                    rope_theta=getattr(config, "rope_theta", 600000),
-                    rope_scaling=config.rope_scaling,
+                    rope_theta=config.rope_parameters.get("rope_theta", 600000),
+                    rope_scaling=config.rope_parameters,
                     max_position_embeddings=262144,
                     quant_config=quant_config,
                     layer_id=layer_id,
