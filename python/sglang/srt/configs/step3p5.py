@@ -72,6 +72,7 @@ class Step3p5Config(PretrainedConfig):
             43,
             44,
         ),
+        pad_token_id: int = 0,
         **kwargs,
     ) -> None:
         self.hidden_size = hidden_size
@@ -94,4 +95,4 @@ class Step3p5Config(PretrainedConfig):
         self.moe_layers_enum = moe_layers_enum
         self.layer_types = layer_types
         self.sliding_window = sliding_window
-        super().__init__(**kwargs)
+        super().__init__(pad_token_id=pad_token_id, **kwargs)
