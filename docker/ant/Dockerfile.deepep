@@ -110,6 +110,8 @@ RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_g
 RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/flashinfer_jit_cache/flashinfer_jit_cache_053_cu128.tar" && \
     tar -xf flashinfer_jit_cache_053_cu128.tar && pip3 install flashinfer_jit_cache-0.5.3+cu128-cp39-abi3-manylinux_2_28_x86_64.whl && \
     rm -rf flashinfer_jit_cache_053_cu128.tar flashinfer_jit_cache-0.5.3+cu128-cp39-abi3-manylinux_2_28_x86_64.whl
+# 根据flashinfer-python版本更新flashinfer-jit-cache
+RUN pip install --force-reinstall --no-cache-dir "https://flashinfer.ai/whl/$(python -c 'import torch;print(torch.__version__)' | awk -F+ ' { print $2}')/flashinfer_jit_cache-$(python -c 'import flashinfer;print(flashinfer.__version__)')+$(python -c 'import torch;print(torch.__version__)' | awk -F+ ' { print $2}')-cp39-abi3-manylinux_2_28_x86_64.whl"
 
 # checkpoint-engine
 RUN mkdir -p /root/checkpoint_engine
