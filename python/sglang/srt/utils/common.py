@@ -135,7 +135,7 @@ builtins.FP8_E4M3_MIN = FP8_E4M3_MIN
 # this makes it impossible to see the animation in the progress bar
 # but will avoid messing up with ray or multiprocessing, which wraps
 # each line of output with some prefix.
-BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
+BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 
 
 @lru_cache(maxsize=1)
@@ -1192,6 +1192,11 @@ def suppress_noisy_warnings():
         category=FutureWarning,
     )
 
+    # Suppress noisy third-party HTTP loggers.
+    # huggingface_hub uses httpx which logs every HTTP request at INFO level.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 def suppress_other_loggers():
     suppress_noisy_warnings()
@@ -1389,6 +1394,12 @@ def configure_logger(server_args, prefix: str = ""):
         "disable_existing_loggers": False,
     }
     logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
+
+    # Suppress noisy httpx/httpcore loggers in every process that calls
+    # configure_logger (main, scheduler, detokenizer). Spawned subprocesses
+    # don't inherit the parent's logger state, so this must run here too.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 # source: https://github.com/vllm-project/vllm/blob/93b38bea5dd03e1b140ca997dfaadef86f8f1855/vllm/lora/utils.py#L9
