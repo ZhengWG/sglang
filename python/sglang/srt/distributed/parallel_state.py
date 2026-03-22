@@ -1573,16 +1573,12 @@ def graph_capture(stream: Optional[torch.cuda.Stream] = None):
     with get_tp_group().graph_capture(
         stream=stream
     ) as context, get_pp_group().graph_capture(context):
-        yield context
-        # from sglang.srt.layers.dp_attention import (
-        #     get_attention_tp_group,
-        # )
-        #
-        # if attention_tp_all_reduce_enabled():
-        #     with get_attention_tp_group().graph_capture(context):
-        #         yield context
-        # else:
-        #     yield context
+        moe_ep = _MOE_EP
+        if moe_ep is not None and moe_ep is not _TP:
+            with moe_ep.graph_capture(context):
+                yield context
+        else:
+            yield context
 
 
 logger = logging.getLogger(__name__)
