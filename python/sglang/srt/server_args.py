@@ -150,7 +150,7 @@ LORA_BACKEND_CHOICES = ["triton", "csgmv", "ascend", "torch_native"]
 
 DISAGG_TRANSFER_BACKEND_CHOICES = ["mooncake", "nixl", "ascend", "fake", "mori"]
 
-ENCODER_TRANSFER_BACKEND_CHOICES = ["zmq_to_scheduler", "zmq_to_tokenizer", "mooncake"]
+ENCODER_TRANSFER_BACKEND_CHOICES = ["zmq", "mooncake"]
 
 GRAMMAR_BACKEND_CHOICES = ["xgrammar", "outlines", "llguidance", "none"]
 
@@ -5684,7 +5684,7 @@ class ServerArgs:
             type=str,
             default=ServerArgs.encoder_transfer_backend,
             choices=ENCODER_TRANSFER_BACKEND_CHOICES,
-            help="The backend for encoder disaggregation transfer. Default is zmq_to_scheduler.",
+            help="The backend for encoder disaggregation transfer. 'zmq' uses ZMQ-based transfer to scheduler; 'mooncake' uses GPU-direct RDMA via Mooncake. Default is zmq.",
         )
         parser.add_argument(
             "--encoder-urls",

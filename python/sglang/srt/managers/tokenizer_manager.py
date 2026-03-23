@@ -503,7 +503,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
         self._req_stats_init(obj, request)
         if self.server_args.language_only:
-            self._handle_epd_disaggregation_encode_request(obj)
+            await self._handle_epd_disaggregation_encode_request(obj)
         if self.server_args.tokenizer_worker_num > 1:
             self._attach_multi_http_worker_info(obj)
 
@@ -717,33 +717,17 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
             mm_inputs = None
 
-            if (
-                not self.server_args.language_only
-                or self.server_args.encoder_transfer_backend
-                in ["zmq_to_tokenizer", "mooncake"]
-            ):
-                if self.server_args.language_only:
-                    mm_inputs = await self.mm_receiver.recv_mm_data(
-                        request_obj=obj,
-                        mm_processor=self.mm_processor,
-                        prompt=(input_text or input_ids),
-                        need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
-                    )
-                if mm_inputs is None:
-                    mm_inputs: Dict = await self.mm_data_processor.process(
-                        image_data=obj.image_data,
-                        audio_data=obj.audio_data,
-                        input_text_or_ids=(input_text or input_ids),
-                        request_obj=obj,
-                        max_req_input_len=self.max_req_input_len,
-                    )
-            elif (
-                self.server_args.language_only
-                and self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
-                and not obj.need_wait_for_mm_inputs
-            ):
-                # In language_only mode with zmq_to_scheduler, if we didn't dispatch
-                # to encoder (e.g., only one image), process locally like non-language_only mode
+            if not self.server_args.language_only:
+                mm_inputs: Dict = await self.mm_data_processor.process(
+                    image_data=obj.image_data,
+                    audio_data=obj.audio_data,
+                    input_text_or_ids=(input_text or input_ids),
+                    request_obj=obj,
+                    max_req_input_len=self.max_req_input_len,
+                )
+            elif not obj.need_wait_for_mm_inputs:
+                # In language_only mode (zmq/mooncake backend), if we didn't dispatch
+                # to encoder, process locally like non-language_only mode
                 mm_inputs: Dict = await self.mm_data_processor.process(
                     image_data=obj.image_data,
                     audio_data=obj.audio_data,
@@ -984,6 +968,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 routing_key=obj.routing_key,
                 need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
                 num_items_assigned=obj.num_items_assigned,
+                mm_metadata=obj.mm_metadata,
             )
         elif isinstance(obj, EmbeddingReqInput):
             tokenized_obj = TokenizedEmbeddingReqInput(
@@ -2376,7 +2361,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         )
         return total_mm_items >= envs.SGLANG_ENCODER_DISPATCH_MIN_ITEMS.get()
 
-    def _handle_epd_disaggregation_encode_request(
+    async def _handle_epd_disaggregation_encode_request(
         self, obj: Union[GenerateReqInput, EmbeddingReqInput]
     ):
         """Handle EPD-disaggregation mode encoding request."""
@@ -2390,8 +2375,17 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             # This flag will be used in _tokenize_one_request to determine processing path
             if should_dispatch:
                 obj.need_wait_for_mm_inputs = True
-                if self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+                if self.server_args.encoder_transfer_backend == "zmq":
                     self.mm_receiver.send_encode_request(obj)
+                elif self.server_args.encoder_transfer_backend == "mooncake":
+                    # For mooncake backend: send /encode to get embedding metadata first,
+                    # then pass metadata to scheduler which will do RDMA buffer allocation
+                    self.mm_receiver.send_encode_request(obj)
+                    error_msg = await self.mm_receiver.wait_mm_metadata(obj)
+                    if error_msg:
+                        raise ValueError(
+                            f"Failed to get embedding metadata: {error_msg}"
+                        )
             else:
                 obj.need_wait_for_mm_inputs = False
 

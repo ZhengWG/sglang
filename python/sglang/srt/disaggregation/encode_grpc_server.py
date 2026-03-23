@@ -122,7 +122,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                     embedding_len=embedding_len,
                     embedding_dim=embedding_dim,
                 )
-            elif self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+            elif self.server_args.encoder_transfer_backend == "zmq":
                 embedding_ports = list(request.embedding_port)
                 logger.info(f"embedding_port = {embedding_ports}")
                 if not embedding_ports:
@@ -139,17 +139,6 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                         )
                     await asyncio.gather(*tasks)
                     self.encoder.embedding_to_send.pop(request.req_id, None)
-                return sglang_encoder_pb2.EncodeResponse()
-            elif self.server_args.encoder_transfer_backend == "zmq_to_tokenizer":
-                embedding_port = (
-                    request.embedding_port[0] if request.embedding_port else 0
-                )
-                await self.encoder.send(
-                    req_id=request.req_id,
-                    prefill_host=request.prefill_host,
-                    embedding_port=embedding_port,
-                )
-                self.encoder.embedding_to_send.pop(request.req_id, None)
                 return sglang_encoder_pb2.EncodeResponse()
 
             return sglang_encoder_pb2.EncodeResponse()

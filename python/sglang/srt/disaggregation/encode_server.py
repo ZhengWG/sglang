@@ -18,7 +18,6 @@ import zmq
 import zmq.asyncio
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse, Response
-from transformers import AutoProcessor
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
@@ -55,6 +54,7 @@ from sglang.srt.utils.network import (
     get_local_ip_auto,
     get_zmq_socket,
 )
+from transformers import AutoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -267,22 +267,26 @@ class MMEncoder:
             if self.server_args.encoder_transfer_backend == "mooncake":
                 self.local_ip = get_local_ip_auto()
 
-                self.engine = get_mooncake_transfer_engine()
-                if self.engine is None:
-                    from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import (
-                        init_mooncake_transfer_engine,
-                    )
+                # For encoder-only nodes, we need to initialize mooncake transfer engine
+                # (for language-only nodes, it is initialized by ModelRunner)
+                from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import (
+                    init_mooncake_transfer_engine,
+                )
 
-                    self.engine = init_mooncake_transfer_engine(
-                        hostname=self.local_ip,
-                        gpu_id=self.gpu_id,
-                        ib_device=(
-                            self.server_args.disaggregation_ib_device
-                            or self.server_args.mooncake_ib_device
-                        ),
-                    )
+                init_mooncake_transfer_engine(
+                    hostname=self.local_ip,
+                    gpu_id=self.gpu_id,
+                    ib_device=(
+                        self.server_args.disaggregation_ib_device
+                        or self.server_args.mooncake_ib_device
+                    ),
+                )
+                self.engine = get_mooncake_transfer_engine()
 
             self.embedding_to_send = dict()
+            # For mooncake backend: track forward completion and send reference counts
+            self._send_ref_counts: dict = {}
+            self._forward_ready_events: dict = {}
 
         logger.info(f"rank {rank} init finish ")
 
@@ -970,7 +974,10 @@ class MMEncoder:
             if mm_embedding is None:
                 with torch.inference_mode():
                     mm_embedding: torch.Tensor = get_feature_fn([mm_item])
-                    mm_embedding = mm_embedding.cpu()
+                    if self.server_args.encoder_transfer_backend == "mooncake":
+                        mm_embedding = mm_embedding.contiguous()
+                    else:
+                        mm_embedding = mm_embedding.cpu()
                 if len(mm_embedding.shape) != 2:
                     mm_embedding = mm_embedding.reshape(-1, mm_embedding.shape[-1])
 
@@ -986,6 +993,109 @@ class MMEncoder:
             raise BadRequestError(f"Bad request error: {str(e)}")
         except Exception as e:
             raise InternalError(f"Internal encoding error: {str(e)}")
+
+    async def preprocess_only(self, mm_items, modality: Modality = None):
+        """Phase 1 for mooncake backend: preprocess only (no VIT forward).
+
+        Returns shape metadata immediately so the scheduler can pre-allocate
+        GPU buffers. The VIT forward is started as a background task.
+        """
+        if modality is None:
+            modality = Modality.IMAGE
+        try:
+            mm_inputs, _ = await self._process_mm_items(mm_items, modality)
+        except Exception as e:
+            raise BadRequestError(f"Failed to preprocess mm items: {str(e)}")
+
+        try:
+            grid_dim = _get_mm_grid_dim(mm_inputs, modality)
+            embedding_len = sum(self.get_num_tokens(g, modality) for g in grid_dim)
+            embedding_dim = self._infer_embedding_dims().get(
+                modality, self.model_config.hidden_size
+            )
+            embedding_size = (
+                embedding_len
+                * embedding_dim
+                * torch.finfo(self.model_config.dtype).bits
+                // 8
+            )
+            return mm_inputs, embedding_len, embedding_dim, embedding_size
+        except Exception as e:
+            raise InternalError(f"Preprocess metadata error: {str(e)}")
+
+    def _forward_and_store_sync(self, mm_inputs, modality, req_id, num_parts, part_idx):
+        """Phase 2 (sync): VIT forward + store GPU embedding."""
+        try:
+            mm_item = MultimodalDataItem.from_dict(
+                {
+                    "modality": modality,
+                    "feature": _convert(_get_mm_feature(mm_inputs, modality)),
+                }
+            )
+            for k, v in mm_inputs.items():
+                if k in _mm_feature_attrs[modality]:
+                    continue
+                mm_item.set(k, _convert(v))
+
+            with torch.inference_mode():
+                if modality == Modality.IMAGE:
+                    mm_embedding = self.model.get_image_feature([mm_item])
+                else:
+                    raise NotImplementedError(
+                        f"mooncake backend preprocess_only only supports IMAGE modality, got {modality}"
+                    )
+                mm_embedding = mm_embedding.contiguous()
+            if len(mm_embedding.shape) != 2:
+                mm_embedding = mm_embedding.reshape(-1, mm_embedding.shape[-1])
+
+            if self.profiler is not None:
+                self.profiler.step()
+
+            grid_dim = _get_mm_grid_dim(mm_inputs, modality)
+            aux_data = _build_mm_aux_data(mm_inputs)
+
+            if self.rank == 0:
+                mm_data = EmbeddingData(
+                    req_id,
+                    num_parts,
+                    part_idx,
+                    grid_dim,
+                    modality,
+                    mm_embedding,
+                    **aux_data,
+                )
+                self.embedding_to_send[req_id] = mm_data
+        except Exception as e:
+            error_code = getattr(e, "code", HTTPStatus.INTERNAL_SERVER_ERROR)
+            error_msg = str(e)
+            logger.error(
+                f"Rank {self.rank} forward_and_store failed for {req_id}: {error_msg}"
+            )
+            if self.rank == 0:
+                mm_data = EmbeddingData(
+                    req_id,
+                    num_parts,
+                    part_idx,
+                    None,
+                    modality,
+                    error_msg=error_msg,
+                    error_code=error_code,
+                )
+                self.embedding_to_send[req_id] = mm_data
+
+    async def forward_and_store(self, mm_inputs, modality, req_id, num_parts, part_idx):
+        """Phase 2 (async wrapper): runs VIT forward in thread pool, then signals ready."""
+        await asyncio.get_event_loop().run_in_executor(
+            self.executor,
+            self._forward_and_store_sync,
+            mm_inputs,
+            modality,
+            req_id,
+            num_parts,
+            part_idx,
+        )
+        if self.rank == 0 and req_id in self._forward_ready_events:
+            self._forward_ready_events[req_id].set()
 
     async def _send(
         self,
@@ -1082,7 +1192,7 @@ class MMEncoder:
                 logger.debug(f"Created error EmbeddingData: {mm_data}")
             return 0, 0, 0, error_msg, error_code
 
-    # For zmq_to_tokenizer zmq_to_scheduler and mooncake
+    # For zmq and mooncake backends
     async def send(
         self, req_id, prefill_host, embedding_port, session_id=None, buffer_address=None
     ):
@@ -1096,7 +1206,7 @@ class MMEncoder:
             embedding_port=embedding_port,
         )
 
-    # For zmq_to_scheduler
+    # For zmq backend
     async def send_with_url(
         self,
         req_id,
@@ -1338,21 +1448,67 @@ async def get_condition(rid):
 async def handle_encode_request(request: dict):
     req_id = request["req_id"]
     try:
-
-        def start_background_send(req_id):
-            task = asyncio.create_task(encoder.send_with_url(req_id=req_id))
-            encoder.background_tasks.add(task)
-            task.add_done_callback(encoder.background_tasks.discard)
-
-        # broadcast request
+        # broadcast request to other TP ranks
         request.update({"enter_time": time.time()})
         for socket in send_sockets:
             socket.send_pyobj(request)
+
+        backend = encoder.server_args.encoder_transfer_backend
+        modality = Modality.from_str(request["modality"])
+
+        if backend == "mooncake":
+            # Phase 1: preprocess only, return metadata immediately.
+            # Phase 2 (VIT forward) runs in background.
+            try:
+                mm_inputs, embedding_len, embedding_dim, embedding_size = (
+                    await encoder.preprocess_only(
+                        mm_items=request["mm_items"],
+                        modality=modality,
+                    )
+                )
+
+                event = asyncio.Event()
+                encoder._forward_ready_events[req_id] = event
+
+                async def _bg_forward():
+                    try:
+                        await encoder.forward_and_store(
+                            mm_inputs=mm_inputs,
+                            modality=modality,
+                            req_id=request["req_id"],
+                            num_parts=request["num_parts"],
+                            part_idx=request["part_idx"],
+                        )
+                    except Exception as e:
+                        logger.error(f"Background forward failed for {req_id}: {e}")
+
+                task = asyncio.create_task(_bg_forward())
+                encoder.background_tasks.add(task)
+                task.add_done_callback(encoder.background_tasks.discard)
+
+                del request["mm_items"]
+                request.update(
+                    {
+                        "embedding_size": embedding_size,
+                        "embedding_len": embedding_len,
+                        "embedding_dim": embedding_dim,
+                    }
+                )
+                return ORJSONResponse(content=request)
+            except Exception as e:
+                error_code = getattr(e, "code", HTTPStatus.INTERNAL_SERVER_ERROR)
+                error_msg = str(e)
+                return ORJSONResponse(
+                    status_code=error_code,
+                    content={"status": "error", "message": error_msg, "req_id": req_id},
+                )
+
+        # zmq backend: full encode + send to scheduler ZMQ endpoint
         if encoder.mm_global_cache is not None:
             nbytes, embedding_len, embedding_dim, error_msg, error_code = (
                 await encoder.encode_with_global_cache(
                     mm_items=request["mm_items"],
-                    modality=Modality.from_str(request["modality"]),
+                    modality=modality,
                     req_id=request["req_id"],
                     num_parts=request["num_parts"],
                     part_idx=request["part_idx"],
@@ -1363,66 +1519,51 @@ async def handle_encode_request(request: dict):
             nbytes, embedding_len, embedding_dim, error_msg, error_code = (
                 await encoder.encode(
                     mm_items=request["mm_items"],
-                    modality=Modality.from_str(request["modality"]),
+                    modality=modality,
                     req_id=request["req_id"],
                     num_parts=request["num_parts"],
                     part_idx=request["part_idx"],
                 )
             )
 
+        def start_background_send(req_id):
+            task = asyncio.create_task(encoder.send_with_url(req_id=req_id))
+            encoder.background_tasks.add(task)
+            task.add_done_callback(encoder.background_tasks.discard)
+
         if error_msg:
-            if encoder.server_args.encoder_transfer_backend == "zmq_to_scheduler":
-                if request["embedding_port"] is None:
-                    start_background_send(req_id)
-                else:
-                    for port in request["embedding_port"]:
-                        await encoder.send(
-                            req_id=req_id,
-                            prefill_host=request["prefill_host"],
-                            embedding_port=port,
-                        )
+            if request["embedding_port"] is None:
+                start_background_send(req_id)
+            else:
+                for port in request["embedding_port"]:
+                    await encoder.send(
+                        req_id=req_id,
+                        prefill_host=request["prefill_host"],
+                        embedding_port=port,
+                    )
             return ORJSONResponse(
                 status_code=error_code,
                 content={"status": "error", "message": error_msg, "req_id": req_id},
             )
-        if encoder.server_args.encoder_transfer_backend == "mooncake":
-            del request["mm_items"]
-            request.update(
-                {
-                    "embedding_size": nbytes,
-                    "embedding_len": embedding_len,
-                    "embedding_dim": embedding_dim,
-                }
-            )
-            return ORJSONResponse(content=request)
-        elif encoder.server_args.encoder_transfer_backend == "zmq_to_scheduler":
-            logger.info(f"{request['embedding_port'] = }")
-            if request["embedding_port"] is None:
-                await encoder.send_with_url(
-                    req_id=request["req_id"],
-                )
-            else:
-                assert type(request["embedding_port"]) == list
-                tasks = []
-                for embedding_port in request["embedding_port"]:
-                    tasks.append(
-                        encoder.send(
-                            req_id=request["req_id"],
-                            prefill_host=request["prefill_host"],
-                            embedding_port=embedding_port,
-                        )
+
+        # zmq backend: send embedding to scheduler
+        logger.info(f"{request['embedding_port'] = }")
+        if request["embedding_port"] is None:
+            await encoder.send_with_url(req_id=request["req_id"])
+        else:
+            assert type(request["embedding_port"]) == list
+            tasks = []
+            for embedding_port in request["embedding_port"]:
+                tasks.append(
+                    encoder.send(
+                        req_id=request["req_id"],
+                        prefill_host=request["prefill_host"],
+                        embedding_port=embedding_port,
                     )
-                await asyncio.gather(*tasks)
-                encoder.embedding_to_send.pop(request["req_id"], None)
-            return ORJSONResponse(content=None)
-        elif encoder.server_args.encoder_transfer_backend == "zmq_to_tokenizer":
-            await encoder.send(
-                req_id=request["req_id"],
-                prefill_host=request["prefill_host"],
-                embedding_port=request["embedding_port"],
-            )
+                )
+            await asyncio.gather(*tasks)
             encoder.embedding_to_send.pop(request["req_id"], None)
-            return ORJSONResponse(content=None)
+        return ORJSONResponse(content=None)
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Unexpected error in encoder logic for {req_id}: {error_msg}")
@@ -1439,15 +1580,37 @@ async def handle_encode_request(request: dict):
 
 @app.post("/send")
 async def handle_send_request(request: dict):
-    # mooncake backend
+    # mooncake backend: wait for VIT forward to complete, then do RDMA transfer
+    req_id = request["req_id"]
+    if encoder.server_args.encoder_transfer_backend == "mooncake":
+        event = encoder._forward_ready_events.get(req_id)
+        if event is not None and not event.is_set():
+            await event.wait()
+
     await encoder.send(
-        req_id=request["req_id"],
+        req_id=req_id,
         prefill_host=request["prefill_host"],
         embedding_port=request["embedding_port"],
         session_id=request["session_id"],
         buffer_address=request["buffer_address"],
     )
-    encoder.embedding_to_send.pop(request["req_id"], None)
+
+    if encoder.server_args.encoder_transfer_backend == "mooncake":
+        # Ref-count sends: mooncake backend may have multiple TP ranks receiving
+        receive_count = request.get("receive_count", 1)
+        ref = encoder._send_ref_counts.get(req_id)
+        if ref is None:
+            encoder._send_ref_counts[req_id] = receive_count - 1
+        else:
+            encoder._send_ref_counts[req_id] = ref - 1
+        if encoder._send_ref_counts[req_id] <= 0:
+            encoder._send_ref_counts.pop(req_id, None)
+            mm_data = encoder.embedding_to_send.pop(req_id, None)
+            if mm_data is not None:
+                mm_data.embedding = None
+            encoder._forward_ready_events.pop(req_id, None)
+    else:
+        encoder.embedding_to_send.pop(req_id, None)
     return ORJSONResponse(content=None)
 
 
