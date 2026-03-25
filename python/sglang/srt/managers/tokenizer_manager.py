@@ -135,6 +135,31 @@ _REQUEST_STATE_WAIT_TIMEOUT = envs.SGLANG_REQUEST_STATE_WAIT_TIMEOUT.get()
 
 logger = logging.getLogger(__name__)
 
+# MM CUDA OOM: count preprocess CUDA OOMs in this tokenizer process; optional exit after N
+# (envs.SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD). No empty_cache reclaim; use process restart instead.
+
+
+def _is_mm_preprocess_cuda_oom(exc: BaseException) -> bool:
+    # Match plain torch OOM and wrapped API errors (message still contains CUDA OOM text).
+    top = str(exc).lower()
+    if "cuda out of memory" in top or (
+        "out of memory" in top and "tried to allocate" in top and "cuda" in top
+    ):
+        return True
+    e, seen = exc, set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        et = type(e)
+        mod = getattr(et, "__module__", "") or ""
+        if et.__name__ == "OutOfMemoryError" and mod.startswith("torch"):
+            return True
+        if isinstance(e, RuntimeError):
+            m = str(e).lower()
+            if "out of memory" in m and ("cuda" in m or "gpu" in m):
+                return True
+        e = e.__cause__
+    return False
+
 
 @dataclasses.dataclass
 class ReqState:
@@ -448,6 +473,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.initial_weights_loaded = True
         if self.server_args.checkpoint_engine_wait_weights_before_ready:
             self.initial_weights_loaded = False
+
+        self._mm_cuda_oom_count = 0
+        self._mm_cuda_oom_lock = threading.Lock()
 
         # Weight updates
         # The event to notify the weight sync is finished.
@@ -768,6 +796,28 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             input_ids, token_type_ids, input_format, original_batch_size
         )
 
+    def _handle_mm_preprocess_cuda_oom(self, exc: BaseException) -> None:
+        threshold = envs.SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD.value
+        if threshold <= 0 or not _is_mm_preprocess_cuda_oom(exc):
+            return
+        logger.error("Multimodal preprocess CUDA OOM: %s", exc)
+        with self._mm_cuda_oom_lock:
+            self._mm_cuda_oom_count += 1
+            c = self._mm_cuda_oom_count
+
+        if c >= threshold:
+            logger.error(
+                "MM CUDA OOM count %s reached SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD=%s; exiting tokenizer.",
+                c,
+                threshold,
+            )
+            try:
+                self.dump_requests_before_crash()
+            except Exception:
+                logger.exception("dump_requests_before_crash failed during MM OOM exit")
+            kill_process_tree(os.getpid(), include_parent=True)
+            sys.exit(1)
+
     async def _tokenize_one_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
@@ -818,28 +868,45 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 obj.audio_data = [obj.audio_data]
             self._validate_mm_limits(obj)
 
-            # validate mm limits per prompt
-            self._validate_mm_limits(obj)
-
             mm_inputs = None
             preprocessing_start_time = None
             preprocessing_time = None
 
-            if (
-                not self.server_args.language_only
-                or self.server_args.encoder_transfer_backend
-                in ["zmq_to_tokenizer", "mooncake"]
-            ):
-                if self.server_args.language_only:
-                    mm_inputs = await self.mm_receiver.recv_mm_data(
-                        request_obj=obj,
-                        mm_processor=self.mm_processor,
-                        prompt=(input_text or input_ids),
-                        need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
-                    )
-                if mm_inputs is None:
-                    if self.enable_metrics:
-                        preprocessing_start_time = time.perf_counter()
+            try:
+                if (
+                    not self.server_args.language_only
+                    or self.server_args.encoder_transfer_backend
+                    in ["zmq_to_tokenizer", "mooncake"]
+                ):
+                    if self.server_args.language_only:
+                        mm_inputs = await self.mm_receiver.recv_mm_data(
+                            request_obj=obj,
+                            mm_processor=self.mm_processor,
+                            prompt=(input_text or input_ids),
+                            need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
+                        )
+                    if mm_inputs is None:
+                        if self.enable_metrics:
+                            preprocessing_start_time = time.perf_counter()
+                        mm_inputs: Dict = await self.mm_data_processor.process(
+                            image_data=obj.image_data,
+                            audio_data=obj.audio_data,
+                            input_text_or_ids=(input_text or input_ids),
+                            request_obj=obj,
+                            max_req_input_len=self.max_req_input_len,
+                        )
+                        if self.enable_metrics:
+                            preprocessing_end_time = time.perf_counter()
+                            preprocessing_time = (
+                                preprocessing_end_time - preprocessing_start_time
+                            )
+                elif (
+                    self.server_args.language_only
+                    and self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
+                    and not obj.need_wait_for_mm_inputs
+                ):
+                    # In language_only mode with zmq_to_scheduler, if we didn't dispatch
+                    # to encoder (e.g., only one image), process locally like non-language_only mode
                     mm_inputs: Dict = await self.mm_data_processor.process(
                         image_data=obj.image_data,
                         audio_data=obj.audio_data,
@@ -847,25 +914,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         request_obj=obj,
                         max_req_input_len=self.max_req_input_len,
                     )
-                    if self.enable_metrics:
-                        preprocessing_end_time = time.perf_counter()
-                        preprocessing_time = (
-                            preprocessing_end_time - preprocessing_start_time
-                        )
-            elif (
-                self.server_args.language_only
-                and self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
-                and not obj.need_wait_for_mm_inputs
-            ):
-                # In language_only mode with zmq_to_scheduler, if we didn't dispatch
-                # to encoder (e.g., only one image), process locally like non-language_only mode
-                mm_inputs: Dict = await self.mm_data_processor.process(
-                    image_data=obj.image_data,
-                    audio_data=obj.audio_data,
-                    input_text_or_ids=(input_text or input_ids),
-                    request_obj=obj,
-                    max_req_input_len=self.max_req_input_len,
-                )
+            except BaseException as e:
+                self._handle_mm_preprocess_cuda_oom(e)
+                raise
 
             # mm_inputs增加词表大小属性，为后续mm_data_item的hash -> pad_value
             # 增加offset防止pad_value跟正常的词表token冲突

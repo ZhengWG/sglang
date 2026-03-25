@@ -284,6 +284,9 @@ class Envs:
     # Max fraction of cache (by token count) that can be pinned; 0 = disable pinning.
     SGLANG_HICACHE_MAX_PINNED_RATIO = EnvFloat(0.0)
 
+    # Multimodal preprocess (tokenizer process): exit after N CUDA OOMs; 0 disables.
+    SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD = EnvInt(0)
+
     # Mooncake KV Transfer
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL = EnvStr(None)
     ENABLE_ASCEND_TRANSFER_WITH_MOONCAKE = EnvBool(False)
