@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
@@ -24,6 +25,7 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info_v2 import (
     EagleDraftInputV2Mixin,
     EagleVerifyInputV2Mixin,
+    _get_verify_tp_group,
 )
 from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
 from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
@@ -376,6 +378,16 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 threshold_acc=get_global_server_args().speculative_accept_threshold_acc,
                 deterministic=True,
             )
+
+        # Sync verify results across TP ranks to prevent divergence.
+        # target_probs may not be bit-identical across ranks due to floating-point
+        # non-determinism in all-reduce/matmul, causing different sampling results
+        # and eventual deadlocks from mismatched collective operations.
+        tp_group = _get_verify_tp_group()
+        if tp_group.world_size > 1:
+            dist.broadcast(predict, src=0, group=tp_group.device_group)
+            dist.broadcast(accept_index, src=0, group=tp_group.device_group)
+            dist.broadcast(accept_length, src=0, group=tp_group.device_group)
 
         if SIMULATE_ACC_LEN > 0.0:
             # Do simulation

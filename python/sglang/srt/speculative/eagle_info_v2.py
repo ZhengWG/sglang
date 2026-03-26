@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from sglang.srt.distributed import get_tp_group
+from sglang.srt.layers.dp_attention import get_attention_tp_group, is_dp_attention_enabled
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
 from sglang.srt.managers.utils import get_alloc_len_per_decode
@@ -47,6 +51,14 @@ if is_cuda():
         top_k_renorm_prob,
         top_p_renorm_prob,
         tree_speculative_sampling_target_only,
+    )
+
+@functools.lru_cache(maxsize=None)
+def _get_verify_tp_group():
+    return (
+        get_attention_tp_group()
+        if is_dp_attention_enabled()
+        else get_tp_group()
     )
 
 
@@ -371,6 +383,16 @@ class EagleVerifyInputV2Mixin:
                 threshold_acc=get_global_server_args().speculative_accept_threshold_acc,
                 deterministic=True,
             )
+
+        # Sync verify results across TP ranks to prevent divergence.
+        # target_probs may not be bit-identical across ranks due to floating-point
+        # non-determinism in all-reduce/matmul, causing different sampling results
+        # and eventual deadlocks from mismatched collective operations.
+        tp_group = _get_verify_tp_group()
+        if tp_group.world_size > 1:
+            dist.broadcast(predict, src=0, group=tp_group.device_group)
+            dist.broadcast(accept_index, src=0, group=tp_group.device_group)
+            dist.broadcast(accept_length, src=0, group=tp_group.device_group)
 
         if SIMULATE_ACC_LEN > 0:
             # Do simulation
