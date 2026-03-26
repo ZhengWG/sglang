@@ -385,9 +385,9 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         # and eventual deadlocks from mismatched collective operations.
         tp_group = _get_verify_tp_group()
         if tp_group.world_size > 1:
-            dist.broadcast(predict, src=0, group=tp_group.device_group)
-            dist.broadcast(accept_index, src=0, group=tp_group.device_group)
-            dist.broadcast(accept_length, src=0, group=tp_group.device_group)
+            dist.broadcast(predict, src=tp_group.ranks[0], group=tp_group.device_group)
+            dist.broadcast(accept_index, src=tp_group.ranks[0], group=tp_group.device_group)
+            dist.broadcast(accept_length, src=tp_group.ranks[0], group=tp_group.device_group)
 
         if SIMULATE_ACC_LEN > 0.0:
             # Do simulation
