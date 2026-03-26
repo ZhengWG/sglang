@@ -776,7 +776,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         )
 
     def _handle_mm_preprocess_cuda_oom(self, exc: BaseException) -> None:
-        threshold = envs.SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD.value
+        threshold = envs.SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD.get()
         if threshold <= 0 or not _is_mm_preprocess_cuda_oom(exc):
             return
         logger.error("Multimodal preprocess CUDA OOM: %s", exc)
