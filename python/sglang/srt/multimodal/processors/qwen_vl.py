@@ -393,8 +393,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.IMAGE_FACTOR = 28
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = envs.SGLANG_IMAGE_MAX_PIXELS.get()
-        # FIXME(yudian.zy): 临时把qwen2.5-vl的单图大小限制为1k*1k，防止rank0 OOM
-        self.MAX_PIXELS = int(self.MAX_PIXELS // 12.25)
+        if envs.SGLANG_VLM_QWEN_LIMIT_PIXEL.get():
+            # Limit qwen2.5-vl single-image size to ~1k*1k to avoid rank0 OOM
+            self.MAX_PIXELS = int(self.MAX_PIXELS // 12.25)
 
         self.VIDEO_MIN_PIXELS = 4 * 28 * 28  # 3136
         self.VIDEO_MAX_PIXELS = 16384 * 28 * 28  # 12845056
@@ -407,8 +408,11 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             image_processor = getattr(_processor, "image_processor", None)
             self.IMAGE_FACTOR = image_processor.patch_size * image_processor.merge_size
 
-            # FIXME(yudian.zy): 临时把qwen3-vl的单图大小限制为1k*1k，防止rank0 OOM
-            if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            if envs.SGLANG_VLM_QWEN_LIMIT_PIXEL.get() and self.model_type in (
+                "qwen3_vl",
+                "qwen3_vl_moe",
+            ):
+                # Limit qwen3-vl single-image size to ~1k*1k to avoid rank0 OOM
                 image_longest_edge = image_processor.size["longest_edge"]
                 if image_longest_edge >= (32 * self.IMAGE_FACTOR) ** 2:
                     image_processor.size["longest_edge"] = image_longest_edge // 16

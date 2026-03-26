@@ -442,6 +442,8 @@ class Envs:
     # VLM
     SGLANG_VLM_CACHE_SIZE_MB = EnvInt(100)
     SGLANG_IMAGE_MAX_PIXELS = EnvInt(16384 * 28 * 28)
+    # default true， Keep original behavior
+    SGLANG_VLM_QWEN_LIMIT_PIXEL = EnvBool(True)
     SGLANG_RESIZE_RESAMPLE = EnvStr("")
     SGLANG_MM_BUFFER_SIZE_MB = EnvInt(0)
     SGLANG_MM_PRECOMPUTE_HASH = EnvBool(False)
