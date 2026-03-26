@@ -387,9 +387,6 @@ class ServerArgs:
     use_ray: bool = False
     custom_sigquit_handler: Optional[Callable] = None
 
-    # mm limit per prompt
-    limit_mm_per_prompt: Optional[Dict[str, Any]] = None
-
     # Logging
     log_level: str = "info"
     log_level_http: Optional[str] = None
@@ -969,12 +966,6 @@ class ServerArgs:
             self.speculative_draft_model_quantization = self.quantization
         elif self.speculative_draft_model_quantization == "unquant":
             self.speculative_draft_model_quantization = None
-        if self.limit_mm_per_prompt is None:
-            self.limit_mm_per_prompt = {
-                "image": 30,
-                "video": 1,
-                "audio": 5,
-            }
 
     def _handle_modelscope_paths(self):
         """Resolve model / tokenizer / speculative-draft paths from the local
@@ -3549,6 +3540,12 @@ class ServerArgs:
             self.skip_server_warmup = True
 
         # Validate limit_mm_per_prompt modalities
+        if self.limit_mm_data_per_request is None:
+            self.limit_mm_data_per_request = {
+                "image": 30,
+                "video": 1,
+                "audio": 5,
+            }
         if self.limit_mm_data_per_request:
             if isinstance(self.limit_mm_data_per_request, str):
                 self.limit_mm_data_per_request = json.loads(
@@ -4178,12 +4175,6 @@ class ServerArgs:
         parser.add_argument(
             "--custom-sigquit-handler",
             help="Register a custom sigquit handler so you can do additional cleanup after the server is shutdown. This is only available for Engine, not for CLI.",
-        )
-        parser.add_argument(
-            "--limit-mm-per-prompt",
-            type=json.loads,
-            default=ServerArgs.limit_mm_per_prompt,
-            help="Multimodal resource limit per req, a json config contains keys: `image`, `video`, `audio`",
         )
 
         # Logging

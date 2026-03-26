@@ -667,27 +667,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         # For true batches, return as-is
         return input_ids, token_type_ids
 
-    def _validate_mm_limits(self, obj: Union[GenerateReqInput, EmbeddingReqInput],):
-        mm_limit = self.server_args.limit_mm_per_prompt
-        image_limit = int(mm_limit.get("image", 0))
-        audio_limit = int(mm_limit.get("audio", 0))
-        video_limit = int(mm_limit.get("video", 0))
-        if image_limit > 0 and obj.image_data and isinstance(obj.image_data, list):
-            if len(obj.image_data) > image_limit:
-                raise ValueError(
-                    f"Received {len(obj.image_data)} images but the limit is {image_limit}."
-                )
-        if audio_limit > 0 and obj.audio_data and isinstance(obj.audio_data, list):
-            if len(obj.audio_data) > audio_limit:
-                raise ValueError(
-                    f"Received {len(obj.audio_data)} audios but the limit is {audio_limit}."
-                )
-        if video_limit > 0 and obj.video_data and isinstance(obj.video_data, list):
-            if len(obj.video_data) > video_limit:
-                raise ValueError(
-                    f"Received {len(obj.video_data)} videos but the limit is {video_limit}."
-                )
-
     async def _tokenize_texts(
         self, texts: Union[str, List[str]], is_cross_encoder: bool = False
     ) -> Union[
@@ -816,9 +795,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 obj.video_data = [obj.video_data]
             if obj.audio_data is not None and not isinstance(obj.audio_data, list):
                 obj.audio_data = [obj.audio_data]
-            self._validate_mm_limits(obj)
-
-            # validate mm limits per prompt
             self._validate_mm_limits(obj)
 
             mm_inputs = None
