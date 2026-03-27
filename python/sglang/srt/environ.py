@@ -518,6 +518,10 @@ class Envs:
 
     # Aiter
     SGLANG_USE_AITER_FP8_PER_TOKEN = EnvBool(False)
+
+    # RFork
+    SGLANG_RFORK_ENABLED = EnvBool(False)
+
     # fmt: on
 
     # EPD

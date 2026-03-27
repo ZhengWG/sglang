@@ -2435,6 +2435,94 @@ class RemoteInstanceModelLoader(BaseModelLoader):
 
         logger.info("ModelExpress: weight transfer complete for tp_rank=%d", tp_rank)
 
+class RForkModelLoader(BaseModelLoader):
+    """Model loader that can load Tensors from remote sglang instance."""
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(
+                f"Model loader extra config is not supported for "
+                f"load format {load_config.load_format}"
+            )
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        raise NotImplementedError
+
+    def load_model(
+        self,
+        *,
+        model_config: ModelConfig,
+        device_config: DeviceConfig,
+    ) -> nn.Module:
+        logger.info("Loading weights from rfork ...")
+        load_config = self.load_config
+
+        assert load_config.load_format == LoadFormat.RFORK, (
+            f"Model loader RForkModelLoader is not supported for "
+            f"load format {load_config.load_format}"
+        )
+
+        quant_config = _get_quantization_config(model_config, self.load_config)
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config, quant_config)
+
+        try:
+            if not load_config.rfork_worker.pre_transfer(model):
+                raise RuntimeError("pre_transfer failed.")
+            if not load_config.rfork_worker.is_seed_available():
+                raise RuntimeError("seed is not available.")
+            if not load_config.rfork_worker.transfer(model):
+                raise RuntimeError("transfer failed.")
+            if not load_config.rfork_worker.post_transfer():
+                raise RuntimeError("post_transfer failed.")
+
+            # Set result: success.
+            load_config.rfork_worker.set_transfer_result(True)
+
+            post_load_weights(model, model_config)
+
+            # Start seed service.
+            load_config.rfork_worker.start_seed_service(model)
+
+            return model.eval()
+        except Exception as e:
+            # Release seed
+            load_config.rfork_worker.post_transfer()
+            # Set result: failed.
+            load_config.rfork_worker.set_transfer_result(False)
+            # Cleanup after failed transfer, including unregister RDMA memory regions.
+            if (not load_config.rfork_worker.cleanup_after_transfer_failed()):
+                raise RuntimeError("cleanup_after_transfer_failed failed.")
+
+            # Clean-up dummy model
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # Check whether fallback loader is valid.
+            if (
+                load_config.rfork_fallback_load_format is None
+                or load_config.rfork_fallback_load_format == LoadFormat.RFORK
+            ):
+                # Fail loudly if fallback loader is invalid
+                raise RuntimeError("Invalid fallback loader.")
+
+            # WARNING: This will block until model has been mounted.
+            fallback_model_path = model_config.model_path
+            if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
+                fallback_model_path = load_config.rfork_worker.get_fallback_model_path()
+            if (fallback_model_path is None or fallback_model_path == ""):
+                # Fail loudly if fallback model path is invalid
+                raise RuntimeError("Invalid fallback model path.")
+
+            # Load weights through fallback loader.
+            logger.exception(f"Failed to load weights from remote instance: {e}. Fallback to load_format: {load_config.rfork_fallback_load_format}, model_path: {fallback_model_path}")
+            load_config.load_format = load_config.rfork_fallback_load_format
+            model_config.model_path = fallback_model_path
+            loader = get_model_loader(load_config, model_config)
+            return loader.load_model(model_config=model_config, device_config=device_config)
 
 class RemoteModelLoader(BaseModelLoader):
     """Model loader that can load Tensors from remote database."""
@@ -2963,6 +3051,9 @@ def get_model_loader(
 
     if load_config.load_format == LoadFormat.REMOTE_INSTANCE:
         return RemoteInstanceModelLoader(load_config)
+
+    if load_config.load_format == LoadFormat.RFORK:
+        return RForkModelLoader(load_config)
 
     if load_config.load_format == LoadFormat.PRIVATE:
         import importlib

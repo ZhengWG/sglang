@@ -192,6 +192,7 @@ from sglang.srt.utils.patch_torch import (
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.weight_checker import WeightChecker
+from sglang.srt.rfork.rfork_worker import RForkWorker
 from sglang.srt.weight_sync.tensor_bucket import (
     FlattenedTensorBucket,
     FlattenedTensorMetadata,
@@ -383,6 +384,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 # if there is no aux layer, set to None
                 self.eagle_aux_hidden_state_layer_ids = None
 
+        self.rfork_worker = None
+        self.rfork_fallback_load_format = None
+
         # Apply the rank zero filter to logger
         if server_args.show_time_cost:
             enable_show_time_cost()
@@ -509,14 +513,32 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if server_args.enable_lora:
             self.model_config.is_post_loading_model = False
 
-        if envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (
-            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
-        ):
-            self.model_config.model_path = get_model_path(with_weights=True)
-
         # Load the model
         self.sampler = create_sampler()
+
+        if envs.SGLANG_RFORK_ENABLED.get() and self.model_config.is_rfork_model:
+            # Init RForkWorker
+            self.rfork_worker = RForkWorker(
+                self.server_args.disaggregation_mode,
+                self.server_args.node_rank,
+                self.tp_rank,
+                self.gpu_id,
+                self.server_args.dtype,
+                self.is_draft_worker,
+            )
+            # Save original load_format for fallback if needed.
+            self.rfork_fallback_load_format = self.server_args.load_format
+            # Update load_format to `rfork`.
+            self.server_args.load_format = LoadFormat.RFORK
+        elif envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model):
+            self.model_config.model_path = get_model_path(with_weights=True)
+
         self.load_model()
+
+        if envs.SGLANG_RFORK_ENABLED.get() and self.model_config.is_rfork_model:
+            if not self.rfork_worker.is_transfer_succeeded():
+                # Restore original load_format for fallback.
+                self.server_args.load_format = self.rfork_fallback_load_format
 
         # Load the expert backup client
         self.expert_backup_client = (
@@ -711,6 +733,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.info(
                 f"Update weight end. Time elapsed: {time.perf_counter() - tic:.2f} s. "
             )
+
+        if envs.SGLANG_RFORK_ENABLED.get() and self.model_config.is_rfork_model:
+            # Start RFork seed service
+            self.rfork_worker.start_seed_service(self.model)
 
         # Initialize piecewise CUDA graph
         self.init_piecewise_cuda_graphs()
@@ -1111,6 +1137,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             modelexpress_url=self.server_args.modelexpress_url,
             modelexpress_model_name=self.server_args.modelexpress_model_name
             or self.server_args.model_path,
+            rfork_worker=self.rfork_worker,
+            rfork_fallback_load_format=self.rfork_fallback_load_format,
             modelopt_config=modelopt_config,
             rl_quant_profile=self.server_args.rl_quant_profile,
             draft_model_idx=self.draft_model_idx,

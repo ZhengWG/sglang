@@ -226,6 +226,9 @@ class ModelConfig:
         # must be called after _verify_quantization()
         self.is_post_loading_model = self._is_post_loading_model()
 
+        # Check if model supports RFork
+        self.is_rfork_model = self._is_rfork_model()
+
         # Verify dual-chunk attention config
         self._verify_dual_chunk_attention_config()
 
@@ -940,6 +943,19 @@ class ModelConfig:
                 return True
 
         return False
+
+    def _is_rfork_model(self):
+        """Check if model is RFork model."""
+
+        # Supports all non-draft models for now.
+        if not self.is_draft_model:
+            return True
+
+        # For draft models, only DeepseekV3ForCausalLMNextN is supported.
+        supported_draft_models = [
+            "DeepseekV3ForCausalLMNextN",
+        ]
+        return any(arch in supported_draft_models for arch in self.hf_config.architectures)
 
     # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
     def _verify_quantization(self) -> None:

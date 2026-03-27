@@ -3170,6 +3170,12 @@ class ServerArgs:
                 self.validate_transfer_engine()
             )
 
+        # Store original target model load format as speculative_draft_load_format
+        # if speculative_draft_load_format is not specified,
+        # in case target model's load format will be modified later.
+        if self.speculative_draft_load_format is None:
+            self.speculative_draft_load_format = self.load_format
+
     def _is_mistral_native_format(self) -> bool:
         """Detect if the model uses Mistral native format (params.json + consolidated weights).
 
