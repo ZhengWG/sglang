@@ -43,6 +43,7 @@ from sglang.srt.distributed import (
     divide,
     get_moe_expert_parallel_world_size,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -2193,7 +2194,17 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                     forward_batch.seq_lens_cpu.tolist(),
                 )
 
-        with get_attn_tp_context().maybe_input_scattered(forward_batch):
+        # External input_embeds (e.g. VL) are typically full and identical on every TP
+        # rank. attn_tp_input_scattered's first-layer reduce_scatter sums across ranks;
+        # zero non-rank-0 so the sum equals a single full embedding, then scatter.
+        attn_tp_ctx = get_attn_tp_context()
+        if (
+            input_embeds is not None
+            and attn_tp_ctx.use_input_scattered(forward_batch)
+            and get_tensor_model_parallel_rank() != 0
+        ):
+            input_embeds.zero_()
+        with attn_tp_ctx.maybe_input_scattered(forward_batch):
             hidden_states = self.model(
                 input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
