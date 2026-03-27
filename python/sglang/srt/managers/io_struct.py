@@ -1238,12 +1238,13 @@ class ClearHiCacheReqOutput(BaseReq):
 
 @dataclass
 class FlushCacheReqInput(BaseReq):
-    pass
+    timeout_s: Optional[float] = None
 
 
 @dataclass
 class FlushCacheReqOutput(BaseReq):
     success: bool
+    message: str = ""
 
 
 @dataclass
