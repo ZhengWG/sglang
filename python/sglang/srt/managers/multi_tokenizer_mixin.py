@@ -40,7 +40,6 @@ from sglang.srt.managers.io_struct import (
     BaseBatchReq,
     BaseReq,
     BatchEmbeddingOutput,
-    BatchMultimodalOutput,
     BatchStrOutput,
     BatchTokenIDOutput,
 )
@@ -287,17 +286,6 @@ def _handle_output_by_index(output, i):
             req_metrics={output.rids[i]: output.req_metrics[output.rids[i]]}
                 if output.req_metrics and output.rids[i] in output.req_metrics
                 else {},
-        )
-    elif isinstance(output, BatchMultimodalOutput):
-        new_output = BatchMultimodalOutput(
-            rids=[output.rids[i]],
-            finished_reasons=_extract_field_by_index(output, "finished_reasons", i),
-            outputs=_extract_field_by_index(output, "outputs", i),
-            prompt_tokens=_extract_field_by_index(output, "prompt_tokens", i),
-            completion_tokens=_extract_field_by_index(output, "completion_tokens", i),
-            cached_tokens=_extract_field_by_index(output, "cached_tokens", i),
-            placeholder_tokens_idx=None,
-            placeholder_tokens_val=None,
         )
     else:
         new_output = output
