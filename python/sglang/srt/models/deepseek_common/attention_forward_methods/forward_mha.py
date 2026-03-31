@@ -15,6 +15,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_hip,
     _is_npu,
     _use_aiter_gfx95,
+    zero_attn_tp_scatter_padding,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import BumpAllocator, get_bool_env_var, next_power_of_2
@@ -273,6 +274,9 @@ class DeepseekMHAForwardMixin:
         gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
+        attn_output = zero_attn_tp_scatter_padding(
+            attn_output, forward_batch.extend_num_tokens
+        )
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         if gate is not None:
             attn_output = self._apply_gated(attn_output, gate)
@@ -330,6 +334,9 @@ class DeepseekMHAForwardMixin:
                 forward_batch=forward_batch,
             )
 
+        attn_output = zero_attn_tp_scatter_padding(
+            attn_output, forward_batch.extend_num_tokens
+        )
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         if gate is not None:
             attn_output = self._apply_gated(attn_output, gate)
