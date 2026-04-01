@@ -111,7 +111,11 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
 
-        rope_scaling = config.rope_parameters
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_scaling = rope_parameters
+        else:
+            rope_scaling = getattr(config, "rope_scaling", None)
         self.is_mrope_enabled = (
             rope_scaling is not None and "mrope_section" in rope_scaling
         )
@@ -119,7 +123,7 @@ class LlamaModel(nn.Module):
         if self.is_mrope_enabled:
             self.mrope_interleaved = rope_scaling.setdefault("mrope_interleaved", False)
             if not self.mrope_interleaved:
-                config.rope_parameters["rope_type"] = "default"
+                rope_scaling["rope_type"] = "default"
         else:
             self.mrope_interleaved = False
 
