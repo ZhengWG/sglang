@@ -2597,24 +2597,10 @@ class Scheduler(
                 )
             logger.warning(msg_prefix + msg_details)
 
-            aborted_mm_reqs = []
             for req in retracted_reqs:
-                # NOTE: abort req with mm_inputs currently
-                # to avoid mrope shape not matching issue
-                if req.multimodal_inputs is not None:
-                    error_msg = (
-                        "Request with multimodal inputs cannot be retracted due to implementation limitation. "
-                        "Please reduce the input length or set smaller max_new_tokens."
-                    )
-                    prepare_abort(req, error_msg, status_code=HTTPStatus.BAD_REQUEST)
-                    aborted_mm_reqs.append(req)
-                else:
-                    self._add_request_to_queue(req, is_retracted=True)
-                    if self.enable_hisparse:
-                        self.hisparse_coordinator.retract_req(req)
-
-            if aborted_mm_reqs:
-                self.stream_output(aborted_mm_reqs, return_logprob=False)
+                self._add_request_to_queue(req, is_retracted=True)
+                if self.enable_hisparse:
+                    self.hisparse_coordinator.retract_req(req)
         else:
             self.new_token_ratio = max(
                 self.new_token_ratio - self.new_token_ratio_decay,
