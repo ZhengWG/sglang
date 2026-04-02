@@ -219,10 +219,25 @@ class OpenAIServingCompletion(OpenAIServingBase):
         adapted_request: GenerateReqInput,
         request: CompletionRequest,
         raw_request: Request,
-    ) -> StreamingResponse:
+    ) -> Union[StreamingResponse, ErrorResponse]:
         """Handle streaming completion request"""
+        generator = self._generate_completion_stream(
+            adapted_request, request, raw_request
+        )
+
+        # Kick-start the generator to trigger validation before HTTP 200 is sent.
+        try:
+            first_chunk = await generator.__anext__()
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        async def prepend_first_chunk():
+            yield first_chunk
+            async for chunk in generator:
+                yield chunk
+
         return StreamingResponse(
-            self._generate_completion_stream(adapted_request, request, raw_request),
+            prepend_first_chunk(),
             media_type="text/event-stream",
             background=self.tokenizer_manager.create_abort_task(adapted_request),
         )
@@ -247,6 +262,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
         hidden_states = {}
         routed_experts = {}
 
+        stream_started = False
         try:
             async for content in self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
@@ -355,6 +371,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     )
 
                 yield f"data: {chunk.model_dump_json()}\n\n"
+                stream_started = True
 
             if request.return_hidden_states and hidden_states:
                 for index, choice_hidden_states in hidden_states.items():
@@ -429,9 +446,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
             )
             yield f"data: {error}\n\n"
         except ValueError as e:
+            if not stream_started:
+                raise
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
         except Exception as e:
+            if not stream_started:
+                raise
             error_code = getattr(e, "error_code", 400)
             error = self.create_streaming_error_response(str(e), status_code=error_code,)
             yield f"data: {error}\n\n"
