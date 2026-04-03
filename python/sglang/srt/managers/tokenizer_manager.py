@@ -73,7 +73,7 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalProcessorOutput
 from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
@@ -866,11 +866,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 self.enable_metrics
                 and self.metrics_collector is not None
                 and mm_inputs is not None
-                and "mm_items" in mm_inputs
-                and mm_inputs["mm_items"]
+                and mm_inputs.mm_items
             ):
                 self.metrics_collector.observe_request_mm(
-                    mm_items=mm_inputs["mm_items"],
+                    mm_items=mm_inputs.mm_items,
                     preprocessing_time_seconds=preprocessing_time,
                 )
         else:
@@ -2130,12 +2129,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             return None
 
         mm_inputs = tokenized_obj.mm_inputs
-        if not isinstance(mm_inputs, dict) or "mm_items" not in mm_inputs:
+        if not isinstance(mm_inputs, MultimodalProcessorOutput) or not mm_inputs.mm_items:
             return None
 
-        mm_items = mm_inputs.get("mm_items", [])
-        if not mm_items:
-            return None
+        mm_items = mm_inputs.mm_items
 
         metadata_list = []
         for item in mm_items:
@@ -2155,7 +2152,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             }
 
             # Extract image_grid_thw from model_specific_data
-            if modality in [Modality.IMAGE, Modality.MULTI_IMAGES]:
+            if modality == Modality.IMAGE:
                 image_grid_thw = None
                 if hasattr(item, "image_grid_thw") and item.image_grid_thw is not None:
                     image_grid_thw = item.image_grid_thw
