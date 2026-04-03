@@ -813,7 +813,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 if mm_inputs is None:
                     if self.enable_metrics:
                         preprocessing_start_time = time.perf_counter()
-                    mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
+                    mm_inputs = await self.mm_processor.process_mm_data_async(
                         image_data=obj.image_data,
                         audio_data=obj.audio_data,
                         input_text=(input_text or input_ids),
@@ -832,7 +832,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             ):
                 # In language_only mode with zmq_to_scheduler, if we didn't dispatch
                 # to encoder (e.g., only one image), process locally like non-language_only mode
-                mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
+                mm_inputs = await self.mm_processor.process_mm_data_async(
                     image_data=obj.image_data,
                     audio_data=obj.audio_data,
                     input_text=(input_text or input_ids),
@@ -842,21 +842,21 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
             # mm_inputs增加词表大小属性，为后续mm_data_item的hash -> pad_value
             # 增加offset防止pad_value跟正常的词表token冲突
-            if mm_inputs is not None:
-                mm_inputs.update({"model_vocab_size": self.model_config.vocab_size})
+            if mm_inputs:
+                mm_inputs.model_vocab_size = self.model_config.vocab_size
 
-            if mm_inputs and "input_ids" in mm_inputs:
-                input_ids = mm_inputs["input_ids"]
-            if mm_inputs and "token_type_ids" in mm_inputs:
-                token_type_ids = mm_inputs.pop("token_type_ids")
+            if mm_inputs and mm_inputs.input_ids is not None:
+                input_ids = mm_inputs.input_ids
+            if mm_inputs and mm_inputs.token_type_ids is not None:
+                token_type_ids = mm_inputs.token_type_ids
                 if not isinstance(token_type_ids, list):
                     token_type_ids = token_type_ids.flatten().tolist()
             if (
                 envs.SGLANG_MM_PRECOMPUTE_HASH.get()
                 and mm_inputs
-                and "mm_items" in mm_inputs
+                and mm_inputs.mm_items
             ):
-                for item in mm_inputs["mm_items"]:
+                for item in mm_inputs.mm_items:
                     if isinstance(item, MultimodalDataItem):
                         item.model_vocab_size = self.model_config.vocab_size
                         item.set_pad_value()
@@ -1041,7 +1041,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         input_text: str,
         input_ids: List[int],
         input_embeds: Optional[Union[List[float], None]] = None,
-        mm_inputs: Optional[Dict] = None,
+        mm_inputs=None,
         token_type_ids: Optional[List[int]] = None,
     ) -> Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]:
         """Create a tokenized request object from common parameters."""

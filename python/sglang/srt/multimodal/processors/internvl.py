@@ -12,6 +12,7 @@ from PIL import Image
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
+    MultimodalProcessorOutput,
 )
 from sglang.srt.models.interns1 import InternS1ForConditionalGeneration
 from sglang.srt.models.internvl import InternVLChatModel
@@ -343,14 +344,14 @@ class InternVLProcessor(BaseMultimodalProcessor):
                     mm_token_id=mm_token_id,
                 )
 
-        return {
-            "input_ids": input_ids_tensor.flatten().tolist(),
-            "mm_items": mm_items,
-            "im_start_id": self.img_start_token_id,
-            "im_end_id": self.img_end_token_id,
-            "im_token_id": self.img_context_token_id,
-            "video_token_id": self.video_token_id,
-        }
+        return MultimodalProcessorOutput(
+            input_ids=input_ids_tensor.flatten().tolist(),
+            mm_items=mm_items,
+            im_start_id=self.img_start_token_id,
+            im_end_id=self.img_end_token_id,
+            im_token_id=self.img_context_token_id,
+            video_token_id=self.video_token_id,
+        )
 
     async def process_mm_data_async(
         self, image_data, input_text, request_obj, **kwargs
@@ -643,14 +644,14 @@ class InternVLProcessor(BaseMultimodalProcessor):
             video_item.model_specific_data["video_sizes"] = video_sizes_list
             items.append(video_item)
 
-        return {
-            "input_ids": input_ids,
-            "mm_items": items,
-            "im_start_id": self.img_start_token_id,
-            "im_end_id": self.img_end_token_id,
-            "im_token_id": self.img_context_token_id,
-            "video_token_id": self.video_token_id,
-        }
+        return MultimodalProcessorOutput(
+            input_ids=input_ids,
+            mm_items=items,
+            im_start_id=self.img_start_token_id,
+            im_end_id=self.img_end_token_id,
+            im_token_id=self.img_context_token_id,
+            video_token_id=self.video_token_id,
+        )
 
     async def process_internlm2_mm_data_async(
         self, image_data, input_text, request_obj, **kwargs
@@ -774,11 +775,11 @@ class InternVLProcessor(BaseMultimodalProcessor):
                 image_item.model_specific_data["image_sizes"] = image_sizes_list
                 items.append(image_item)
 
-        return {
-            "input_ids": input_ids,
-            "mm_items": items,
-            "im_start_id": self.img_start_token_id,
-            "im_end_id": self.img_end_token_id,
-            "im_token_id": self.img_context_token_id,
-            "video_token_id": self.video_token_id,
-        }
+        return MultimodalProcessorOutput(
+            input_ids=input_ids,
+            mm_items=items,
+            im_start_id=self.img_start_token_id,
+            im_end_id=self.img_end_token_id,
+            im_token_id=self.img_context_token_id,
+            video_token_id=self.video_token_id,
+        )
