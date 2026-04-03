@@ -620,12 +620,22 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if image_tensor is not None:
-            image_item = MultimodalDataItem(
-                feature=image_tensor, modality=Modality.IMAGE, offsets=image_offsets
+            # Split per-image for better cache granularity
+            assert len(num_patches_list) == len(image_offsets), (
+                f"InternVL: num_patches_list ({len(num_patches_list)}) != "
+                f"image_offsets ({len(image_offsets)})"
             )
-            # Add image sizes to model_specific_data
-            image_item.model_specific_data["image_sizes"] = image_sizes_list
-            items.append(image_item)
+            cumulative = 0
+            for i, num_patches in enumerate(num_patches_list):
+                image_item = MultimodalDataItem(
+                    feature=image_tensor[cumulative : cumulative + num_patches],
+                    modality=Modality.IMAGE,
+                    offsets=[image_offsets[i]],
+                )
+                cumulative += num_patches
+                # Add image sizes to model_specific_data
+                image_item.model_specific_data["image_sizes"] = image_sizes_list
+                items.append(image_item)
         if video_tensor is not None:
             video_item = MultimodalDataItem(
                 feature=video_tensor, modality=Modality.VIDEO, offsets=video_offsets
@@ -747,12 +757,22 @@ class InternVLProcessor(BaseMultimodalProcessor):
 
         items = []
         if pixel_values is not None:
-            image_item = MultimodalDataItem(
-                feature=pixel_values, modality=Modality.IMAGE, offsets=image_offsets
+            # Split per-image for better cache granularity
+            assert len(num_patches_list) == len(image_offsets), (
+                f"InternVL: num_patches_list ({len(num_patches_list)}) != "
+                f"image_offsets ({len(image_offsets)})"
             )
-            # Add image sizes to model_specific_data
-            image_item.model_specific_data["image_sizes"] = image_sizes_list
-            items.append(image_item)
+            cumulative = 0
+            for i, num_patches in enumerate(num_patches_list):
+                image_item = MultimodalDataItem(
+                    feature=pixel_values[cumulative : cumulative + num_patches],
+                    modality=Modality.IMAGE,
+                    offsets=[image_offsets[i]],
+                )
+                cumulative += num_patches
+                # Add image sizes to model_specific_data
+                image_item.model_specific_data["image_sizes"] = image_sizes_list
+                items.append(image_item)
 
         return {
             "input_ids": input_ids,
