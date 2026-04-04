@@ -1939,6 +1939,7 @@ if __name__ == "__main__":
         type=str,
         default="sharegpt",
         choices=[
+            "autobench",
             "sharegpt",
             "custom",
             "openai",
