@@ -126,6 +126,9 @@ class PromptTokensDetails(BaseModel):
     """Details about prompt tokens."""
 
     cached_tokens: int = 0
+    l1_cached_tokens: int = 0
+    l2_cached_tokens: int = 0
+    l3_cached_tokens: int = 0
 
 
 class UsageInfo(BaseModel):
