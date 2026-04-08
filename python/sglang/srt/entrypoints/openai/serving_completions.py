@@ -261,7 +261,6 @@ class OpenAIServingCompletion(OpenAIServingBase):
         completion_tokens = {}
         reasoning_tokens = {}
         cached_tokens = {}
-        cached_tokens_details = {}
         hidden_states = {}
         routed_experts = {}
 
@@ -286,9 +285,6 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     "reasoning_tokens", 0
                 )
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
-                cached_tokens_details[index] = content["meta_info"].get(
-                    "cached_tokens_details", None
-                )
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
                 routed_experts[index] = content["meta_info"].get("routed_experts", None)
 
@@ -445,7 +441,6 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     cached_tokens=cached_tokens,
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
-                    cached_tokens_details=cached_tokens_details,
                 )
                 final_usage_chunk = CompletionStreamResponse(
                     id=content["meta_info"]["id"],
