@@ -246,14 +246,12 @@ class EagleVerifyInputV2Mixin:
 
             # Set mamba_track_indices for mamba prefix-cache state tracking
             if get_global_server_args().enable_mamba_extra_buffer():
-                batch.mamba_track_indices = torch.tensor(
+                batch.mamba_track_indices = torch.stack(
                     [
                         req.mamba_ping_pong_track_buffer[req.mamba_next_track_idx]
                         for req in batch.reqs
-                    ],
-                    dtype=torch.int64,
-                    device=device,
-                )
+                    ]
+                ).to(torch.int64)
                 batch.mamba_track_mask = None
                 batch.mamba_track_seqlens = None
 
@@ -390,9 +388,9 @@ class EagleVerifyInputV2Mixin:
         # and eventual deadlocks from mismatched collective operations.
         tp_group = _get_verify_tp_group()
         if tp_group.world_size > 1:
-            dist.broadcast(predict, src=0, group=tp_group.device_group)
-            dist.broadcast(accept_index, src=0, group=tp_group.device_group)
-            dist.broadcast(accept_length, src=0, group=tp_group.device_group)
+            dist.broadcast(predict, src=tp_group.ranks[0], group=tp_group.device_group)
+            dist.broadcast(accept_index, src=tp_group.ranks[0], group=tp_group.device_group)
+            dist.broadcast(accept_length, src=tp_group.ranks[0], group=tp_group.device_group)
 
         if SIMULATE_ACC_LEN > 0:
             # Do simulation

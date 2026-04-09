@@ -111,7 +111,11 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
 
-        rope_scaling = config.rope_parameters
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_scaling = rope_parameters
+        else:
+            rope_scaling = getattr(config, "rope_scaling", None)
         self.is_mrope_enabled = (
             rope_scaling is not None and "mrope_section" in rope_scaling
         )
@@ -119,7 +123,7 @@ class LlamaModel(nn.Module):
         if self.is_mrope_enabled:
             self.mrope_interleaved = rope_scaling.setdefault("mrope_interleaved", False)
             if not self.mrope_interleaved:
-                config.rope_parameters["rope_type"] = "default"
+                rope_scaling["rope_type"] = "default"
         else:
             self.mrope_interleaved = False
 
@@ -154,7 +158,18 @@ class LlamaModel(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
         if input_embeds is None:
-            embeds = self.embed_tokens(input_ids)
+            embeds = forward_batch.mm_input_embeds
+            if (
+                forward_batch.forward_mode.is_extend()
+                and forward_batch.contains_mm_inputs()
+                and not forward_batch.forward_mode.is_draft_extend(include_v2=True)
+            ):
+                assert embeds is not None
+                embeds = torch.cat(
+                    [embeds[:-1], self.embed_tokens(input_ids[-1].unsqueeze(0))]
+                )
+            if embeds is None:
+                embeds = self.embed_tokens(input_ids)
         else:
             embeds = input_embeds
 

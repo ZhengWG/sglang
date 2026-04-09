@@ -23,6 +23,7 @@ from sglang.srt.entrypoints.openai.utils import (
     process_cached_tokens_details_from_ret,
     process_hidden_states_from_ret,
     process_routed_experts_from_ret,
+    should_include_usage,
     to_openai_style_logprobs,
 )
 from sglang.srt.managers.io_struct import GenerateReqInput
@@ -219,10 +220,25 @@ class OpenAIServingCompletion(OpenAIServingBase):
         adapted_request: GenerateReqInput,
         request: CompletionRequest,
         raw_request: Request,
-    ) -> StreamingResponse:
+    ) -> Union[StreamingResponse, ErrorResponse]:
         """Handle streaming completion request"""
+        generator = self._generate_completion_stream(
+            adapted_request, request, raw_request
+        )
+
+        # Kick-start the generator to trigger validation before HTTP 200 is sent.
+        try:
+            first_chunk = await generator.__anext__()
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        async def prepend_first_chunk():
+            yield first_chunk
+            async for chunk in generator:
+                yield chunk
+
         return StreamingResponse(
-            self._generate_completion_stream(adapted_request, request, raw_request),
+            prepend_first_chunk(),
             media_type="text/event-stream",
             background=self.tokenizer_manager.create_abort_task(adapted_request),
         )
@@ -243,11 +259,18 @@ class OpenAIServingCompletion(OpenAIServingBase):
         # Usage tracking
         prompt_tokens = {}
         completion_tokens = {}
+        reasoning_tokens = {}
         cached_tokens = {}
         hidden_states = {}
         routed_experts = {}
 
+        stream_started = False
         try:
+            include_usage, continuous_usage_stats = should_include_usage(
+                request.stream_options,
+                self.tokenizer_manager.server_args.stream_response_default_include_usage,
+            )
+
             async for content in self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
             ):
@@ -257,6 +280,9 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 prompt_tokens[index] = content["meta_info"].get("prompt_tokens", 0)
                 completion_tokens[index] = content["meta_info"].get(
                     "completion_tokens", 0
+                )
+                reasoning_tokens[index] = content["meta_info"].get(
+                    "reasoning_tokens", 0
                 )
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
@@ -290,15 +316,26 @@ class OpenAIServingCompletion(OpenAIServingBase):
                         n_prev_token < total_output_logprobs
                         or input_token_logprobs is not None
                     ):
+                        output_token_logprobs = content["meta_info"][
+                            "output_token_logprobs"
+                        ]
+                        output_top_logprobs = content["meta_info"].get(
+                            "output_top_logprobs", []
+                        )
+                        if (
+                            not self.tokenizer_manager.server_args.incremental_streaming_output
+                        ):
+                            output_token_logprobs = output_token_logprobs[
+                                n_prev_token:total_output_logprobs
+                            ]
+                            output_top_logprobs = output_top_logprobs[
+                                n_prev_token:total_output_logprobs
+                            ]
                         logprobs = to_openai_style_logprobs(
                             input_token_logprobs=input_token_logprobs,
                             input_top_logprobs=input_top_logprobs,
-                            output_token_logprobs=content["meta_info"][
-                                "output_token_logprobs"
-                            ][n_prev_token:total_output_logprobs],
-                            output_top_logprobs=content["meta_info"].get(
-                                "output_top_logprobs", []
-                            )[n_prev_token:total_output_logprobs],
+                            output_token_logprobs=output_token_logprobs,
+                            output_top_logprobs=output_top_logprobs,
                         )
                     n_prev_tokens[index] = total_output_logprobs
 
@@ -341,20 +378,19 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 )
 
                 # Add usage stats if continuous_usage_stats is enabled
-                if (
-                    request.stream_options
-                    and request.stream_options.continuous_usage_stats
-                ):
+                if continuous_usage_stats:
                     cache_report = self.tokenizer_manager.server_args.enable_cache_report
                     chunk.usage = UsageProcessor.calculate_token_usage(
                         prompt_tokens=prompt_tokens.get(index, 0),
                         completion_tokens=completion_tokens.get(index, 0),
+                        reasoning_tokens=reasoning_tokens.get(index, 0),
                         cached_tokens=UsageProcessor._details_if_cached(
                             cached_tokens.get(index, 0)
                         ) if cache_report else None
                     )
 
                 yield f"data: {chunk.model_dump_json()}\n\n"
+                stream_started = True
 
             if request.return_hidden_states and hidden_states:
                 for index, choice_hidden_states in hidden_states.items():
@@ -397,11 +433,12 @@ class OpenAIServingCompletion(OpenAIServingBase):
                     yield f"data: {routed_experts_chunk.model_dump_json()}\n\n"
 
             # Handle final usage chunk
-            if request.stream_options and request.stream_options.include_usage:
+            if include_usage:
                 usage = UsageProcessor.calculate_streaming_usage(
                     prompt_tokens,
+                    reasoning_tokens,
                     completion_tokens,
-                    cached_tokens,
+                    cached_tokens=cached_tokens,
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
                 )
@@ -429,9 +466,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
             )
             yield f"data: {error}\n\n"
         except ValueError as e:
+            if not stream_started:
+                raise
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
         except Exception as e:
+            if not stream_started:
+                raise
             error_code = getattr(e, "error_code", 400)
             error = self.create_streaming_error_response(str(e), status_code=error_code,)
             yield f"data: {error}\n\n"
