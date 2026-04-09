@@ -1368,4 +1368,5 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         else:
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
+
 EntryClass = Qwen3VLForConditionalGeneration

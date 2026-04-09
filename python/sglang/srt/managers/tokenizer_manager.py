@@ -46,6 +46,7 @@ from sglang.srt.environ import envs
 from sglang.srt.lora.lora_registry import LoRARef, LoRARegistry
 from sglang.srt.managers.async_dynamic_batch_tokenizer import AsyncDynamicbatchTokenizer
 from sglang.srt.managers.disagg_service import start_disagg_service
+from sglang.srt.managers.embed_types import PositionalEmbeds
 from sglang.srt.managers.io_struct import (
     AbortReq,
     ActiveRanksOutput,
@@ -1109,6 +1110,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 bootstrap_room=obj.bootstrap_room,
                 lora_id=obj.lora_id,
                 input_embeds=input_embeds,
+                positional_embed_overrides=obj.positional_embed_overrides,
                 session_params=session_params,
                 custom_logit_processor=obj.custom_logit_processor,
                 require_reasoning=obj.require_reasoning,
@@ -1124,12 +1126,24 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 num_items_assigned=obj.num_items_assigned,
             )
         elif isinstance(obj, EmbeddingReqInput):
+            # Resolve unresolved embed overrides now that input_ids are available
+            positional_embed_overrides = obj.positional_embed_overrides
+            if (
+                positional_embed_overrides is None
+                and obj.embed_overrides is not None
+                and obj.embed_override_token_id is not None
+            ):
+                positional_embed_overrides = self._resolve_embed_overrides(
+                    input_ids, obj.embed_override_token_id, obj.embed_overrides
+                )
+
             tokenized_obj = TokenizedEmbeddingReqInput(
                 input_text,
                 input_ids,
                 mm_inputs,
                 token_type_ids,
                 sampling_params,
+                positional_embed_overrides=positional_embed_overrides,
                 rid=obj.rid,
                 priority=obj.priority,
                 dimensions=obj.dimensions,
@@ -1147,6 +1161,26 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
             logger.warning(f"Failed to extract mm metadata: {e}")
 
         return tokenized_obj
+
+    @staticmethod
+    def _resolve_embed_overrides(
+        input_ids: List[int],
+        token_id: int,
+        embeds: List[torch.Tensor],
+    ) -> PositionalEmbeds:
+        """Resolve placeholder positions in input_ids and create PositionalEmbeds.
+
+        Scans input_ids for occurrences of token_id and pairs them with the
+        provided embedding tensors.
+        """
+        positions = [idx for idx, tok in enumerate(input_ids) if tok == token_id]
+        if len(positions) != len(embeds):
+            raise ValueError(
+                f"input contains {len(positions)} occurrences of "
+                f"embed_override_token_id={token_id}, "
+                f"but embed_overrides has {len(embeds)} entries."
+            )
+        return PositionalEmbeds(embeds=embeds, positions=positions)
 
     async def _batch_tokenize_and_process(
         self, batch_size: int, obj: Union[GenerateReqInput, EmbeddingReqInput]
