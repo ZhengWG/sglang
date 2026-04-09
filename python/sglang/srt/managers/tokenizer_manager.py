@@ -140,12 +140,6 @@ _INCREMENTAL_STREAMING_META_INFO_KEYS = (
     "output_token_ids_logprobs",
 )
 
-_INCREMENTAL_STREAMING_META_INFO_KEYS = (
-    "output_token_logprobs",
-    "output_top_logprobs",
-    "output_token_ids_logprobs",
-)
-
 
 # MM CUDA OOM: count preprocess CUDA OOMs in this tokenizer process; optional exit after N
 # (envs.SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD). No empty_cache reclaim; use process restart instead.
