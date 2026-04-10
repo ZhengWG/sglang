@@ -416,6 +416,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             if envs.SGLANG_VLM_QWEN_LIMIT_PIXEL.get() and self.model_type in (
                 "qwen3_vl",
                 "qwen3_vl_moe",
+                "qwen3_5",
+                "qwen3_5_moe",
             ):
                 # Limit qwen3-vl single-image size to ~1k*1k to avoid rank0 OOM
                 image_longest_edge = image_processor.size["longest_edge"]
