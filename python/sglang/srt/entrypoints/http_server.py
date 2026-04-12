@@ -701,6 +701,7 @@ async def server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
+    # server_args.model_config is not serializable but should be excluded by asdict.
     return {
         **dataclasses.asdict(
             _global_state.tokenizer_manager.server_args,

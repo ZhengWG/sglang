@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from sglang.srt.layers.moe.moe_runner.base import (
     FusedOpPool,
@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner.base import MoeQuantInfo
     from sglang.srt.layers.moe.token_dispatcher.base import CombineInput, DispatchOutput
     from sglang.srt.layers.moe.utils import MoeRunnerBackend
+    from sglang.srt.lora.lora_moe_runners import LoRAHooks
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +40,18 @@ class MoeRunner:
         self.fused_func = None
 
         if runner_backend.is_triton():
-            if lora_enabled:
-                from sglang.srt.lora.lora_moe_runners import TritonRunnerCoreWithLoRA
-
-                self.runner_core = TritonRunnerCoreWithLoRA(config)
-            else:
-                self.runner_core = TritonRunnerCore(config)
+            self.runner_core = TritonRunnerCore(config)
         elif runner_backend.is_triton_kernels():
             self.runner_core = TritonKernelsRunnerCore(config)
         elif runner_backend.is_deep_gemm():
             self.runner_core = DeepGemmRunnerCore(config)
         elif runner_backend.is_marlin():
-            self.runner_core = None  # Marlin only supports fused path
+            if lora_enabled:
+                from sglang.srt.lora.lora_moe_runner_marlin import MarlinLoraRunnerCore
+
+                self.runner_core = MarlinLoraRunnerCore(config)
+            else:
+                self.runner_core = None  # Marlin only supports fused path
         elif (
             runner_backend.is_flashinfer_trtllm()
             or runner_backend.is_flashinfer_trtllm_routed()
@@ -103,9 +105,52 @@ class MoeRunner:
             scaling_up_factor = _scale_up_norm.weight
         if self.fused_func is not None and not self.lora_enabled:
             if self.fused_func is fused_experts_none_to_triton:
-                return self.fused_func(dispatch_output, quant_info, self.config, layernorm_epsilon=layernorm_epsilon, scaling_up_factor=scaling_up_factor)
+                return self.fused_func(
+                    dispatch_output,
+                    quant_info,
+                    self.config,
+                    layernorm_epsilon=layernorm_epsilon,
+                    scaling_up_factor=scaling_up_factor
+                )
             else:
                 return self.fused_func(dispatch_output, quant_info, self.config)
+
+        assert self.runner_core is not None
+
+        def _maybe_build_lora_hooks(_runner_input: Any) -> LoRAHooks:
+            if not self.lora_enabled or lora_info is None:
+                return None
+
+            from sglang.srt.layers.moe.token_dispatcher.base import DispatchOutput
+            from sglang.srt.lora.lora_moe_runners import build_lora_hooks
+
+            if isinstance(_runner_input, DispatchOutput):
+                hidden_states, topk_ids = (
+                    _runner_input.hidden_states,
+                    _runner_input.topk_output.topk_ids,
+                )
+            elif hasattr(_runner_input, "topk_ids"):
+                hidden_states, topk_ids = (
+                    _runner_input.hidden_states,
+                    _runner_input.topk_ids,
+                )
+            else:
+                return None
+
+            return build_lora_hooks(
+                hidden_states,
+                lora_info,
+                topk_ids,
+            )
+
+        # Runners that handle dispatch_output directly (e.g., MarlinRunnerCore)
+        # bypass the pre-permute step and do their own alignment internally.
+        if hasattr(self.runner_core, "run_from_dispatch"):
+            hooks = _maybe_build_lora_hooks(dispatch_output)
+            return self.runner_core.run_from_dispatch(
+                dispatch_output, quant_info, self.config, hooks=hooks
+            )
+
         dispatch_format = dispatch_output.format.value
         runner_format = self.runner_core.runner_backend.value
         self.pre_permute_func = PermuteMethodPool.get_pre_permute(
@@ -122,16 +167,20 @@ class MoeRunner:
             dispatch_output, quant_info, self.config, running_state
         )
 
-        # Pass lora_info to runner_core if LoRA is enabled
-        if self.lora_enabled:
+        hooks = _maybe_build_lora_hooks(runner_input)
+
+        if isinstance(self.runner_core, TritonRunnerCore):
             runner_output = self.runner_core.run(
-                runner_input, quant_info, running_state, lora_info
+                runner_input,
+                quant_info,
+                running_state,
+                hooks=hooks,
+                layernorm_epsilon=layernorm_epsilon,
+                scaling_up_factor=scaling_up_factor
             )
-        elif isinstance(self.runner_core, TritonRunnerCore):
-            runner_output = self.runner_core.run(runner_input, quant_info, running_state, layernorm_epsilon=layernorm_epsilon, scaling_up_factor=scaling_up_factor)
         else:
             runner_output = self.runner_core.run(
-                runner_input, quant_info, running_state
+                runner_input, quant_info, running_state, hooks=hooks
             )
 
         runner_format = self.runner_core.runner_backend.value

@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 import triton.language as tl
@@ -125,7 +125,8 @@ class TritonRunnerCore(MoeRunnerCore):
         runner_input: TritonRunnerInput,
         quant_info: TritonMoeQuantInfo,
         running_state: dict,
-        layernorm_epsilon: float = 1e-6,
+        hooks: Optional[Any] = None,
+        layernorm_epsilon: Optional[float] = 1e-6,
         scaling_up_factor: Optional[torch.tensor] = None,
     ) -> TritonRunnerOutput:
 
@@ -209,6 +210,11 @@ class TritonRunnerCore(MoeRunnerCore):
             block_shape=block_shape,
         )
 
+        if hooks and hooks.after_gate_up:
+            hooks.after_gate_up(
+                hidden_states, intermediate_cache1, topk_weights, topk_ids
+            )
+
         if scaling_up_factor is not None:
             intermediate_cache1 = scale_operation(
                 intermediate_cache1, scaling_up_factor, layernorm_epsilon
@@ -266,13 +272,16 @@ class TritonRunnerCore(MoeRunnerCore):
         else:
             out_hidden_states = torch.empty_like(hidden_states)
 
+        # When LoRA hooks are present, always write to intermediate_cache3
+        # so the hook can modify it before reduction.
+        _use_intermediate = not no_combine and (topk_ids.shape[1] != 1 or hooks)
         invoke_fused_moe_kernel(
             intermediate_cache2,
             w2,
             b2,
             (
                 intermediate_cache3
-                if not no_combine and topk_ids.shape[1] != 1
+                if _use_intermediate
                 else out_hidden_states.unsqueeze(0)
             ),
             a2_scale,
@@ -295,14 +304,23 @@ class TritonRunnerCore(MoeRunnerCore):
             block_shape=block_shape,
         )
 
+        if hooks and hooks.after_down:
+            hooks.after_down(
+                intermediate_cache2, intermediate_cache3, topk_weights, topk_ids
+            )
+
         if routed_scaling_factor is None:
             routed_scaling_factor = 1.0
 
         if no_combine:
             pass
         elif _is_cuda:
-            if topk_ids.shape[1] == 1 and routed_scaling_factor == 1.0:
-                pass  # we write directly into out_hidden_states
+            if (
+                topk_ids.shape[1] == 1
+                and routed_scaling_factor == 1.0
+                and not _use_intermediate
+            ):
+                pass  # we wrote directly into out_hidden_states
             elif topk_ids.shape[1] == 2 and routed_scaling_factor == 1.0:
                 torch.add(
                     intermediate_cache3[:, 0],
