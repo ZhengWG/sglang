@@ -588,6 +588,13 @@ def grouped_topk_gpu(
         sorted=(True if num_fused_shared_experts > 0 else False),
     )
     if num_fused_shared_experts:
+        # NOTE: Current implementation only handles num_fused_shared_experts == 1.
+        # It only replaces the last column with a shared expert id. When
+        # num_fused_shared_experts > 1, the last N columns should be replaced
+        # with shared expert ids (one for each), not just the last one.
+        # This is a known limitation on CUDA platform.
+        # AMD platform with aiter uses fused_append_shared_experts kernel which
+        # handles multiple shared experts correctly.
         topk_ids[:, -1] = torch.randint(
             low=num_experts,
             high=num_experts + num_fused_shared_experts,
@@ -725,6 +732,13 @@ def biased_grouped_topk_impl(
     topk_weights = scores.gather(1, topk_ids)
 
     if num_fused_shared_experts:
+        # NOTE: Current implementation only handles num_fused_shared_experts == 1.
+        # It only replaces the last column with a shared expert id. When
+        # num_fused_shared_experts > 1, the last N columns should be replaced
+        # with shared expert ids (one for each), not just the last one.
+        # This is a known limitation on CUDA platform.
+        # AMD platform with aiter uses fused_append_shared_experts kernel which
+        # handles multiple shared experts correctly.
         topk_ids[:, -1] = torch.randint(
             low=num_experts,
             high=num_experts + num_fused_shared_experts,
@@ -1021,26 +1035,40 @@ def _post_process_topk_ids(
             topk_ids, expert_location_dispatch_info, num_token_non_padded
         )
 
-    if num_fused_shared_experts > 0 and _use_aiter:
-        M, N = router_logits.shape
+    if num_fused_shared_experts > 0:
+        # Apply EP scaling for shared experts
+        # In EP mode, each rank computes shared_expert output, and they get summed via all_reduce
+        # So we need to scale down by 1/ep_size to avoid double counting
         scale_factor = (
             1.0
             if fused_shared_experts_scaling_factor is None
             else fused_shared_experts_scaling_factor
         )
 
-        # Lazy import to avoid circular-import issues
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_kernels import (
-            fused_append_shared_experts,
-        )
+        if _use_aiter:
+            M, N = router_logits.shape
 
-        topk_ids, topk_weights = fused_append_shared_experts(
-            topk_ids,
-            topk_weights,
-            num_fused_shared_experts,
-            scale_factor,
-            N,  # base id for shared experts
-        )
+            # Lazy import to avoid circular-import issues
+            from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_kernels import (
+                fused_append_shared_experts,
+            )
+
+            topk_ids, topk_weights = fused_append_shared_experts(
+                topk_ids,
+                topk_weights,
+                num_fused_shared_experts,
+                scale_factor,
+                N,  # base id for shared experts
+            )
+        elif scale_factor != 1.0:
+            # For CUDA platform without aiter, apply scaling to shared expert weights
+            # The shared expert is always at the last position in topk_ids/topk_weights
+            # NOTE: This only scales the last column. When num_fused_shared_experts > 1,
+            # all shared expert weights need to be scaled, not just the last one.
+            # This is a known limitation - models with num_fused_shared_experts > 1
+            # should use AMD platform with aiter, which handles this correctly.
+            topk_weights[:, -1] = topk_weights[:, -1] * scale_factor
+
 
     # DeepEP: remap to interleaved expert layout where each rank's shared
     # expert has a unique ID for dispatch routing.

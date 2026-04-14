@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ from transformers import PretrainedConfig
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
     divide,
+    get_moe_expert_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -43,6 +43,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.ngpt import ScaleUpNorm, apply_hyper_spherical_fusion, l2norm
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_kernel import (
@@ -88,6 +89,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_flashinfer_available,
     is_sm100_supported,
+    log_info_on_rank0,
     make_layers,
     set_weight_attrs,
 )
@@ -169,7 +171,6 @@ class DsV3MLA(DeepseekV2AttentionMLA):
                 self.hidden_size,
                 self.num_heads,
                 bias=False,
-                quant_config=quant_config,
                 prefix=f"{prefix}.output_gate",
                 tp_rank=attn_tp_rank,
                 tp_size=attn_tp_size,
@@ -179,7 +180,6 @@ class DsV3MLA(DeepseekV2AttentionMLA):
                 self.hidden_size,
                 self.num_heads * self.v_head_dim,
                 bias=False,
-                quant_config=quant_config,
                 prefix=f"{prefix}.output_gate",
                 tp_rank=attn_tp_rank,
                 tp_size=attn_tp_size,
@@ -280,38 +280,63 @@ class BailingMLP(nn.Module):
         reduce_results=True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        swiglu_limit: Optional[float] = None,
+        padded_intermediate_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
         self.use_nGPT = getattr(config, "use_nGPT", False)
         self.config = config
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.swiglu_limit = swiglu_limit
+        self.tp_size = tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        self.tp_rank = tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+
+        # Store original and padded intermediate sizes
+        self.intermediate_size = intermediate_size
+        self.padded_intermediate_size = padded_intermediate_size or intermediate_size
 
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
-            [intermediate_size] * 2,
+            [self.padded_intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            tp_rank=tp_rank,
+            tp_size=tp_size,
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size,
+            self.padded_intermediate_size,
             hidden_size,
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
+            tp_rank=tp_rank,
+            tp_size=tp_size,
         )
 
         if self.use_nGPT:
             self.hidden_size = config.hidden_size
+            # For nGPT mode with padding, use original intermediate_size for ScaleUpNorm
+            # because swv only operates on the effective part
             self.swv = ScaleUpNorm(
-                intermediate_size=intermediate_size,
+                intermediate_size=self.intermediate_size,
                 layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
                 tp_rank=self.tp_rank,
                 tp_size=self.tp_size,
             )
+
+        # Pre-compute padding-related values for forward optimization
+        if self.padded_intermediate_size > self.intermediate_size:
+            self.padded_size_per_partition = self.padded_intermediate_size // self.tp_size
+            self.effective_size_per_partition = self.intermediate_size // self.tp_size
+            self.pad_size_per_partition = self.padded_size_per_partition - self.effective_size_per_partition
+        else:
+            self.padded_size_per_partition = None
+            self.effective_size_per_partition = None
+            self.pad_size_per_partition = None
 
         self.act_fn = SiluAndMul()
 
@@ -323,10 +348,50 @@ class BailingMLP(nn.Module):
     ):
         x, _ = self.gate_up_proj(x)
 
-        if self.use_nGPT:
-            x = self.swv(x)
+        # Handle padded intermediate size for FP8 quantization
+        # When padded_intermediate_size > intermediate_size:
+        # - gate_up_proj outputs [batch, 2 * padded_intermediate_size_per_partition]
+        # - We need to extract the effective part, apply activation, then pad back
+        if self.padded_size_per_partition is not None:
+            # Use pre-computed values for better performance
+            # Split into gate and up parts
+            gate_padded = x[..., :self.padded_size_per_partition]
+            up_padded = x[..., self.padded_size_per_partition:]
+            
+            # Extract effective parts
+            gate_effective = gate_padded[..., :self.effective_size_per_partition]
+            up_effective = up_padded[..., :self.effective_size_per_partition]
+            
+            # For nGPT mode, apply swv on the effective up part
+            # Note: swv expects [batch, 2 * intermediate_size] format with gate and up concatenated
+            # We need to apply it only on the effective parts
+            if self.use_nGPT:
+                # Create a tensor with only effective parts for swv processing
+                effective_combined = torch.cat([gate_effective, up_effective], dim=-1)
+                effective_combined = self.swv(effective_combined)
+                # Split back
+                gate_effective = effective_combined[..., :self.effective_size_per_partition]
+                up_effective = effective_combined[..., self.effective_size_per_partition:]
+            
+            # Apply SiLU to gate and multiply with up
+            if self.swiglu_limit is not None:
+                x = F.silu(gate_effective).clamp(max=self.swiglu_limit) * up_effective.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
+            else:
+                x = F.silu(gate_effective) * up_effective
+            
+            # Pad back to padded_intermediate_size_per_partition for down_proj
+            x = F.pad(x, (0, self.pad_size_per_partition))
+        else:
+            if self.use_nGPT:
+                x = self.swv(x)
+            if self.swiglu_limit is not None:
+                d = x.shape[-1] // 2
+                gate = F.silu(x[..., :d]).clamp(max=self.swiglu_limit)
+                up = x[..., d:].clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
+                x = gate * up
+            else:
+                x = self.act_fn(x)
 
-        x = self.act_fn(x)
         x, _ = self.down_proj(
             x,
             skip_all_reduce=use_reduce_scatter or should_allreduce_fusion,
@@ -377,12 +442,26 @@ class BailingMoEGate(nn.Module):
 
 class BailingMoE(nn.Module):
 
+    @staticmethod
+    def _get_swiglu_limit(limit_list, layer_num):
+        try:
+            if (
+                limit_list is None
+                or len(limit_list) <= layer_num
+                or limit_list[layer_num] == 0
+            ):
+                return None
+            return limit_list[layer_num]
+        except Exception:
+            return None
+
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         layer_id: int = 0,
         prefix: str = "moe",
+        num_fused_shared_experts: int = 0,
     ):
         super().__init__()
 
@@ -392,6 +471,7 @@ class BailingMoE(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.moe_ep_size = get_moe_expert_parallel_world_size()
 
         self.top_k = config.num_experts_per_tok
         self.norm_expert_prob = getattr(config, "norm_topk_prob", False)
@@ -400,6 +480,21 @@ class BailingMoE(nn.Module):
         self.num_shared_experts = getattr(config, "num_shared_experts", 0)
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.score_function = getattr(config, "score_function", None)
+
+        # Fuse shared experts support
+        self.num_fused_shared_experts = num_fused_shared_experts
+
+        # SwiGLU clip limits
+        expert_swiglu_limit_list = getattr(config, "expert_swiglu_limit_list", None)
+        share_expert_swiglu_limit_list = getattr(
+            config, "share_expert_swiglu_limit_list", None
+        )
+        self.expert_swiglu_limit = self._get_swiglu_limit(
+            expert_swiglu_limit_list, layer_id
+        )
+        self.share_expert_swiglu_limit = self._get_swiglu_limit(
+            share_expert_swiglu_limit_list, layer_id
+        )
 
         # Gate always runs at half / full precision for now.
         router_dtype = getattr(config, "router_dtype", None)
@@ -441,18 +536,34 @@ class BailingMoE(nn.Module):
                 self.score_function == "sigmoid" and self.correction_bias is not None
             ), "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"
 
+        # Whether A2A MoE (DeepEP, etc.) is enabled
+        self._enable_a2a_moe = not get_moe_a2a_backend().is_none()
+
+        # Scaling factor for fused shared experts in EP mode.
+        # Non-A2A EP (standard): each GPU computes shared expert, outputs are summed
+        # via all_reduce → scale down by 1/ep_size to avoid double counting.
+        # Note: A2A EP (DeepEP) + fused shared experts is impossible (expert routing
+        # breaks for the extra shared expert ID), so it's auto-disabled in
+        # determine_num_fused_shared_experts().
+        fused_shared_experts_scaling_factor = None
+        if self.moe_ep_size > 1 and self.num_fused_shared_experts > 0:
+            fused_shared_experts_scaling_factor = 1.0 / float(self.moe_ep_size)
+
         self.topk = TopK(
-            top_k=self.top_k,
+            top_k=self.top_k + self.num_fused_shared_experts,
             use_grouped_topk=self.use_grouped_topk,
             renormalize=self.norm_expert_prob,
             num_expert_group=self.num_expert_group,
             topk_group=self.topk_group,
             correction_bias=self.correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
         )
         self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
+            num_experts=self.num_experts + self.num_fused_shared_experts,
+            top_k=self.top_k + self.num_fused_shared_experts,
+            num_fused_shared_experts=self.num_fused_shared_experts,
             layer_id=self.layer_id,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
@@ -461,21 +572,110 @@ class BailingMoE(nn.Module):
             prefix=f"{prefix}.experts",
             use_nGPT=self.use_nGPT,
             layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
+            gemm1_clamp_limit=self.expert_swiglu_limit,
         )
 
-        if self.num_shared_experts > 0:
+        # Whether to apply routed_scaling_factor at model layer.
+        # For A2A MoE paths (e.g., DeepEP), the runner/post_permute does not apply it,
+        # so we need to apply it here. For non-A2A paths (standard), the runner handles it.
+        # Note: When DeepEP is enabled, fused shared experts is auto-disabled in
+        # determine_num_fused_shared_experts(), so num_fused_shared_experts is always 0
+        # in A2A mode — we can safely scale the entire output.
+        self._apply_routed_scaling_factor_on_output = (
+            self._enable_a2a_moe
+            and not self.experts.should_fuse_routed_scaling_factor_in_topk
+            and self.routed_scaling_factor is not None
+            and self.routed_scaling_factor != 1.0
+        )
+
+        # Only create separate shared_experts when not using fusion
+        if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
             intermediate_size = getattr(
                 config,
                 "moe_shared_expert_intermediate_size",
                 self.intermediate_size * self.num_shared_experts,
             )
+            # Compute padded intermediate size for FP8 quantization
+            padded_intermediate_size = self._compute_padded_intermediate_size(
+                intermediate_size, quant_config
+            )
+            # When DeepEP is enabled, shared experts should not be TP-sharded
+            # because MoE output is already complete after EP combine.
+            # Using tp_size=1 ensures shared output is also complete,
+            # so no all-reduce is needed at the MoE level.
+            shared_tp_kwargs = {}
+            if self._enable_a2a_moe:
+                shared_tp_kwargs = dict(tp_rank=0, tp_size=1)
             self.shared_experts = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
                 config=config,
                 reduce_results=False,
+                quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
+                swiglu_limit=self.share_expert_swiglu_limit,
+                padded_intermediate_size=padded_intermediate_size,
+                **shared_tp_kwargs,
             )
+        else:
+            self.shared_experts = None
+
+    def _compute_padded_intermediate_size(
+        self,
+        intermediate_size: int,
+        quant_config: Optional[QuantizationConfig],
+    ) -> Optional[int]:
+        """Compute padded intermediate size to satisfy FP8 blockwise quantization alignment.
+        
+        FP8 blockwise quantization requires:
+        - output_partition_size % block_n == 0 (for column parallel)
+        - input_size_per_partition % block_k == 0 (for row parallel)
+        
+        When TP size is large, intermediate_size / tp_size may not satisfy these constraints.
+        We pad the intermediate_size to make it divisible by block_size * tp_size.
+        
+        Args:
+            intermediate_size: Original intermediate size
+            quant_config: Quantization configuration
+            
+        Returns:
+            Padded intermediate size if padding is needed, None otherwise
+        """
+        if quant_config is None:
+            return None
+        
+        # Only apply padding for FP8 quantization
+        if quant_config.get_name() != "fp8":
+            return None
+        
+        # Get block size from quantization config
+        # FP8 uses block_n for column parallel and block_k for row parallel
+        weight_block_size = getattr(quant_config, "weight_block_size", None)
+        if weight_block_size is None:
+            return None
+        
+        block_n = weight_block_size[0]
+        block_k = weight_block_size[1]
+        block_size = max(block_n, block_k)
+        
+        # Check if padding is needed
+        intermediate_size_per_partition = intermediate_size // self.tp_size
+        
+        # Check if already aligned
+        if intermediate_size_per_partition % block_n == 0 and intermediate_size_per_partition % block_k == 0:
+            return None
+        
+        # Compute padded size: align to block_size * tp_size
+        alignment = block_size * self.tp_size
+        padded_intermediate_size = ((intermediate_size + alignment - 1) // alignment) * alignment
+        
+        log_info_on_rank0(
+            logger,
+            f"Padding shared_experts intermediate_size from {intermediate_size} to {padded_intermediate_size} "
+            f"to satisfy FP8 blockwise quantization alignment (block_size={block_size}, tp_size={self.tp_size}).",
+        )
+        
+        return padded_intermediate_size
 
     def forward(
         self,
@@ -483,20 +683,69 @@ class BailingMoE(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
+        if self._enable_a2a_moe:
+            return self.forward_deepep(hidden_states)
+        return self.forward_normal(
+            hidden_states, should_allreduce_fusion, use_reduce_scatter
+        )
+
+    def forward_normal(
+        self,
+        hidden_states: torch.Tensor,
+        should_allreduce_fusion: bool = False,
+        use_reduce_scatter: bool = False,
+    ) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.num_shared_experts > 0:
+
+        # Only compute shared_output when not using fused shared experts
+        if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
             shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
 
         router_logits = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
 
-        if self.num_shared_experts > 0:
+        if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1 and not use_reduce_scatter and not should_allreduce_fusion:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        return final_hidden_states
+
+    def forward_deepep(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_size)
+
+        # Only compute shared_output when not using fused shared experts
+        if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
+            shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
+
+        router_logits = self.gate(hidden_states)
+        topk_output = self.topk(hidden_states, router_logits)
+        final_hidden_states = self.experts(hidden_states, topk_output)
+
+        # In DeepEP mode, MoE output is already complete after EP combine.
+        # Apply routed_scaling_factor here since the runner does not apply it
+        # for DeepEP paths (post_permute_deep_gemm_to_deepep_normal/ll).
+        if shared_output is not None:
+            if self._apply_routed_scaling_factor_on_output:
+                shared_output.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+            else:
+                shared_output.add_(final_hidden_states)
+            final_hidden_states = shared_output
+        elif self._apply_routed_scaling_factor_on_output:
+            final_hidden_states = final_hidden_states * self.routed_scaling_factor
+
+        # No all-reduce needed: both MoE output (complete after EP combine)
+        # and shared output (tp_size=1, complete) are already full results.
         return final_hidden_states
 
 
@@ -530,6 +779,8 @@ class BailingKDA(KimiDeltaAttention):
             prefix=prefix,
             rms_norm_eps=1e-6,
             no_kda_lora=config.no_kda_lora,
+            safe_gate=getattr(config, "kda_safe_gate", False),
+            lower_bound=getattr(config, "kda_lower_bound", None),
         )
 
 
@@ -658,6 +909,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         layer_id: int = 0,
         prefix: str = "layer",
+        num_fused_shared_experts: int = 0,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -757,6 +1009,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     quant_config=quant_config,
                     layer_id=self.layer_id,
                     prefix=prefix,
+                    num_fused_shared_experts=num_fused_shared_experts,
                 )
             else:
                 # dense layer
@@ -852,6 +1105,7 @@ class BailingMoELinearModel(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        num_fused_shared_experts: int = 0,
     ) -> None:
         super().__init__()
         self.use_nGPT = getattr(config, "use_nGPT", False)
@@ -890,7 +1144,11 @@ class BailingMoELinearModel(nn.Module):
             layer_config = copy.deepcopy(config)
             layer_config.attention_type = self.decoder_attention_types[layer_idx]
 
-            decoder_kwargs = {"quant_config": quant_config, "layer_id": layer_idx}
+            decoder_kwargs = {
+                "quant_config": quant_config,
+                "layer_id": layer_idx,
+                "num_fused_shared_experts": num_fused_shared_experts,
+            }
             return BailingMoELinearDecoderLayer(
                 layer_config, **decoder_kwargs, prefix=prefix
             )
@@ -1000,8 +1258,16 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
+        self.tp_size = get_tensor_model_parallel_world_size()
+        
+        # Determine num_fused_shared_experts
+        self.determine_num_fused_shared_experts()
+        
         self.model = BailingMoELinearModel(
-            self.config, quant_config, prefix=add_prefix("model", prefix)
+            self.config,
+            quant_config,
+            prefix=add_prefix("model", prefix),
+            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         if self.pp_group.is_last_rank:
@@ -1027,6 +1293,139 @@ class BailingMoeV3ForCausalLM(nn.Module):
     @property
     def end_layer(self):
         return self.model.end_layer
+
+    def determine_num_fused_shared_experts(self, architecture: str = "BailingMoeV3ForCausalLM"):
+        """Determine whether to enable fused shared experts optimization.
+        
+        This optimization fuses shared experts with routed experts for better performance.
+        When enabled with EP (Expert Parallelism), shared experts are distributed across
+        GPUs along with routed experts, solving the TP size limitation issue.
+        
+        It is disabled when:
+        1. User explicitly disables it via --disable-shared-experts-fusion
+        2. Model config doesn't match the expected architecture
+        3. Hardware doesn't support it (requires CUDA with capability >= 80 or AMD with capability >= gfx942)
+        4. Using W4AFP8 quantization (different quant methods for routed and shared experts)
+        
+        NOTE: This optimization requires that shared_experts and routed experts have the same
+        intermediate_size. For BailingMoE V3, this is guaranteed by the model architecture:
+        - config.moe_intermediate_size is used for routed experts
+        - config.moe_shared_expert_intermediate_size (if set) should equal moe_intermediate_size
+          for fusion to work correctly, otherwise the default fallback is
+          moe_intermediate_size * num_shared_experts which would NOT be compatible with fusion.
+        """
+        self.num_fused_shared_experts = 0
+        if get_global_server_args().disable_shared_experts_fusion:
+            return
+
+        num_shared_experts = getattr(self.config, "num_shared_experts", 0)
+        num_experts = getattr(self.config, "num_experts", 0)
+        
+        # Only enable fusion if there are shared experts
+        if num_shared_experts == 0:
+            return
+
+        # Check conditions for enabling fused shared experts
+        disable_reason = None
+
+        # Check A2A MoE backend (e.g., DeepEP)
+        # Fused shared experts adds an extra expert ID (e.g., 512 for 512 routed experts),
+        # making total experts = num_experts + 1 (e.g., 513). DeepEP routes expert IDs to
+        # ranks via expert_id // (num_experts // group_size), which breaks for the extra
+        # shared expert ID. Also, DeepEP asserts num_experts % group_size == 0, which
+        # fails for 513. Therefore, fused shared experts is incompatible with A2A backends.
+        if not get_moe_a2a_backend().is_none():
+            disable_reason = (
+                "A2A MoE backend (e.g., DeepEP) is enabled. Fused shared experts is "
+                "incompatible with A2A backends because the extra shared expert ID cannot "
+                "be correctly routed."
+            )
+        # Check architecture
+        elif self.config.architectures[0] != architecture:
+            disable_reason = "Config does not support fused shared expert(s)."
+        # Check hardware capability
+        elif (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
+            not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)
+        ):
+            disable_reason = (
+                "Only Bailing MoE V3 on NV-platform with capability >= 80 "
+                "or AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization."
+            )
+        # Check W4AFP8 quantization
+        elif self.quant_config and self.quant_config.get_name() == "w4afp8":
+            disable_reason = "Bailing MoE V3 W4AFP8 model uses different quant method for routed experts and shared experts."
+        # Check shared_experts intermediate_size compatibility
+        # Fusion requires shared_experts and routed experts to have the same intermediate_size
+        # Note: The default value for moe_shared_expert_intermediate_size is
+        # moe_intermediate_size * num_shared_experts (see BailingMoE.__init__)
+        else:
+            shared_expert_intermediate_size = getattr(
+                self.config,
+                "moe_shared_expert_intermediate_size",
+                self.config.moe_intermediate_size * num_shared_experts,
+            )
+            if shared_expert_intermediate_size != self.config.moe_intermediate_size:
+                disable_reason = (
+                    f"Shared experts have different intermediate_size ({shared_expert_intermediate_size}) "
+                    f"from routed experts ({self.config.moe_intermediate_size}). Fusion requires them to be equal."
+                )
+            # Check FP8 blockwise quantization alignment
+            # FusedMoE doesn't have padding logic for FP8, so we need to check alignment
+            # Note: When EP is enabled, moe_tp_size is smaller than tp_size, which makes
+            # intermediate_size_per_partition larger and easier to satisfy alignment requirements.
+            elif self.quant_config and self.quant_config.get_name() == "fp8":
+                weight_block_size = getattr(self.quant_config, "weight_block_size", None)
+                if weight_block_size is not None:
+                    block_n = weight_block_size[0]
+                    block_k = weight_block_size[1]
+                    # Use moe_tp_size for alignment check (accounts for EP mode)
+                    moe_ep_size = get_moe_expert_parallel_world_size()
+                    moe_tp_size = self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
+                    intermediate_size_per_partition = self.config.moe_intermediate_size // moe_tp_size
+                    if intermediate_size_per_partition % block_n != 0 or intermediate_size_per_partition % block_k != 0:
+                        disable_reason = (
+                            f"FP8 blockwise quantization requires intermediate_size_per_partition "
+                            f"({intermediate_size_per_partition}) to be divisible by block_n ({block_n}) and block_k ({block_k}). "
+                            f"Current config: moe_intermediate_size={self.config.moe_intermediate_size}, "
+                            f"tp_size={self.tp_size}, moe_tp_size={moe_tp_size}. "
+                            f"Consider using --disable-shared-experts-fusion to use padding solution instead."
+                        )
+
+        if disable_reason is not None:
+            get_global_server_args().disable_shared_experts_fusion = True
+            self.num_fused_shared_experts = 0
+            log_info_on_rank0(
+                logger,
+                f"{disable_reason} Shared experts fusion optimization is disabled.",
+            )
+            return
+
+        self.num_fused_shared_experts = num_shared_experts
+
+        # Safety check: current CUDA implementation only supports num_fused_shared_experts == 1.
+        # The grouped_topk_gpu and _post_process_topk_ids functions only handle the last column,
+        # which is incorrect when num_fused_shared_experts > 1.
+        # AMD platform with aiter handles this correctly via fused_append_shared_experts kernel.
+        if self.num_fused_shared_experts > 1 and not _is_hip:
+            raise ValueError(
+                f"num_fused_shared_experts > 1 ({self.num_fused_shared_experts}) is not "
+                f"supported on CUDA platform. The current TopK implementation only handles "
+                f"one fused shared expert. AMD platform with aiter supports multiple shared experts."
+            )
+
+        # Log EP mode info
+        moe_ep_size = get_moe_expert_parallel_world_size()
+        if moe_ep_size > 1:
+            log_info_on_rank0(
+                logger,
+                f"Shared experts fusion optimization is enabled with {self.num_fused_shared_experts} fused shared expert(s) under EP mode (ep_size={moe_ep_size}). "
+                f"Shared experts will be distributed across GPUs along with routed experts.",
+            )
+        else:
+            log_info_on_rank0(
+                logger,
+                f"Shared experts fusion optimization is enabled with {self.num_fused_shared_experts} fused shared expert(s).",
+            )
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
         # nGPT fusion
@@ -1373,9 +1772,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
             (".fused_qkvbfg_proj", ".q_proj", 0),
             (".fused_qkvbfg_proj", ".k_proj", 1),
             (".fused_qkvbfg_proj", ".v_proj", 2),
-            (".fused_qkvbfg_proj", ".b_proj", 3),
-            (".fused_qkvbfg_proj", ".f_proj", 4),
-            (".fused_qkvbfg_proj", ".g_proj", 5),
+            (".fused_qkvbfg_proj", ".f_proj", 3),
+            (".fused_qkvbfg_proj", ".g_proj", 4),
             # Fused path
             (".fused_qkvbfg_a_proj", ".q_proj", 0),
             (".fused_qkvbfg_a_proj", ".k_proj", 1),
@@ -1398,7 +1796,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=self.config.num_experts + self.num_fused_shared_experts,
         )
 
         params_dict = dict(self.named_parameters())
@@ -1408,6 +1806,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             self.config.q_lora_rank is not None
         )
         cached_a_proj = {} if fuse_qkv_a_proj else None
+
+        if self.num_fused_shared_experts > 0:
+            log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
 
         for name, loaded_weight in weights:
             try:
@@ -1427,6 +1828,13 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     or (self.config.tie_word_embeddings and "lm_head" in name)
                 ):
                     continue
+
+                # Redirect shared_experts weights to FusedMoE when fusion is enabled
+                if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
+                    name = name.replace(
+                        "mlp.shared_experts",
+                        f"mlp.experts.{self.config.num_experts}",
+                    )
 
                 weight_names.append(name)
 
@@ -1547,7 +1955,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
                                 cached_a_proj.pop(q_a_proj_name)
                                 cached_a_proj.pop(kv_a_proj_name)
                         else:
-
                             if name not in params_dict:
                                 name = name.replace(".dense.", ".o_proj.")
                                 if name not in params_dict:

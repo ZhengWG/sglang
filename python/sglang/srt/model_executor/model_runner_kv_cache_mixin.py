@@ -75,6 +75,20 @@ class ModelRunnerKVCacheMixin:
         server_args = self.server_args
         assert config is not None
 
+        # Scale mamba_cache_per_req to only account for layers in current PP rank.
+        # Global mamba_cache_per_req = per_layer_cost * num_global_layers, but each
+        # PP rank only handles a subset of layers.
+        global_params = config.mamba2_cache_params
+        num_global_layers = len(global_params.layers)
+        num_local_layers = sum(
+            1
+            for l in global_params.layers
+            if self.start_layer <= l < self.end_layer
+        )
+        mamba_cache_per_req = (
+            global_params.mamba_cache_per_req * num_local_layers // num_global_layers
+        )
+
         # reserve the memory for the intermediate mamba states used for spec dec
         if not self.spec_algorithm.is_none():
             assert server_args.speculative_num_draft_tokens is not None
@@ -84,7 +98,7 @@ class ModelRunnerKVCacheMixin:
                 self.dp_size if server_args.enable_dp_attention else 1
             )
             mamba_state_intermediate_size = (
-                config.mamba2_cache_params.mamba_cache_per_req
+                mamba_cache_per_req
                 * max_running_requests
                 * server_args.speculative_num_draft_tokens
             )
@@ -107,7 +121,7 @@ class ModelRunnerKVCacheMixin:
             )
         else:
             # Use ratio-based calculation to auto-fit available memory
-            assert config.mamba2_cache_params.mamba_cache_per_req > 0
+            assert mamba_cache_per_req > 0
 
             # allocate the memory based on the ratio between mamba state memory vs. full kv cache memory
             # solve the equations:
@@ -120,14 +134,11 @@ class ModelRunnerKVCacheMixin:
             )
             # calculate the max_mamba_cache_size based on the given total mamba memory
             server_args.max_mamba_cache_size = int(
-                (mamba_state_memory_raw * (1 << 30))
-                // config.mamba2_cache_params.mamba_cache_per_req
+                (mamba_state_memory_raw * (1 << 30)) // mamba_cache_per_req
             )
 
         mamba_state_memory = (
-            server_args.max_mamba_cache_size
-            * config.mamba2_cache_params.mamba_cache_per_req
-            / (1 << 30)
+            server_args.max_mamba_cache_size * mamba_cache_per_req / (1 << 30)
         )
         return total_rest_memory - mamba_state_memory
 

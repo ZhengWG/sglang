@@ -174,6 +174,8 @@ class KimiDeltaAttention(nn.Module):
         rms_norm_eps: float = 1e-5,
         prefix: str = "",
         no_kda_lora: bool = False,
+        safe_gate: bool = False,
+        lower_bound: float = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -189,6 +191,10 @@ class KimiDeltaAttention(nn.Module):
         self.head_v_dim = config.v_head_dim
         self.layer_idx = layer_idx
         self.prefix = prefix
+        self.safe_gate = safe_gate
+        self.lower_bound = lower_bound
+        if not self.safe_gate:
+            self.lower_bound = None
         assert self.num_heads % self.tp_size == 0
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
@@ -205,7 +211,6 @@ class KimiDeltaAttention(nn.Module):
                     projection_size,
                     projection_size,
                     projection_size,
-                    self.num_heads,
                     projection_size,
                     projection_size,
                 ]
@@ -218,10 +223,15 @@ class KimiDeltaAttention(nn.Module):
                 )
                 self.split_sizes = [
                     3 * projection_size // self.tp_size,  # qkv
-                    self.num_heads // self.tp_size,  # beta
                     projection_size // self.tp_size,  # f
                     projection_size // self.tp_size,  # g
                 ]
+                self.b_proj = ColumnParallelLinear(
+                    self.hidden_size,
+                    self.num_heads,
+                    bias=False,
+                    prefix=f"{prefix}.b_proj",
+                )
             else:
                 self.qkvb_sizes = [
                     projection_size,
@@ -370,11 +380,12 @@ class KimiDeltaAttention(nn.Module):
         # Single fused projection for all: qkv + beta + f_a + g_a
         if self.no_kda_lora:
             fused_states, _ = self.fused_qkvbfg_proj(hidden_states)
-            qkv, beta, forget_gate, g_proj_states = torch.split(
+            qkv, forget_gate, g_proj_states = torch.split(
                 fused_states,
                 self.split_sizes,
                 dim=-1,
             )
+            beta = self.b_proj(hidden_states)[0]
             forget_gate = forget_gate.contiguous()
         else:
             fused_states = self.fused_qkvbfg_a_proj(hidden_states)
@@ -414,7 +425,11 @@ class KimiDeltaAttention(nn.Module):
         # fused_kda_gate is fused to KimiLinearAttentionBackend with decode
         if not forward_batch.forward_mode.is_decode():
             forget_gate = fused_kda_gate(
-                forget_gate, self.A_log, self.head_dim, g_bias=self.dt_bias
+                forget_gate,
+                self.A_log,
+                self.head_dim,
+                g_bias=self.dt_bias,
+                lower_bound=self.lower_bound,
             )
             beta = beta.float().sigmoid()
             forget_gate = forget_gate.unsqueeze(0)
@@ -425,6 +440,7 @@ class KimiDeltaAttention(nn.Module):
             mixed_qkv=mixed_qkv,
             a=forget_gate,
             b=beta,
+            lower_bound=self.lower_bound,
         )
 
         norm_gate = g_proj_states.unflatten(

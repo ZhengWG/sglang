@@ -162,6 +162,8 @@ class KDAAttnBackend(MambaAttnBackendBase):
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
+        lower_bound = kwargs.get("lower_bound", None)
+
         return self.kernel_dispatcher.decode(
             q=q,
             k=k,
@@ -173,6 +175,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
+            lower_bound=lower_bound,
         )
 
     def forward_extend(

@@ -30,6 +30,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        lower_bound = kwargs.get("lower_bound", None)
         return fused_sigmoid_gating_delta_rule_update(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -45,6 +46,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             softplus_beta=1.0,
             softplus_threshold=20.0,
             is_kda=True,
+            lower_bound=lower_bound,
         )
 
     def extend(

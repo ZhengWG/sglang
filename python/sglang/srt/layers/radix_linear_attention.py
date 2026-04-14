@@ -74,6 +74,7 @@ class RadixLinearAttention(nn.Module):
         mixed_qkv: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         if forward_batch.forward_mode.is_extend() and get_forward_context() is not None:
             # Output shape from linear attention: (1, seq_len, num_v_heads, head_v_dim)
@@ -98,6 +99,7 @@ class RadixLinearAttention(nn.Module):
                 mixed_qkv=mixed_qkv,
                 a=a,
                 b=b,
+                **kwargs,
             )
 
 

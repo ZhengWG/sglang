@@ -88,6 +88,8 @@ class BailingHybridConfig(PretrainedConfig):
         qk_nope_head_dim=128,
         rope_interleave=True,
         no_kda_lora=False,
+        kda_safe_gate=False,
+        kda_lower_bound=None,
         **kwargs,
     ):
         self.num_hidden_layers = num_hidden_layers
@@ -140,6 +142,10 @@ class BailingHybridConfig(PretrainedConfig):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.rope_interleave = rope_interleave
         self.no_kda_lora = no_kda_lora
+        self.kda_safe_gate = kda_safe_gate
+        self.kda_lower_bound = kda_lower_bound
+        if not self.kda_safe_gate:
+            self.kda_lower_bound = None
         self.for_nextn_model = False
         super().__init__(
             pad_token_id=pad_token_id,
