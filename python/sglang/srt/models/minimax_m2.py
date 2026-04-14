@@ -33,7 +33,6 @@ from sglang.jit_kernel.all_reduce import (
 from sglang.kernel_api_logging import debug_kernel_api
 from sglang.srt.batch_overlap.two_batch_overlap import model_forward_maybe_tbo
 from sglang.srt.distributed import (
-    get_bool_env_var,
     get_moe_expert_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -84,6 +83,7 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
+    get_bool_env_var,
     get_compiler_backend,
     is_cuda,
     is_non_idle_and_non_empty,
