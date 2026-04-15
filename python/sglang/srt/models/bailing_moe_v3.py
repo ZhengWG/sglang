@@ -23,9 +23,9 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.communicator import (
-    AttentionInputs,
+    LayerCommunicator,
     LayerScatterModes,
-    get_attn_tp_context,
+    enable_moe_dense_fully_dp,
 )
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
@@ -757,6 +757,7 @@ class BailingKDA(KimiDeltaAttention):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        reduce_results: bool = True,
         **kwargs,
     ) -> None:
         kimi_linear_config = KimiLinearConfig(
@@ -781,6 +782,7 @@ class BailingKDA(KimiDeltaAttention):
             no_kda_lora=config.no_kda_lora,
             safe_gate=getattr(config, "kda_safe_gate", False),
             lower_bound=getattr(config, "kda_lower_bound", None),
+            reduce_results=reduce_results,
         )
 
 
@@ -944,6 +946,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                reduce_results=False,
             )
         elif config.attention_type == 1:  # softmax layer
             if self.use_mla:
@@ -963,7 +966,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     max_position_embeddings=262144,
                     quant_config=quant_config,
                     layer_id=layer_id,
-                    reduce_results=True,
+                    reduce_results=False,
                     prefix=add_prefix("attention", prefix),
                     alt_stream=alt_stream,
                     skip_rope=(
@@ -987,12 +990,18 @@ class BailingMoELinearDecoderLayer(nn.Module):
         is_moe_layer = not (self.expert_num == 1) and (
             self.layer_id >= config.first_k_dense_replace
         )
+        self.is_layer_sparse = is_moe_layer
         is_previous_moe_layer = not (self.expert_num == 1) and (
             self.layer_id - 1 >= config.first_k_dense_replace
         )
         is_next_layer_sparse = not (self.expert_num == 1) and (
             self.layer_id + 1 >= config.first_k_dense_replace
         )
+        if enable_moe_dense_fully_dp():
+            mlp_tp_rank, mlp_tp_size = 0, 1
+        else:
+            mlp_tp_rank, mlp_tp_size = None, None
+
         if self.expert_num == 1:
             self.mlp = BailingMLP(
                 hidden_size=self.hidden_size,
@@ -1000,6 +1009,8 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=prefix,
+                tp_rank=mlp_tp_rank,
+                tp_size=mlp_tp_size,
             )
         else:
             if self.layer_id >= config.first_k_dense_replace:
@@ -1019,6 +1030,8 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     config=config,
                     quant_config=quant_config,
                     prefix=prefix,
+                    tp_rank=mlp_tp_rank,
+                    tp_size=mlp_tp_size,
                 )
         rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-5))
         self.input_layernorm = RMSNorm(self.hidden_size, eps=rms_norm_eps)
@@ -1032,6 +1045,19 @@ class BailingMoELinearDecoderLayer(nn.Module):
             is_next_layer_sparse=is_next_layer_sparse,
         )
 
+        self.layer_communicator = LayerCommunicator(
+            layer_scatter_modes=self.layer_scatter_modes,
+            input_layernorm=self.input_layernorm,
+            post_attention_layernorm=self.post_attention_layernorm,
+            allow_reduce_scatter=True,
+            is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            qkv_latent_func=(
+                self.attention.prepare_qkv_latent
+                if self.attention_type == 1 and self.use_mla
+                else None
+            ),
+        )
+
     @torch.inference_mode()
     def forward(
         self,
@@ -1042,19 +1068,23 @@ class BailingMoELinearDecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        # Step 1: prepare_attn (dp_scatter + input_layernorm)
+        hidden_states, residual = self.layer_communicator.prepare_attn(
+            hidden_states, residual, forward_batch
+        )
 
+        # Step 2: attention
         if not forward_batch.forward_mode.is_idle():
-            if self.use_mla:
-                if self.attention_type == 1:
-                    attn_inputs = AttentionInputs(
-                        hidden_states, forward_batch, self.attention.prepare_qkv_latent
-                    )
-                    get_attn_tp_context().set_attn_inputs(attn_inputs)
+            if self.attention_type == 0:
+                # KDA (linear attention) — needs zero_allocator
+                hidden_states = self.attention(
+                    hidden_states=hidden_states,
+                    positions=positions,
+                    forward_batch=forward_batch,
+                    zero_allocator=zero_allocator,
+                )
+            elif self.use_mla:
+                # MLA (softmax attention)
                 hidden_states = self.attention(
                     positions=positions,
                     hidden_states=hidden_states,
@@ -1062,11 +1092,13 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     zero_allocator=zero_allocator,
                 )
             else:
+                # GQA fallback
                 hidden_states = self.attention(
                     hidden_states=hidden_states,
                     positions=positions,
                     forward_batch=forward_batch,
                 )
+
         if self.use_nGPT:
             hidden_states, residual = apply_hyper_spherical_fusion(
                 hidden_states,
@@ -1075,8 +1107,31 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 getattr(self.config, "layernorm_epsilon", 1e-6),
             )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        # Step 3: prepare_mlp (all-reduce attn output + dp_gather + post_attention_layernorm)
+        hidden_states, residual = self.layer_communicator.prepare_mlp(
+            hidden_states, residual, forward_batch
+        )
+
+        # Step 4: MLP
+        should_allreduce_fusion = (
+            self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
+                forward_batch
+            )
+        )
+        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
+            forward_batch
+        )
+
+        if not (
+            enable_moe_dense_fully_dp()
+            and (not self.is_layer_sparse)
+            and hidden_states.shape[0] == 0
+        ):
+            hidden_states = self.mlp(
+                hidden_states,
+                should_allreduce_fusion=should_allreduce_fusion,
+                use_reduce_scatter=use_reduce_scatter,
+            )
 
         if self.use_nGPT:
             hidden_states, residual = apply_hyper_spherical_fusion(
@@ -1084,6 +1139,14 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 residual,
                 self.mlp_alpha,
                 getattr(self.config, "layernorm_epsilon", 1e-6),
+            )
+
+        # Step 5: postprocess_layer (dp_scatter for next layer)
+        if should_allreduce_fusion:
+            hidden_states._sglang_needs_allreduce_fusion = True
+        else:
+            hidden_states, residual = self.layer_communicator.postprocess_layer(
+                hidden_states, residual, forward_batch
             )
 
         return hidden_states, residual
