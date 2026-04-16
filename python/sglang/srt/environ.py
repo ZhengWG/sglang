@@ -465,6 +465,8 @@ class Envs:
     SGLANG_VIT_ENABLE_CUDA_GRAPH = EnvBool(False)
     SGLANG_MM_SKIP_COMPUTE_HASH = EnvBool(False)
     SGLANG_PREPROCESS_USE_IMAGE_TENSOR = EnvBool(False)
+    # Multimodal preprocess (tokenizer process): exit after N CUDA OOMs; 0 disables.
+    SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD = EnvInt(0)
 
 
     # VLM Item CUDA IPC Transport
