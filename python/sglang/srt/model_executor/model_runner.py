@@ -2687,6 +2687,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             return
 
+        # Draft models use decode CUDA graphs, not PCG
+        if self.is_draft_worker:
+            return
+
         # Disable piecewise CUDA graph for non-language models
         if not hasattr(self.model, "model"):
             logger.warning(
