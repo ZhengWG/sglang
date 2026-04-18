@@ -772,6 +772,8 @@ def fused_experts_impl(
     gemm1_alpha: Optional[float] = None,
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
+    layernorm_epsilon: Optional[float] = 1e-6,
+    scaling_up_factor: Optional[torch.tensor] = None,
 ):
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
@@ -846,6 +848,8 @@ def fused_experts_impl(
         gemm1_limit=gemm1_limit,
         filter_expert=filter_expert,
         hooks=None,
+        layernorm_epsilon=layernorm_epsilon,
+        scaling_up_factor=scaling_up_factor,
     )
 
 
