@@ -16,7 +16,6 @@ from sglang.srt.layers.moe.moe_runner.base import (
     register_pre_permute,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
-from sglang.srt.layers.ngpt import scale_operation
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher.standard import (
@@ -81,8 +80,6 @@ class TritonRunnerCore(MoeRunnerCore):
         quant_info: TritonMoeQuantInfo,
         running_state: dict,
         hooks: Optional[Any] = None,
-        layernorm_epsilon: Optional[float] = 1e-6,
-        scaling_up_factor: Optional[torch.tensor] = None,
     ) -> TritonRunnerOutput:
         from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
             _fused_moe_kernel_sequence,
@@ -129,8 +126,6 @@ class TritonRunnerCore(MoeRunnerCore):
             gemm1_limit=self.config.gemm1_clamp_limit,
             filter_expert=filter_expert,
             hooks=hooks,
-            layernorm_epsilon=layernorm_epsilon,
-            scaling_up_factor=scaling_up_factor,
         )
 
         return TritonRunnerOutput(hidden_states=out)
@@ -145,8 +140,6 @@ def fused_experts_none_to_triton(
     dispatch_output: StandardDispatchOutput,
     quant_info: TritonMoeQuantInfo,
     runner_config: MoeRunnerConfig,
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.tensor] = None,
 ) -> StandardCombineInput:
     from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_experts
     from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
@@ -171,8 +164,6 @@ def fused_experts_none_to_triton(
         a1_scale=quant_info.a13_scale,
         a2_scale=quant_info.a2_scale,
         block_shape=quant_info.block_shape,
-        layernorm_epsilon=layernorm_epsilon,
-        scaling_up_factor=scaling_up_factor,
     )
 
     return StandardCombineInput(

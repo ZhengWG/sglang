@@ -12,7 +12,6 @@ from transformers import PretrainedConfig
 
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
-    divide,
     get_moe_expert_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -44,7 +43,6 @@ from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.moe import get_moe_a2a_backend
-from sglang.srt.layers.ngpt import ScaleUpNorm, apply_hyper_spherical_fusion, l2norm
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_kernel import (
     is_fp8_fnuz,
@@ -69,7 +67,6 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
-    sharded_weight_loader,
 )
 from sglang.srt.models.deepseek_common.utils import (
     _is_cpu,
@@ -91,7 +88,6 @@ from sglang.srt.utils import (
     is_sm100_supported,
     log_info_on_rank0,
     make_layers,
-    set_weight_attrs,
 )
 
 _is_fp8_fnuz = is_fp8_fnuz()
@@ -287,7 +283,6 @@ class BailingMLP(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.use_nGPT = getattr(config, "use_nGPT", False)
         self.config = config
         self.swiglu_limit = swiglu_limit
         self.tp_size = tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
@@ -316,17 +311,6 @@ class BailingMLP(nn.Module):
             tp_rank=tp_rank,
             tp_size=tp_size,
         )
-
-        if self.use_nGPT:
-            self.hidden_size = config.hidden_size
-            # For nGPT mode with padding, use original intermediate_size for ScaleUpNorm
-            # because swv only operates on the effective part
-            self.swv = ScaleUpNorm(
-                intermediate_size=self.intermediate_size,
-                layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-            )
 
         # Pre-compute padding-related values for forward optimization
         if self.padded_intermediate_size > self.intermediate_size:
@@ -362,17 +346,6 @@ class BailingMLP(nn.Module):
             gate_effective = gate_padded[..., :self.effective_size_per_partition]
             up_effective = up_padded[..., :self.effective_size_per_partition]
             
-            # For nGPT mode, apply swv on the effective up part
-            # Note: swv expects [batch, 2 * intermediate_size] format with gate and up concatenated
-            # We need to apply it only on the effective parts
-            if self.use_nGPT:
-                # Create a tensor with only effective parts for swv processing
-                effective_combined = torch.cat([gate_effective, up_effective], dim=-1)
-                effective_combined = self.swv(effective_combined)
-                # Split back
-                gate_effective = effective_combined[..., :self.effective_size_per_partition]
-                up_effective = effective_combined[..., self.effective_size_per_partition:]
-            
             # Apply SiLU to gate and multiply with up
             if self.swiglu_limit is not None:
                 x = F.silu(gate_effective).clamp(max=self.swiglu_limit) * up_effective.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
@@ -382,8 +355,6 @@ class BailingMLP(nn.Module):
             # Pad back to padded_intermediate_size_per_partition for down_proj
             x = F.pad(x, (0, self.pad_size_per_partition))
         else:
-            if self.use_nGPT:
-                x = self.swv(x)
             if self.swiglu_limit is not None:
                 d = x.shape[-1] // 2
                 gate = F.silu(x[..., :d]).clamp(max=self.swiglu_limit)
@@ -408,9 +379,6 @@ class BailingMoEGate(nn.Module):
     ):
         super().__init__()
 
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        self.scale_router_input = getattr(config, "scale_router_input", False)
-
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -420,11 +388,6 @@ class BailingMoEGate(nn.Module):
                 dtype=self.params_dtype,
             ),
         )
-
-        if self.use_nGPT and self.scale_router_input:
-            self.router_init_value = 1.0
-            self.router_init_scaling = config.hidden_size**-0.5
-            self.router_scaling = torch.nn.Parameter(torch.ones(config.hidden_size))
 
         if getattr(config, "moe_router_enable_expert_bias", False):
             self.expert_bias = nn.Parameter(
@@ -464,8 +427,6 @@ class BailingMoE(nn.Module):
         num_fused_shared_experts: int = 0,
     ):
         super().__init__()
-
-        self.use_nGPT = getattr(config, "use_nGPT", False)
 
         self.layer_id = layer_id
 
@@ -570,8 +531,6 @@ class BailingMoE(nn.Module):
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=f"{prefix}.experts",
-            use_nGPT=self.use_nGPT,
-            layernorm_epsilon=getattr(config, "layernorm_epsilon", 1e-6),
             gemm1_clamp_limit=self.expert_swiglu_limit,
         )
 
@@ -767,8 +726,6 @@ class BailingKDA(KimiDeltaAttention):
                 "short_conv_kernel_size": config.short_conv_kernel_size,
                 "kda_layers": [],
                 "full_attn_layers": [],
-                "use_nGPT": getattr(config, "use_nGPT", False),
-                "value_norm": getattr(config, "value_norm", False),
             },
             v_head_dim=getattr(config, "v_head_dim", None),
         )
@@ -796,8 +753,6 @@ class BailingMoEAttention(nn.Module):
         prefix: str = "mha",
     ) -> None:
         super().__init__()
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        self.value_norm = getattr(config, "value_norm", False)
         self.config = config
         self.layer_id = layer_id
 
@@ -818,7 +773,7 @@ class BailingMoEAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**0.5 if self.use_nGPT else self.head_dim**-0.5
+        self.scaling = self.head_dim**-0.5
 
         self.split_qkv = getattr(config, "using_split_qkv_in_self_attention", False)
         assert not self.split_qkv, "split_qkv is not supported for now"
@@ -836,8 +791,6 @@ class BailingMoEAttention(nn.Module):
         if self.use_qk_norm:
             self.query_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.key_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            if self.use_nGPT and self.value_norm:
-                self.value_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -893,10 +846,6 @@ class BailingMoEAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
-            if self.use_nGPT and self.value_norm:
-                v_by_head = v.reshape(-1, self.head_dim)
-                v_by_head = self.value_layernorm(v_by_head)
-                v = v_by_head.view(v.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.dense(attn_output)
@@ -921,22 +870,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
         # todo nextn
 
         is_kda = True
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        if self.use_nGPT:
-            self.layer_group_size = getattr(config, "layer_group_size", None)
-            if self.layer_group_size is not None:
-                self.attn_alpha_init_value = (
-                    0.5
-                    if (is_kda and (layer_id + 1) < self.layer_group_size)
-                    else 0.70716 / config.num_hidden_layers
-                )
-            else:
-                self.attn_alpha_init_value = 0.70716 / config.num_hidden_layers
-            self.attn_alpha_init_scaling = config.hidden_size**-0.5
-            self.attn_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
-            self.mlp_alpha_init_value = 0.70716 / config.num_hidden_layers
-            self.mlp_alpha_init_scaling = config.hidden_size**-0.5
-            self.mlp_alpha = torch.nn.Parameter(torch.ones(config.hidden_size))
         self.config = config
 
         if config.attention_type == 0:  # Linear layer
@@ -1099,14 +1032,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     forward_batch=forward_batch,
                 )
 
-        if self.use_nGPT:
-            hidden_states, residual = apply_hyper_spherical_fusion(
-                hidden_states,
-                residual,
-                self.attn_alpha,
-                getattr(self.config, "layernorm_epsilon", 1e-6),
-            )
-
         # Step 3: prepare_mlp (all-reduce attn output + dp_gather + post_attention_layernorm)
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -1131,14 +1056,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 hidden_states,
                 should_allreduce_fusion=should_allreduce_fusion,
                 use_reduce_scatter=use_reduce_scatter,
-            )
-
-        if self.use_nGPT:
-            hidden_states, residual = apply_hyper_spherical_fusion(
-                hidden_states,
-                residual,
-                self.mlp_alpha,
-                getattr(self.config, "layernorm_epsilon", 1e-6),
             )
 
         # Step 5: postprocess_layer (dp_scatter for next layer)
@@ -1171,7 +1088,6 @@ class BailingMoELinearModel(nn.Module):
         num_fused_shared_experts: int = 0,
     ) -> None:
         super().__init__()
-        self.use_nGPT = getattr(config, "use_nGPT", False)
         self.pp_group = get_pp_group()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -1282,16 +1198,10 @@ class BailingMoELinearModel(nn.Module):
             )
         else:
             if not forward_batch.forward_mode.is_idle():
-                if self.use_nGPT:
-                    hidden_states = hidden_states + residual
-                    hidden_states = l2norm(
-                        hidden_states, getattr(self.config, "layernorm_epsilon", 1e-6)
-                    )
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
                 else:
-                    if residual is None:
-                        hidden_states = self.norm(hidden_states)
-                    else:
-                        hidden_states, _ = self.norm(hidden_states, residual)
+                    hidden_states, _ = self.norm(hidden_states, residual)
             return hidden_states
 
 
@@ -1305,18 +1215,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        self.use_nGPT = getattr(config, "use_nGPT", False)
-        if self.use_nGPT:
-            self.finalnorm_init_value = 1.0
-            self.finalnorm_init_scaling = config.hidden_size**-0.5
-            tp_size = get_tensor_model_parallel_world_size()
-            self.finalnorm = torch.nn.Parameter(
-                torch.ones(divide(config.vocab_size, tp_size), dtype=torch.float32)
-            )
-            set_weight_attrs(
-                self.finalnorm, {"weight_loader": sharded_weight_loader(0)}
-            )
 
         self.pp_group = get_pp_group()
         self.config = config
@@ -1491,42 +1389,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
             )
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
-        # nGPT fusion
-        if self.use_nGPT:
-            # fuse finalnorm into lm_head weight
-            if self.pp_group.is_last_rank and self.use_nGPT:
-                self.finalnorm.data.mul_(
-                    self.finalnorm_init_value / self.finalnorm_init_scaling
-                )
-                self.lm_head.weight.data.mul_(
-                    self.finalnorm.unsqueeze(1).to(self.lm_head.weight.dtype)
-                )
-                logger.info("Fused finalnorm into lm_head weight.")
-
-            for i in range(self.start_layer, self.end_layer):
-                layer = self.model.layers[i]
-
-                # fuse router_scaling into expert weights
-                mlp = layer.mlp
-                if isinstance(mlp, BailingMoE):
-                    gate = mlp.gate
-                    if gate.scale_router_input:
-                        router_scaling = (
-                            gate.router_scaling
-                            * (gate.router_init_value / gate.router_init_scaling)
-                        ).to(gate.weight.dtype)
-                        gate.weight.data.mul_(router_scaling.unsqueeze(0))
-
-                # calculate attn_alpha and mlp_alpha
-                attn_alpha = layer.attn_alpha
-                attn_alpha.data.mul_(
-                    layer.attn_alpha_init_value / layer.attn_alpha_init_scaling
-                )
-                mlp_alpha = layer.mlp_alpha
-                mlp_alpha.data.mul_(
-                    layer.mlp_alpha_init_value / layer.mlp_alpha_init_scaling
-                )
-
         # Perform post-processing after loading weights
         if is_nextn:
             layer_ids = [self.config.num_hidden_layers]

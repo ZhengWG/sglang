@@ -20,7 +20,6 @@ from sglang.srt.layers.moe import (
     get_moe_runner_backend,
 )
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
-from sglang.srt.layers.ngpt import ScaleUpNorm
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -390,25 +389,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-        _scale_up_norm: Optional[ScaleUpNorm] = None,
     ) -> CombineInput:
-        if self._forward_method is self.forward_cuda:
-            return self.forward(
-                layer=layer,
-                dispatch_output=dispatch_output,
-                _scale_up_norm = _scale_up_norm,
-            )
-        else:
-            return self.forward(
-                layer=layer,
-                dispatch_output=dispatch_output,
-            )
+        return self.forward(
+            layer=layer,
+            dispatch_output=dispatch_output,
+        )
 
     def forward_cuda(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-        _scale_up_norm: Optional[ScaleUpNorm] = None,
     ) -> CombineInput:
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
@@ -429,7 +419,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 w13_bias=getattr(layer, "w13_weight_bias", None),
                 w2_bias=getattr(layer, "w2_weight_bias", None),
             )
-            return self.runner.run(dispatch_output, quant_info, _scale_up_norm=_scale_up_norm)
+            return self.runner.run(dispatch_output, quant_info)
         elif self.use_flashinfer_cutlass:
             output = flashinfer_cutlass_fused_moe(
                 input=x,
@@ -512,7 +502,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 b13=getattr(layer, "w13_weight_bias", None),
                 b2=getattr(layer, "w2_weight_bias", None),
             )
-            return self.runner.run(dispatch_output, quant_info, _scale_up_norm=_scale_up_norm)
+            return self.runner.run(dispatch_output, quant_info)
 
     def forward_cpu(
         self,

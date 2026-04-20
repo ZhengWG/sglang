@@ -14,7 +14,6 @@ import triton.language as tl
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.layers.moe.utils import get_moe_padding_size
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.layers.ngpt import scale_operation
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,
@@ -106,8 +105,6 @@ def inplace_fused_experts(
     gemm1_alpha: Optional[float] = None,
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -138,8 +135,6 @@ def inplace_fused_experts(
         gemm1_alpha,
         gemm1_limit,
         filter_expert,
-        layernorm_epsilon=layernorm_epsilon,
-        scaling_up_factor=scaling_up_factor,
     )
 
 
@@ -172,8 +167,6 @@ def outplace_fused_experts(
     gemm1_alpha: Optional[float] = None,
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -204,8 +197,6 @@ def outplace_fused_experts(
         gemm1_alpha=gemm1_alpha,
         gemm1_limit=gemm1_limit,
         filter_expert=filter_expert,
-        layernorm_epsilon=layernorm_epsilon,
-        scaling_up_factor=scaling_up_factor,
     )
 
 
@@ -229,8 +220,6 @@ def fused_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.Tensor] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
     filter_expert = (
@@ -266,8 +255,6 @@ def fused_experts(
             moe_runner_config.gemm1_alpha,
             moe_runner_config.gemm1_clamp_limit,
             filter_expert,
-            layernorm_epsilon=layernorm_epsilon,
-            scaling_up_factor=scaling_up_factor,
         )
         return hidden_states
     else:
@@ -299,8 +286,6 @@ def fused_experts(
             gemm1_alpha=moe_runner_config.gemm1_alpha,
             gemm1_limit=moe_runner_config.gemm1_clamp_limit,
             filter_expert=filter_expert,
-            layernorm_epsilon=layernorm_epsilon,
-            scaling_up_factor=scaling_up_factor,
         )
 
 
@@ -346,8 +331,6 @@ def _prepare_fused_moe_run(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: Optional[List[int]],
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.Tensor] = None,
 ):
     """Resolve config, down_config, TMA flag, and aligned expert routing ids.
 
@@ -435,8 +418,6 @@ def _fused_moe_kernel_sequence(
     gemm1_limit: Optional[float],
     filter_expert: bool,
     hooks: Optional[Any] = None,
-    layernorm_epsilon: Optional[float] = 1e-6,
-    scaling_up_factor: Optional[torch.tensor] = None,
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -508,11 +489,6 @@ def _fused_moe_kernel_sequence(
         c_sorted=down_moe_use_tma,
         filter_expert=filter_expert,
     )
-
-    if scaling_up_factor is not None:
-        intermediate_cache1 = scale_operation(
-            intermediate_cache1, scaling_up_factor, layernorm_epsilon
-        )
 
     if hooks and hooks.after_gate_up:
         # Hooks expect intermediate_cache1 shaped (num_tokens, topk, N); the
@@ -772,8 +748,6 @@ def fused_experts_impl(
     gemm1_alpha: Optional[float] = None,
     gemm1_limit: Optional[float] = None,
     filter_expert: bool = True,
-    layernorm_epsilon: Optional[float] = 1e-6,
-    scaling_up_factor: Optional[torch.tensor] = None,
 ):
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
@@ -848,8 +822,6 @@ def fused_experts_impl(
         gemm1_limit=gemm1_limit,
         filter_expert=filter_expert,
         hooks=None,
-        layernorm_epsilon=layernorm_epsilon,
-        scaling_up_factor=scaling_up_factor,
     )
 
 
@@ -873,8 +845,6 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
-    layernorm_epsilon: float = 1e-6,
-    scaling_up_factor: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -957,6 +927,4 @@ def fused_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
         block_shape=block_shape,
-        layernorm_epsilon=layernorm_epsilon,
-        scaling_up_factor=scaling_up_factor,
     )

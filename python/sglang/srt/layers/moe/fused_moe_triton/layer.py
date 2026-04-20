@@ -50,7 +50,6 @@ from sglang.srt.layers.moe.topk import (
     TopKOutputChecker,
 )
 from sglang.srt.layers.moe.utils import RoutingMethodType, is_deepep_class_backend
-from sglang.srt.layers.ngpt import ScaleUpNorm
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -169,8 +168,6 @@ class FusedMoE(torch.nn.Module):
         reduce_results: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_nGPT: bool = False,
-        layernorm_epsilon: float = 1e-6,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         use_presharded_weights: bool = False,
@@ -215,16 +212,6 @@ class FusedMoE(torch.nn.Module):
         self._num_local_routed = self._num_global_routed // self.moe_ep_size
         self.num_local_experts = self._num_local_routed + num_fused_shared_experts
         self._has_fused_shared = num_fused_shared_experts > 0
-
-        if use_nGPT:
-            self.swv = ScaleUpNorm(
-                intermediate_size=intermediate_size,
-                layernorm_epsilon=layernorm_epsilon,
-                tp_rank=self.moe_tp_rank,
-                tp_size=self.moe_tp_size,
-            )
-        else:
-            self.swv = None
 
         self.expert_mask_gpu = None
 
@@ -1033,18 +1020,9 @@ class FusedMoE(torch.nn.Module):
                 .to(device="cuda")
             )
 
-        # nGPT(for Bailing moe v3) only supports Basic Fusedmoe now,
-        # not available for any subclass of FusedMoE
-        # Here check whether swlf.swv is not None to determine
-        if self.swv is not None:
-            combine_input = self.run_moe_core(
-                dispatch_output=dispatch_output,
-                _scale_up_norm=self.swv,
-            )
-        else:
-            combine_input = self.run_moe_core(
-                dispatch_output=dispatch_output,
-            )
+        combine_input = self.run_moe_core(
+            dispatch_output=dispatch_output,
+        )
 
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
@@ -1061,19 +1039,12 @@ class FusedMoE(torch.nn.Module):
 
         return final_hidden_states
 
-    def run_moe_core(self, dispatch_output: DispatchOutput, _scale_up_norm: Optional[ScaleUpNorm] = None) -> CombineInput:
+    def run_moe_core(self, dispatch_output: DispatchOutput) -> CombineInput:
         # TODO: consider using symmetric memory
-        if isinstance(self.quant_method, UnquantizedFusedMoEMethod):
-            return self.quant_method.apply(
-                layer=self,
-                dispatch_output=dispatch_output,
-                _scale_up_norm=_scale_up_norm,
-            )
-        else:
-            return self.quant_method.apply(
-                layer=self,
-                dispatch_output=dispatch_output,
-            )
+        return self.quant_method.apply(
+            layer=self,
+            dispatch_output=dispatch_output,
+        )
 
     @classmethod
     def make_expert_params_mapping(
