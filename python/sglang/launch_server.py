@@ -61,6 +61,10 @@ if __name__ == "__main__":
         stacklevel=1,
     )
 
+    from sglang.srt.plugins import load_plugins
+
+    load_plugins()
+
     prepare_compile_cache(COMPILE_CACHE_ROOT, COMPILE_CACHE_DIRS)
     server_args = prepare_server_args(sys.argv[1:])
 
