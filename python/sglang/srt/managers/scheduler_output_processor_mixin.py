@@ -134,6 +134,9 @@ class SchedulerOutputProcessorMixin:
         if self.is_generation:
             if result.copy_done is not None:
                 result.copy_done.synchronize()
+            if result.routed_experts_output is not None:
+                result.routed_experts_output.finalize()
+                result.routed_experts_output = None
 
             (
                 logits_output,
@@ -399,6 +402,9 @@ class SchedulerOutputProcessorMixin:
     ):
         if result.copy_done is not None:
             result.copy_done.synchronize()
+        if result.routed_experts_output is not None:
+            result.routed_experts_output.finalize()
+            result.routed_experts_output = None
 
         logits_output, next_token_ids, can_run_cuda_graph = (
             result.logits_output,
