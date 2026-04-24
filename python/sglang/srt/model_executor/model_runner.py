@@ -2873,6 +2873,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         pp_proxy_tensors=None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
         if not skip_attn_backend_init:
+            if hasattr(self.model, "prepare_forward_batch"):
+                # Prepare model-specific attention metadata before planning,
+                # e.g. Moss-VL's prefill cross-attention custom mask.
+                self.model.prepare_forward_batch(forward_batch)
             if self.server_args.enable_pdmux:
                 self.decode_attn_backend.init_forward_metadata(forward_batch)
                 forward_batch.attn_backend = self.decode_attn_backend
@@ -2928,6 +2932,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
         if not skip_attn_backend_init:
+            if hasattr(self.model, "prepare_forward_batch"):
+                # Prepare model-specific attention metadata before planning,
+                # e.g. Moss-VL's prefill cross-attention custom mask.
+                self.model.prepare_forward_batch(forward_batch)
             self.attn_backend.init_forward_metadata(forward_batch)
 
         return (
