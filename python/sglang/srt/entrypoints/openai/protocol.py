@@ -686,9 +686,10 @@ class ChatCompletionRequest(BaseModel):
     stream_reasoning: bool = True
     chat_template_kwargs: Optional[Dict] = None
 
-    # SGLang multimodal tiling controls (extensions)
+    # SGLang multimodal controls (extensions)
     max_dynamic_patch: Optional[int] = None
     min_dynamic_patch: Optional[int] = None
+    use_audio_in_video: bool = False
 
     mm_sampling_kwargs: Optional[Dict] = None
 
