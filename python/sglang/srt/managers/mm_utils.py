@@ -21,6 +21,11 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalDataItem,
     MultimodalInputs,
 )
+from sglang.srt.managers.mm_embed_offloader import (
+    LazyHostTensor,
+    maybe_async_offload,
+    to_device_for_concat,
+)
 from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalStaticCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.multimodal.evs import EVSEmbeddingResult
@@ -472,7 +477,14 @@ def _get_precomputed_embedding(
             raise NotImplementedError(
                 "MM inputs where only some items are precomputed."
             )
-        result = torch.concat(precomputed_embeddings)
+        # In EPD chunked-prefill, some chunks may have been async-offloaded
+        # to pinned host memory while later chunks for new requests still
+        # live on CUDA. Materialize any LazyHostTensor and unify device
+        # before concatenation so torch.concat never sees a device mix.
+        cleaned, target_device = to_device_for_concat(precomputed_embeddings)
+        if not cleaned:
+            return None
+        result = torch.concat(cleaned)
         # some models embedding is 3-dim, reshape it to 2-dim (similar to get_embedding_chunk)
         result = result.reshape(-1, result.shape[-1])
         return result
@@ -1111,12 +1123,31 @@ def general_mm_embed_routine(
             # if a cache miss occurs in subsequent chunks, while still freeing up
             # critical GPU memory.
             if mm_inputs_list:
+                # In EPD ``--language-only`` workers the receiver hands off
+                # CUDA tensors directly (see encode_receiver.py) for
+                # throughput. Use a true-async D2H path here so that the
+                # offload neither blocks the forward stream nor lets
+                # GPU memory accumulate across chunked-prefill steps.
+                # Non-EPD paths keep the original synchronous-style call.
+                use_async_offload = get_global_server_args().language_only
                 for mm_input_obj in mm_inputs_list:
-                    if mm_input_obj and hasattr(mm_input_obj, "mm_items"):
-                        for mm_item in mm_input_obj.mm_items:
-                            feature = getattr(mm_item, "feature", None)
-                            if isinstance(feature, torch.Tensor) and feature.is_cuda:
-                                mm_item.feature = feature.to("cpu", non_blocking=True)
+                    if not (mm_input_obj and hasattr(mm_input_obj, "mm_items")):
+                        continue
+                    for mm_item in mm_input_obj.mm_items:
+                        feature = getattr(mm_item, "feature", None)
+                        if isinstance(feature, torch.Tensor) and feature.is_cuda:
+                            if use_async_offload:
+                                mm_item.feature = maybe_async_offload(feature)
+                            else:
+                                mm_item.feature = feature.to(
+                                    "cpu", non_blocking=True
+                                )
+                        if use_async_offload:
+                            pe = getattr(mm_item, "precomputed_embeddings", None)
+                            if isinstance(pe, torch.Tensor) and pe.is_cuda:
+                                mm_item.precomputed_embeddings = (
+                                    maybe_async_offload(pe)
+                                )
             forward_batch.mm_inputs = None
         else:
             input_embeds = embed_tokens(input_ids)
