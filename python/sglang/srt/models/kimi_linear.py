@@ -261,8 +261,12 @@ class KimiDeltaAttention(nn.Module):
                     2 * self.head_dim,  # f_a, g_a
                 ]
                 self.fused_fg_b_proj = ColumnParallelBatchedLinear(
-                    2, self.head_dim, projection_size, dtype=config.dtype,
-                    tp_rank=self.attn_tp_rank, tp_size=self.attn_tp_size,
+                    2,
+                    self.head_dim,
+                    projection_size,
+                    dtype=config.dtype,
+                    tp_rank=self.attn_tp_rank,
+                    tp_size=self.attn_tp_size,
                 )
         else:
             self.qkv_proj = QKVParallelLinear(
@@ -443,8 +447,12 @@ class KimiDeltaAttention(nn.Module):
 
         # For prefill: raw gate is passed to chunk_kda_fwd, which fuses gate
         # activation with chunk_local_cumsum (kda_gate_chunk_cumsum kernel).
-        # For decode: gate activation is handled inside fused_recurrent kernel.
-        if not forward_batch.forward_mode.is_decode():
+        # For decode and target_verify: gate activation is handled inside
+        # fused_sigmoid_gating_delta_rule_update kernel.
+        if (
+            not forward_batch.forward_mode.is_decode()
+            and not forward_batch.forward_mode.is_target_verify()
+        ):
             forget_gate = forget_gate.unflatten(
                 -1, (-1, self.head_dim)
             )  # [T, H*K] -> [T, H, K]

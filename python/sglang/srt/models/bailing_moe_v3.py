@@ -39,10 +39,10 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_kernel import (
     is_fp8_fnuz,
@@ -285,8 +285,12 @@ class BailingMLP(nn.Module):
 
         self.config = config
         self.swiglu_limit = swiglu_limit
-        self.tp_size = tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
-        self.tp_rank = tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        self.tp_size = (
+            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        )
 
         # Store original and padded intermediate sizes
         self.intermediate_size = intermediate_size
@@ -314,9 +318,13 @@ class BailingMLP(nn.Module):
 
         # Pre-compute padding-related values for forward optimization
         if self.padded_intermediate_size > self.intermediate_size:
-            self.padded_size_per_partition = self.padded_intermediate_size // self.tp_size
+            self.padded_size_per_partition = (
+                self.padded_intermediate_size // self.tp_size
+            )
             self.effective_size_per_partition = self.intermediate_size // self.tp_size
-            self.pad_size_per_partition = self.padded_size_per_partition - self.effective_size_per_partition
+            self.pad_size_per_partition = (
+                self.padded_size_per_partition - self.effective_size_per_partition
+            )
         else:
             self.padded_size_per_partition = None
             self.effective_size_per_partition = None
@@ -339,19 +347,21 @@ class BailingMLP(nn.Module):
         if self.padded_size_per_partition is not None:
             # Use pre-computed values for better performance
             # Split into gate and up parts
-            gate_padded = x[..., :self.padded_size_per_partition]
-            up_padded = x[..., self.padded_size_per_partition:]
-            
+            gate_padded = x[..., : self.padded_size_per_partition]
+            up_padded = x[..., self.padded_size_per_partition :]
+
             # Extract effective parts
-            gate_effective = gate_padded[..., :self.effective_size_per_partition]
-            up_effective = up_padded[..., :self.effective_size_per_partition]
-            
+            gate_effective = gate_padded[..., : self.effective_size_per_partition]
+            up_effective = up_padded[..., : self.effective_size_per_partition]
+
             # Apply SiLU to gate and multiply with up
             if self.swiglu_limit is not None:
-                x = F.silu(gate_effective).clamp(max=self.swiglu_limit) * up_effective.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
+                x = F.silu(gate_effective).clamp(
+                    max=self.swiglu_limit
+                ) * up_effective.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
             else:
                 x = F.silu(gate_effective) * up_effective
-            
+
             # Pad back to padded_intermediate_size_per_partition for down_proj
             x = F.pad(x, (0, self.pad_size_per_partition))
         else:
@@ -585,55 +595,60 @@ class BailingMoE(nn.Module):
         quant_config: Optional[QuantizationConfig],
     ) -> Optional[int]:
         """Compute padded intermediate size to satisfy FP8 blockwise quantization alignment.
-        
+
         FP8 blockwise quantization requires:
         - output_partition_size % block_n == 0 (for column parallel)
         - input_size_per_partition % block_k == 0 (for row parallel)
-        
+
         When TP size is large, intermediate_size / tp_size may not satisfy these constraints.
         We pad the intermediate_size to make it divisible by block_size * tp_size.
-        
+
         Args:
             intermediate_size: Original intermediate size
             quant_config: Quantization configuration
-            
+
         Returns:
             Padded intermediate size if padding is needed, None otherwise
         """
         if quant_config is None:
             return None
-        
+
         # Only apply padding for FP8 quantization
         if quant_config.get_name() != "fp8":
             return None
-        
+
         # Get block size from quantization config
         # FP8 uses block_n for column parallel and block_k for row parallel
         weight_block_size = getattr(quant_config, "weight_block_size", None)
         if weight_block_size is None:
             return None
-        
+
         block_n = weight_block_size[0]
         block_k = weight_block_size[1]
         block_size = max(block_n, block_k)
-        
+
         # Check if padding is needed
         intermediate_size_per_partition = intermediate_size // self.tp_size
-        
+
         # Check if already aligned
-        if intermediate_size_per_partition % block_n == 0 and intermediate_size_per_partition % block_k == 0:
+        if (
+            intermediate_size_per_partition % block_n == 0
+            and intermediate_size_per_partition % block_k == 0
+        ):
             return None
-        
+
         # Compute padded size: align to block_size * tp_size
         alignment = block_size * self.tp_size
-        padded_intermediate_size = ((intermediate_size + alignment - 1) // alignment) * alignment
-        
+        padded_intermediate_size = (
+            (intermediate_size + alignment - 1) // alignment
+        ) * alignment
+
         log_info_on_rank0(
             logger,
             f"Padding shared_experts intermediate_size from {intermediate_size} to {padded_intermediate_size} "
             f"to satisfy FP8 blockwise quantization alignment (block_size={block_size}, tp_size={self.tp_size}).",
         )
-        
+
         return padded_intermediate_size
 
     def forward(
@@ -696,7 +711,9 @@ class BailingMoE(nn.Module):
         # for DeepEP paths (post_permute_deep_gemm_to_deepep_normal/ll).
         if shared_output is not None:
             if self._apply_routed_scaling_factor_on_output:
-                shared_output.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+                shared_output.add_(
+                    final_hidden_states, alpha=self.routed_scaling_factor
+                )
             else:
                 shared_output.add_(final_hidden_states)
             final_hidden_states = shared_output
@@ -1220,10 +1237,10 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.tp_size = get_tensor_model_parallel_world_size()
-        
+
         # Determine num_fused_shared_experts
         self.determine_num_fused_shared_experts()
-        
+
         self.model = BailingMoELinearModel(
             self.config,
             quant_config,
@@ -1255,19 +1272,21 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def end_layer(self):
         return self.model.end_layer
 
-    def determine_num_fused_shared_experts(self, architecture: str = "BailingMoeV3ForCausalLM"):
+    def determine_num_fused_shared_experts(
+        self, architecture: str = "BailingMoeV3ForCausalLM"
+    ):
         """Determine whether to enable fused shared experts optimization.
-        
+
         This optimization fuses shared experts with routed experts for better performance.
         When enabled with EP (Expert Parallelism), shared experts are distributed across
         GPUs along with routed experts, solving the TP size limitation issue.
-        
+
         It is disabled when:
         1. User explicitly disables it via --disable-shared-experts-fusion
         2. Model config doesn't match the expected architecture
         3. Hardware doesn't support it (requires CUDA with capability >= 80 or AMD with capability >= gfx942)
         4. Using W4AFP8 quantization (different quant methods for routed and shared experts)
-        
+
         NOTE: This optimization requires that shared_experts and routed experts have the same
         intermediate_size. For BailingMoE V3, this is guaranteed by the model architecture:
         - config.moe_intermediate_size is used for routed experts
@@ -1281,7 +1300,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
         num_shared_experts = getattr(self.config, "num_shared_experts", 0)
         num_experts = getattr(self.config, "num_experts", 0)
-        
+
         # Only enable fusion if there are shared experts
         if num_shared_experts == 0:
             return
@@ -1335,15 +1354,24 @@ class BailingMoeV3ForCausalLM(nn.Module):
             # Note: When EP is enabled, moe_tp_size is smaller than tp_size, which makes
             # intermediate_size_per_partition larger and easier to satisfy alignment requirements.
             elif self.quant_config and self.quant_config.get_name() == "fp8":
-                weight_block_size = getattr(self.quant_config, "weight_block_size", None)
+                weight_block_size = getattr(
+                    self.quant_config, "weight_block_size", None
+                )
                 if weight_block_size is not None:
                     block_n = weight_block_size[0]
                     block_k = weight_block_size[1]
                     # Use moe_tp_size for alignment check (accounts for EP mode)
                     moe_ep_size = get_moe_expert_parallel_world_size()
-                    moe_tp_size = self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
-                    intermediate_size_per_partition = self.config.moe_intermediate_size // moe_tp_size
-                    if intermediate_size_per_partition % block_n != 0 or intermediate_size_per_partition % block_k != 0:
+                    moe_tp_size = (
+                        self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
+                    )
+                    intermediate_size_per_partition = (
+                        self.config.moe_intermediate_size // moe_tp_size
+                    )
+                    if (
+                        intermediate_size_per_partition % block_n != 0
+                        or intermediate_size_per_partition % block_k != 0
+                    ):
                         disable_reason = (
                             f"FP8 blockwise quantization requires intermediate_size_per_partition "
                             f"({intermediate_size_per_partition}) to be divisible by block_n ({block_n}) and block_k ({block_k}). "
@@ -1912,6 +1940,26 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.post_load_weights(is_nextn=False, weight_names=weight_names)
 
         return loaded_params
+
+    def post_process_weights_if_quant(self):
+        for name, module in self.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if quant_method is not None:
+                post_process = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
+                if post_process is not None:
+                    post_process(module)
+
+    def get_embed_and_head(self):
+        return self.model.word_embeddings.weight, self.lm_head.weight
+
+    def set_embed_and_head(self, embed, head):
+        del self.model.word_embeddings.weight
+        del self.lm_head.weight
+        self.model.word_embeddings.weight = embed
+        self.lm_head.weight = head
+        torch.cuda.empty_cache()
 
 
 EntryClass = [
