@@ -701,7 +701,7 @@ class MultiLayerEagleWorker(TpModelWorker):
         if forward_batch.seq_lens_cpu is not None:
             forward_batch.seq_lens_sum = forward_batch.seq_lens_cpu.sum().item()
         else:
-            forward_batch.seq_lens_sum = batch.seq_lens.sum().item()
+            forward_batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
         topk_p_list = []
         topk_index_list = []
         # Run

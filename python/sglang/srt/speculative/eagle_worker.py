@@ -700,7 +700,7 @@ class EAGLEWorker(TpModelWorker):
             ]
 
         batch.out_cache_loc = out_cache_loc
-        batch.seq_lens_sum = torch.sum(batch.seq_lens).item()
+        batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
         batch.return_hidden_states = False
         spec_info.positions = batch.seq_lens.repeat_interleave(self.topk, dim=0)
         self.token_to_kv_pool_allocator.restore_state(token_to_kv_pool_state_backup)
@@ -1144,7 +1144,7 @@ class EAGLEWorker(TpModelWorker):
         if forward_batch.seq_lens_cpu is not None:
             forward_batch.seq_lens_sum = forward_batch.seq_lens_cpu.sum().item()
         else:
-            forward_batch.seq_lens_sum = batch.seq_lens.sum().item()
+            forward_batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
 
         # Run
         can_cuda_graph = (
