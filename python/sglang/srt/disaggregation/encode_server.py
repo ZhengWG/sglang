@@ -45,10 +45,12 @@ from sglang.srt.server_args import (
     set_global_server_args_for_scheduler,
 )
 from sglang.srt.utils import (
+    configure_logger,
     load_audio,
     load_image,
     load_video,
     random_uuid,
+    set_uvicorn_logging_configs,
 )
 from sglang.srt.utils.network import (
     NetworkAddress,
@@ -1402,6 +1404,7 @@ async def run_encoder(
 
 
 def launch_encoder(server_args, schedule_path, dist_init_method, rank):
+    configure_logger(server_args, prefix=f"encoder_rank{rank}")
     try:
         asyncio.run(run_encoder(server_args, schedule_path, dist_init_method, rank))
     except KeyboardInterrupt:
@@ -1412,6 +1415,7 @@ def launch_encoder(server_args, schedule_path, dist_init_method, rank):
 
 def launch_server(server_args: ServerArgs):
     global encoder
+    configure_logger(server_args)
     ctx = mp.get_context("spawn")
     zmq_ctx = zmq.Context(10)
     ipc_path_prefix = random_uuid()
@@ -1434,6 +1438,7 @@ def launch_server(server_args: ServerArgs):
             daemon=True,
         ).start()
     encoder = MMEncoder(server_args, dist_init_method=dist_init_method)
+    set_uvicorn_logging_configs(server_args)
     uvicorn.run(app, host=server_args.host, port=server_args.port)
 
 
