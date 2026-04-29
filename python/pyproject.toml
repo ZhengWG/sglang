@@ -153,6 +153,10 @@ http2 = [
   "granian>=2.6.0",
 ]
 
+fastokens = [
+  "fastokens>=0.1.1,<0.2.0",
+]
+
 test = [
   "accelerate",
   "addict",
@@ -169,6 +173,7 @@ test = [
   "pytest-cov",
   "diff-cover",
   "sentence_transformers",
+  "sglang[fastokens]",
   "tabulate",
   "granian>=2.6.0",
 ]
