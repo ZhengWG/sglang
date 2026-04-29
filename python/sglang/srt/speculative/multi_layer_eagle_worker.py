@@ -700,6 +700,8 @@ class MultiLayerEagleWorker(TpModelWorker):
         forward_batch.return_hidden_states_before_norm = True
         if forward_batch.seq_lens_cpu is not None:
             forward_batch.seq_lens_sum = forward_batch.seq_lens_cpu.sum().item()
+        elif batch.seq_lens_cpu is not None:
+            forward_batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
         else:
             forward_batch.seq_lens_sum = batch.seq_lens.sum().item()
         topk_p_list = []
