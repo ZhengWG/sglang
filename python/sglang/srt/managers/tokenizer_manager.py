@@ -1003,7 +1003,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         if (
             self.validate_total_tokens
             and max_new_tokens is not None
-            and (max_new_tokens + input_token_num) >= _max_req_len
+            and (max_new_tokens + input_token_num) > _max_req_len
         ):
             if self.server_args.allow_auto_truncate or self.server_args.allow_auto_output_truncate:
                 logger.warning(
