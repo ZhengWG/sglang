@@ -93,6 +93,7 @@ class LoadConfig:
     modelexpress_ep_size: Optional[int] = None
     modelexpress_dtype: Optional[str] = None
     modelexpress_quantization: Optional[str] = None
+    modelexpress_transport: str = "transfer_engine"
 
     rfork_worker: Optional[RForkWorker] = None
     rfork_fallback_load_format: Optional[Union[str, LoadFormat]] = None
