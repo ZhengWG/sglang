@@ -63,6 +63,7 @@ FORWARD_ABSORB_CORE_ATTENTION_BACKENDS = [
     "cutlass_mla",
     "trtllm_mla",
     "ascend",
+    "intel_xpu",
 ]
 
 
