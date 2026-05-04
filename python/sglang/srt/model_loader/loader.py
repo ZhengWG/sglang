@@ -78,7 +78,6 @@ from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
 )
 from sglang.srt.model_loader.utils import (
     get_model_architecture,
-    post_load_weights,
     set_default_torch_dtype,
 )
 
@@ -285,6 +284,15 @@ def _initialize_model(
         kwargs["draft_model_idx"] = load_config.draft_model_idx
 
     return model_class(**kwargs)
+
+
+def _post_load_weights(model: nn.Module) -> None:
+    # Loaders that bypass `model.load_weights()` (dummy / sharded state / remote instance /
+    # remote fs) must trigger the model's post-load fixup explicitly; `model.load_weights()`
+    # would normally do it internally. NextN subclasses override the method to fill in
+    # `is_nextn=True`, so the loader doesn't need to know.
+    if hasattr(model, "post_load_weights"):
+        model.post_load_weights()
 
 
 class BaseModelLoader(ABC):
@@ -1346,7 +1354,7 @@ class DummyModelLoader(BaseModelLoader):
             # random values to the weights.
             initialize_dummy_weights(model)
 
-            post_load_weights(model, model_config)
+            _post_load_weights(model)
 
         return model.eval()
 
@@ -1489,7 +1497,7 @@ class ShardedStateLoader(BaseModelLoader):
             if state_dict:
                 raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 
-            post_load_weights(model, model_config)
+            _post_load_weights(model)
 
         return model.eval()
 
@@ -2252,8 +2260,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
                 )
             torch.cuda.synchronize()
 
-            if hasattr(model, "post_load_weights"):
-                model.post_load_weights()
+            _post_load_weights(model)
         end_get_weights_tic = time.time()
         logger.debug(
             f"finish getting all weights from remote instance, time used: {(end_get_weights_tic - start_get_weights_tic):.4f}s"
@@ -2316,8 +2323,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             logger.error(f"batch transfer failed, error: {ret}")
             return False
 
-        if hasattr(model, "post_load_weights"):
-            model.post_load_weights()
+        _post_load_weights(model)
 
         return True
 
@@ -2438,8 +2444,7 @@ class RemoteInstanceModelLoader(BaseModelLoader):
                 model, transfer_engine, source_worker, tp_rank
             )
 
-        if hasattr(model, "post_load_weights"):
-            model.post_load_weights()
+        _post_load_weights(model)
 
         logger.info("ModelExpress: weight transfer complete for tp_rank=%d", tp_rank)
 
@@ -2757,7 +2762,7 @@ class RemoteModelLoader(BaseModelLoader):
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 
-        post_load_weights(model, model_config)
+        _post_load_weights(model)
 
     def _load_model_from_remote_fs(
         self, model, client, model_config: ModelConfig, device_config: DeviceConfig

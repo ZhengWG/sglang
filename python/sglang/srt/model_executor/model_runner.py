@@ -284,6 +284,10 @@ def resolve_language_model(model: nn.Module) -> nn.Module:
     model_cls_name = model.__class__.__name__
     if model_cls_name == "Qwen3OmniMoeForConditionalGeneration":
         return model.thinker.model
+    if hasattr(model, "model"):
+        return model.model
+    if hasattr(model, "language_model"):
+        return model.language_model
     return model.model
 
 
@@ -719,6 +723,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.end_layer = getattr(self.model, "end_layer", model_num_layers)
         self.num_effective_layers = self.end_layer - self.start_layer
 
+        self.adjust_hybrid_swa_layers_for_pp()
+
         # For LoopCoder models, each loop has its own layer_id, so we need to multiply by loop_num
         loop_num = getattr(self.model_config.hf_config, "loop_num", 1)
         if loop_num > 1:
@@ -732,23 +738,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 and (self.num_effective_layers == model_num_layers)
             )
         ), "PP is not compatible with MTP models."
-
-        # Consider PP, so use start_layer and end_layer.
-        full_attention_layer_ids = [
-            layer_idx
-            for layer_idx in range(self.start_layer, self.end_layer + 1)
-            if hasattr(self.model_config, "full_attention_layer_ids")
-            and layer_idx in self.model_config.full_attention_layer_ids
-        ]
-        swa_attention_layer_ids = [
-            layer_idx
-            for layer_idx in range(self.start_layer, self.end_layer + 1)
-            if hasattr(self.model_config, "swa_attention_layer_ids")
-            and layer_idx in self.model_config.swa_attention_layer_ids
-        ]
-        # Update back to model_config.
-        self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
-        self.model_config.full_attention_layer_ids = full_attention_layer_ids
 
         # Apply torchao quantization
         torchao_applied = getattr(self.model, "torchao_applied", False)
@@ -869,6 +858,25 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.init_piecewise_cuda_graphs()
 
         self.prealloc_symmetric_memory_pool()
+
+    def adjust_hybrid_swa_layers_for_pp(self):
+        if not self.is_hybrid_swa:
+            return
+
+        full_attention_layer_ids = [
+            layer_idx
+            for layer_idx in range(self.start_layer, self.end_layer + 1)
+            if hasattr(self.model_config, "full_attention_layer_ids")
+            and layer_idx in self.model_config.full_attention_layer_ids
+        ]
+        swa_attention_layer_ids = [
+            layer_idx
+            for layer_idx in range(self.start_layer, self.end_layer + 1)
+            if hasattr(self.model_config, "swa_attention_layer_ids")
+            and layer_idx in self.model_config.swa_attention_layer_ids
+        ]
+        self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
+        self.model_config.full_attention_layer_ids = full_attention_layer_ids
 
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(
@@ -2917,8 +2925,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.model.model = resolve_language_model(self.model)
         language_model = getattr(self.model, "language_model", self.model)
 
-        # Some draft models (e.g. eagle3) don't have a standard 'layers' attribute
-        if not hasattr(language_model.model, "layers"):
+        # Resolve model with layers: handle CausalLM wrapper (.model.layers) and direct TextModel (.layers)
+        if hasattr(language_model, "model") and hasattr(language_model.model, "layers"):
+            layer_model = language_model.model
+        elif hasattr(language_model, "layers"):
+            layer_model = language_model
+        else:
             logger.warning(
                 "Disable piecewise CUDA graph because the model does not have a 'layers' attribute"
             )
@@ -2927,7 +2939,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.attention_layers = []
         self.moe_layers = []
         self.moe_fusions = []
-        for layer in language_model.model.layers:
+        for layer in layer_model.layers:
             attn_layer = None
             if hasattr(layer, "self_attn"):
                 if hasattr(layer.self_attn, "attn"):
