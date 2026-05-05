@@ -1221,9 +1221,13 @@ class MMReceiverHTTP(MMReceiverBase):
 
                     logger.error(f"Encoder returned error {response.status}: {msg}")
                     return
-            response_json_list_unsort = [
-                await response.json() for response in responses
-            ]
+            # Parse all response bodies concurrently instead of serially
+            # awaiting each one. ``response.json()`` does buffered network
+            # reads plus JSON decode, so gathering them gives back N parallel
+            # parses overlapped with the next request's setup.
+            response_json_list_unsort = await asyncio.gather(
+                *(response.json() for response in responses)
+            )
 
             # zmq backend: return is None
             if None in response_json_list_unsort:
