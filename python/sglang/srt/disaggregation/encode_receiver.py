@@ -407,6 +407,7 @@ class WaitingImageRequest:
         encoder_urls,
         host_name,
         receive_count,
+        zmq_context: Optional[zmq.Context] = None,
     ):
         self.rid = rid
         self.recv_req = recv_req
@@ -418,8 +419,14 @@ class WaitingImageRequest:
         self.host_name = host_name
         self.receive_count = receive_count
         self.num_items_assigned = recv_req.num_items_assigned
+        # Reuse a shared ZMQ context if the caller provides one. Falling back
+        # to `zmq.Context.instance()` (process-wide singleton) keeps backwards
+        # compatibility for direct instantiations in tests, while preventing
+        # the per-request `zmq.Context()` allocation that was happening on
+        # every inflight request previously.
+        ctx = zmq_context if zmq_context is not None else zmq.Context.instance()
         self.embedding_port, self.recv_socket = get_zmq_socket_on_host(
-            zmq.Context(), zmq.PULL, host=host_name
+            ctx, zmq.PULL, host=host_name
         )
         logger.info(f"Waiting for input {self.embedding_port = }")
         self.recv_embedding_data = None
@@ -622,6 +629,11 @@ class MMReceiverBase(ABC):
         scheduler: Optional["Scheduler"] = None,
     ):
         self.context = zmq.asyncio.Context(20)
+        # Sync ZMQ context shared by all WaitingImageRequest instances on the
+        # zmq_to_scheduler path. Per-request contexts each spawn IO threads
+        # and own their own poller state, so creating one per inflight request
+        # multiplies thread/file-descriptor pressure linearly with QPS.
+        self.sync_context = zmq.Context.instance()
         self.encoder_transfer_backend = server_args.encoder_transfer_backend
         self.encode_urls = server_args.encoder_urls
         self.host = get_local_ip_auto(server_args.host)
@@ -871,6 +883,7 @@ class MMReceiverBase(ABC):
                     encoder_urls=self.encode_urls,
                     host_name=self.hostname,
                     receive_count=self.tp_size,
+                    zmq_context=self.sync_context,
                 )
                 waiting_req.send_encode_request()
                 self.waiting_list.append(waiting_req)
