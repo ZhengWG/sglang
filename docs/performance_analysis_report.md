@@ -10,6 +10,7 @@
 6. [Processor / Tokenizer 性能分析](#6-processor--tokenizer-性能分析)
 7. [多模态管线分析 (Encoder-Only / Language-Only)](#7-多模态管线分析-encoder-only--language-only)
 8. [性能提升建议总结](#8-性能提升建议总结)
+9. [EPD 模式 vs 单机模式性能对比](#9-epd-模式-vs-单机模式性能对比)
 
 ---
 
@@ -779,6 +780,360 @@ self.mm_cache = MultiModalStaticCache(embedding_cache_size * 1024 * 1024)
    - Encoder cache hit rate
    - Encoding latency per modality
    - ZMQ transfer time
+
+---
+
+## 9. EPD 模式 vs 单机模式性能对比
+
+本节对 `--encoder-only` + `--language-only` 的 EPD (Encoder-Prefill-Decode) 分离部署模式与单机模式（不开启任何分离标志）进行系统性对比分析。
+
+### 9.1 部署架构差异
+
+#### 单机模式 (Standalone)
+
+```
+[Client] → [HTTP Server]
+              ├── Tokenizer Manager
+              │   └── process_mm_data_async()  ← 本地运行 HF Processor + ViT
+              ├── Scheduler
+              │   └── 直接处理 MM inputs，无等待
+              └── ModelRunner (TP=4)
+                  └── general_mm_embed_routine()
+                      └── get_image_feature() → self.visual()  ← GPU 上运行 ViT
+```
+
+- **单进程**（或 TP 多进程），完整模型 (Visual + Language + lm_head) 加载在同一组 GPU 上
+- ViT 编码在 prefill forward 的 `general_mm_embed_routine` → `embed_mm_inputs` → `get_image_feature` 中同步运行
+- 无跨机器网络通信
+
+#### EPD 模式
+
+```
+[Client] → [Language Server (--language-only, TP=4)]
+              ├── Tokenizer Manager
+              │   ├── _should_dispatch_to_encoder()  ← 自适应决策
+              │   ├── send_encode_request()           ← HTTP 发送到 Encoder
+              │   └── 或 process_mm_data_async()     ← 本地处理 (单图)
+              ├── Scheduler
+              │   └── mm_receiver.process_waiting_requests()  ← ZMQ 等待 + TP 同步
+              └── ModelRunner (TP=4, 无 ViT forward)
+                  └── general_mm_embed_routine()
+                      └── _get_precomputed_embedding()  ← 直接使用预计算嵌入
+
+           [Encoder Server (--encoder-only, TP=1)]
+              ├── HTTP /encode 端点
+              ├── MMEncoder
+              │   ├── _process_mm_items()     ← 线程池加载媒体
+              │   └── get_feature_fn()        ← GPU ViT (FA3)
+              └── ZMQ send_multipart()        ← 发送 embedding 到 Language Server
+```
+
+- **两组独立服务**，分别使用不同的 GPU 资源
+- Encoder (TP=1) 专注视觉编码，Language (TP=4) 专注文本推理
+- 多模态嵌入通过 ZMQ/HTTP 在服务间传输
+
+### 9.2 模型加载与 GPU 内存对比
+
+#### 代码层面的差异
+
+```python
+# qwen3_vl.py __init__
+# 单机模式: encoder_only=False, language_only=False
+# → visual + model (LLM) + lm_head 全部加载到 GPU
+
+# encoder_only 模式:
+if not hasattr(config, "encoder_only") or not config.encoder_only:
+    self.model = language_model_cls(...)  # 加载 LLM
+    # ...
+else:
+    self.lm_head = None  # 不加载 LLM，不加载 lm_head
+
+# language_only 模式:
+# visual 子模块仍被构建（__init__ 无分支跳过）
+# 但 load_weights 会跳过不在 params_dict 中的权重:
+if (self.config.encoder_only or self.config.language_only) and name not in params_dict:
+    continue
+```
+
+#### 内存分配对比
+
+| 维度 | 单机模式 | Language Server (EPD) | Encoder Server (EPD) |
+|------|----------|----------------------|---------------------|
+| **加载的模型组件** | Visual + LLM + lm_head | LLM + lm_head (+ visual 结构体但可跳过权重) | Visual only |
+| **TP 配置** | TP=4 (全模型) | TP=4 (LLM) | TP=1 |
+| **`mem_fraction_static`** | 0.8 → VLM 调整后更低 (~0.76) | 0.85 (跳过 VLM 调整) | 0.8 |
+| **VLM 内存调整** | `adjust_mem_fraction_for_vlm` **执行** | **跳过** (`language_only=True`) | 取决于配置 |
+| **KV Cache 可用空间** | 更少 (ViT 权重占用 + 更低 fraction) | 更多 (无 ViT 权重 + 更高 fraction) | 无 KV Cache (非 ModelRunner 路径) |
+| **max_running_requests** | 较低 | 较高 | N/A |
+
+**关键代码 (`server_args.py` line 1467-1471)**:
+```python
+model_config = self.get_model_config()
+if model_config.is_multimodal and not self.language_only:
+    self.adjust_mem_fraction_for_vlm(model_config)  # 单机模式: 执行; EPD language: 跳过
+```
+
+**EPD 优势**: Language Server 不加载 ViT 权重，`mem_fraction_static` 更高且不经过 VLM 折扣，因此 KV cache 空间更大，在 256K 上下文下能支持更多并发请求。
+
+**EPD 劣势**: 需要额外的 GPU(s) 专门运行 Encoder Server。
+
+### 9.3 多模态处理管线对比
+
+#### 单机模式的 MM 处理流程
+
+```
+Tokenizer Manager:
+  └── _tokenize_one_request()
+      └── mm_processor.process_mm_data_async()  ← CPU/GPU 预处理
+          ├── 图像解码 (PIL)
+          ├── Resize + normalize
+          ├── 可能的 GPU fast image processor
+          └── 返回 pixel_values tensor
+
+Scheduler:
+  └── process_input_requests()
+      └── _get_multimodal_inputs() → MultimodalInputs.from_processor_output()
+          └── 构建 MultimodalDataItem(feature=pixel_values)
+
+ModelRunner Forward (prefill):
+  └── general_mm_embed_routine()
+      └── embed_mm_inputs()
+          └── get_embedding_and_mask()
+              └── get_image_feature(items)  ← GPU ViT forward
+                  └── self.visual(pixel_values, grid_thw=...)
+```
+
+**关键特征**: ViT 运行在 prefill 的 forward pass 中，与 LLM 共享 GPU 资源。
+
+#### EPD 模式的 MM 处理流程 (多图 / 自适应分发)
+
+```
+Tokenizer Manager:
+  └── _handle_epd_disaggregation_encode_request()
+      └── _should_dispatch_to_encoder()  ← total_mm_items >= 2?
+          └── YES: send_encode_request()  ← HTTP POST 到 Encoder Server
+
+Encoder Server (独立 GPU):
+  └── /encode HTTP handler
+      └── _encode()
+          ├── _process_mm_items()  ← 线程池 (4 workers) 加载媒体
+          ├── get_feature_fn([mm_item])  ← GPU ViT (FA3, TP=1)
+          ├── mm_embedding.cpu()  ← GPU→CPU
+          └── ZMQ send_multipart([pickle, buffer])  ← 网络传输
+
+Language Server Scheduler:
+  └── mm_receiver.process_waiting_requests()
+      ├── _try_recv_mm_data()  ← ZMQ non-blocking recv
+      │   ├── torch.frombuffer().clone()  ← CPU clone
+      │   └── mm_processor.get_mm_data()  ← 构建 MultimodalInputs
+      └── all_reduce(MIN, status)  ← TP=4 状态同步
+
+ModelRunner Forward (prefill):
+  └── general_mm_embed_routine()
+      └── embed_mm_inputs() (或 _embed_mm_inputs_with_split)
+          └── get_embedding_and_mask()
+              └── _get_precomputed_embedding()  ← 直接使用预计算嵌入，跳过 ViT
+```
+
+#### EPD 模式的 MM 处理流程 (单图 / 自适应未分发)
+
+```
+Tokenizer Manager:
+  └── _handle_epd_disaggregation_encode_request()
+      └── _should_dispatch_to_encoder()  ← total_mm_items < 2
+          └── NO: need_wait_for_mm_inputs = False
+
+  └── _tokenize_one_request()
+      └── mm_processor.process_mm_data_async()  ← 本地处理 (同单机模式)
+
+ModelRunner Forward: 同单机模式 (调用 get_image_feature)
+```
+
+### 9.4 Prefill Forward Pass 对比
+
+| 阶段 | 单机模式 | EPD Language Server |
+|------|----------|---------------------|
+| **input_embeds 构建** | `embed_mm_inputs()` | `embed_mm_inputs()` 或 `_embed_mm_inputs_with_split()` |
+| **ViT 编码** | `get_image_feature() → self.visual()` | 通常跳过 (`_get_precomputed_embedding`) |
+| **embedding 来源** | 实时 GPU 计算 | 预计算 (encoder 提供) |
+| **GPU 计算量** | ViT + LLM | 仅 LLM |
+| **Prefill 延迟** | ViT 时间 + LLM 时间 | LLM 时间 + 等待 encoder 时间 |
+| **GPU 内存峰值** | ViT activation + LLM activation | 仅 LLM activation |
+| **embed 后 offload** | `feature.to("cpu")` | `feature.to("cpu")` + `precomputed_embeddings.to("cpu")` |
+
+**EPD 特有的 embed 路径 (`mm_utils.py` line 1082-1094)**:
+```python
+if get_global_server_args().language_only:
+    precomputed_embeddings = getattr(mm_item, "precomputed_embeddings", None)
+    if isinstance(precomputed_embeddings, torch.Tensor) and precomputed_embeddings.is_cuda:
+        mm_item.precomputed_embeddings = precomputed_embeddings.to("cpu", non_blocking=True)
+```
+
+**EPD 优势**: Prefill 阶段 GPU 不需要运行 ViT，计算量减少，内存峰值降低。
+**EPD 劣势**: 增加了 encoder 网络延迟和 embedding 传输开销。
+
+### 9.5 Decode 阶段对比
+
+在纯 decode 阶段（无新的多模态输入），两种模式 **完全相同**：
+
+- 相同的 `forward_decode` / CUDA Graph replay 路径
+- 相同的投机解码 (EAGLE) 流程
+- 相同的 KV cache 管理
+- 相同的 TP 通信模式
+
+**唯一差异**: EPD 的 Language Server 由于 KV cache 空间更大，可能支持更大的 batch size，从而获得更高的 decode 吞吐。
+
+### 9.6 Scheduler 层差异
+
+#### 单机模式
+
+```python
+# scheduler.py recv_requests() 后直接处理
+recv_reqs = self.recv_requests()
+self.process_input_requests(recv_reqs)
+# → 无 mm_receiver.process_waiting_requests
+# → 无 encoder 等待逻辑
+# → 所有请求立即可调度
+```
+
+#### EPD 模式 (Language Server)
+
+```python
+# scheduler.py line 1623-1637
+# 额外的 MM 等待处理
+if self.pp_rank == 0 and self.server_args.language_only \
+   and self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+    recv_reqs, abort_reqs = self.mm_receiver.process_waiting_requests(recv_reqs)
+```
+
+**`process_waiting_requests` 的每步开销 (`encode_receiver.py` line 860-931)**:
+
+1. 遍历所有接收的请求，分离需要等待 encoder 的请求
+2. 对等待列表中每个请求调用 `_try_recv_mm_data()` (非阻塞 ZMQ recv)
+3. **`torch.distributed.all_reduce(local_status, op=MIN, group=cpu_group)`** — 所有 TP=4 rank 同步
+4. 根据状态 (SUCCESS/FAIL/TIMEOUT) 分发请求
+
+**每步额外开销**:
+- 非阻塞 ZMQ recv: ~μs 级
+- `all_reduce` on CPU group (TP=4): ~数十 μs (取决于互联)
+- Python list 操作: O(waiting_list_size)
+- 总计: **~100μs/step 额外调度延迟** (在等待列表非空时)
+
+**对 TTFT (Time to First Token) 的影响**:
+
+| 场景 | 单机模式 | EPD 模式 |
+|------|----------|----------|
+| 纯文本请求 | tokenize → schedule → prefill | tokenize → schedule → prefill (无差异) |
+| 单图请求 | tokenize+MM → schedule → prefill(含ViT) | tokenize+MM本地 → schedule → prefill(含ViT) (几乎无差异) |
+| 多图/视频请求 | tokenize+MM → schedule → prefill(含ViT) | tokenize → encoder(并行) → scheduler等待 → prefill(无ViT) |
+
+### 9.7 通信与传输开销对比
+
+#### 单机模式
+
+- **进程内通信**: 仅 ZMQ IPC (tokenizer → scheduler → detokenizer)
+- **TP 通信**: NCCL all-reduce (GPU→GPU, NVLink/PCIe)
+- **H2D**: 标准 input_ids, seq_lens 等 pinned transfer
+- **无跨机器网络**: 所有数据在本机
+
+#### EPD 模式
+
+**额外通信开销**:
+
+| 通信 | 方向 | 协议 | 数据量 | 延迟特征 |
+|------|------|------|--------|----------|
+| Encode 请求 | Tokenizer → Encoder | HTTP POST | 图像/视频原始数据 | 取决于图片大小 (MB级) |
+| Embedding 回传 | Encoder → Language Scheduler | ZMQ multipart | `num_patches × hidden_dim × dtype_size` | 取决于图片分辨率 |
+| 状态同步 | Language TP ranks | all_reduce (CPU) | `waiting_list_size × 4 bytes` | ~数十 μs |
+
+**Embedding 传输量估算** (以 Qwen3-VL 为例):
+
+- 假设单张 1024×1024 图片产生 ~1024 patches
+- Hidden dim = 3584 (Qwen3-VL-72B), BF16 = 2 bytes
+- 单图 embedding: `1024 × 3584 × 2 ≈ 7MB`
+- 高分辨率或多图: 成比例增加
+
+**Embedding 设备转移链 (EPD 特有)**:
+
+```
+Encoder GPU → CPU (.cpu())           ← GPU→CPU 同步传输
+→ ZMQ buffer (pickle + memoryview)   ← 内存拷贝
+→ Language CPU (frombuffer().clone()) ← 内存拷贝
+→ GPU (.cuda() for concat)           ← CPU→GPU
+→ CPU (.to("cpu") offload)           ← GPU→CPU (chunked prefill 支持)
+→ GPU (forward 使用)                 ← CPU→GPU (最终)
+```
+
+**单机模式的 ViT 数据流**:
+
+```
+CPU (pixel_values from HF processor)
+→ GPU (.to(device))                   ← 一次 CPU→GPU
+→ ViT forward → embedding            ← GPU 上完成，无需拷贝
+→ embed_mm_inputs 直接使用            ← GPU→GPU (同设备)
+→ CPU (.to("cpu") offload)            ← GPU→CPU (chunked prefill 支持)
+```
+
+**对比**: 单机模式仅 1 次 H2D (pixel_values) + 可选 1 次 D2H (offload)。EPD 模式可能达到 **5-6 次跨设备拷贝**。
+
+### 9.8 多模态 Feature Pool 与缓存对比
+
+| 缓存机制 | 单机模式 | EPD Language Server | EPD Encoder Server |
+|----------|----------|--------------------|--------------------|
+| `MmItemMemoryPool` | tokenizer 端可启用 (CUDA IPC) | scheduler receiver: 由 `enable_adaptive_dispatch` 控制 | N/A |
+| `MultiModalStaticCache` | 无 | 无 | 4GB (默认), hash-keyed embedding 复用 |
+| `EmbeddingCacheController` | 无 | 无 | 可选 (全局缓存) |
+| Radix Cache MM 复用 | 通过 tree cache | 通过 tree cache | 无 KV cache |
+| GPU feature buffer | `init_feature_buffer()` | `init_feature_buffer()` | N/A |
+
+**EPD 优势**: Encoder Server 的 `MultiModalStaticCache` 可缓存重复图像的 embedding，避免重复 ViT 推理。单机模式每次 prefill 都需要重新运行 ViT（除非 radix cache 命中整个 prefix）。
+
+### 9.9 性能优劣总结
+
+#### EPD 模式的优势
+
+| 优势 | 影响程度 | 说明 |
+|------|----------|------|
+| **ViT 与 LLM 计算解耦** | 高 | ViT 在独立 GPU 上运行，不与 LLM prefill/decode 争抢资源 |
+| **Language Server KV Cache 更大** | 高 | 更高的 `mem_fraction_static` + 无 ViT 权重 → 更多 KV 空间 → 更高并发/更长上下文 |
+| **ViT 可独立扩缩** | 中 | Encoder 可独立部署多实例，按需扩缩 |
+| **Encoder 缓存命中** | 中 | `MultiModalStaticCache` 可避免重复图片的 ViT 推理 |
+| **Prefill GPU 内存峰值降低** | 中 | 无 ViT activation 峰值 |
+| **ViT 使用 FA3** | 低-中 | Encoder 可独立选择最优 attention backend |
+
+#### EPD 模式的劣势
+
+| 劣势 | 影响程度 | 说明 |
+|------|----------|------|
+| **Embedding 传输开销** | 高 | 多达 5-6 次跨设备拷贝，MB 级网络传输 |
+| **TTFT 增加 (多模态请求)** | 中-高 | Encoder 延迟 + 网络延迟 + 等待同步，可能 > 单机 ViT 时间 |
+| **Scheduler 每步额外开销** | 中 | `process_waiting_requests` + `all_reduce` 在等待列表非空时增加 ~100μs/step |
+| **额外 GPU 资源** | 中 | 需要独立 GPU(s) 运行 Encoder Server |
+| **单图请求退化** | 低-中 | 自适应分发下单图仍走本地路径，与单机模式接近但增加决策开销 |
+| **系统复杂度** | 低 | 多进程部署、故障域增加 |
+| **Visual 权重可能仍加载** | 低 | Qwen3-VL 的 `language_only` 模式下 visual 子模块仍构建 (权重可跳过) |
+
+#### 场景化推荐
+
+| 场景 | 推荐模式 | 原因 |
+|------|----------|------|
+| **高并发长上下文文本+偶尔图片** | EPD | KV cache 优势明显；ViT 开销可被 encoder 缓存吸收 |
+| **高频多图/视频请求** | EPD | ViT 计算分离到独立 GPU，不阻塞 LLM decode |
+| **低延迟单图问答** | 单机 | 避免网络传输和等待开销，TTFT 更低 |
+| **GPU 资源受限** | 单机 | 无需额外 GPU 运行 Encoder |
+| **混合负载 (文本+多模态)** | EPD + 自适应分发 | 单图走本地，多图走 encoder，兼顾延迟和吞吐 |
+
+### 9.10 EPD 模式性能优化建议 (相对于单机模式)
+
+| # | 优化方向 | 预期收益 |
+|---|----------|----------|
+| 1 | **消除 Embedding 冗余拷贝**: 使用 CUDA IPC / RDMA 替代 CPU 中转，将 5-6 次拷贝减少到 1-2 次 | TTFT 降低 30-50% (大图场景) |
+| 2 | **Encoder Batch Processing**: 将多个请求的 MM items 合并 batch 编码 | Encoder 吞吐提升 2-3x |
+| 3 | **自适应分发阈值调低**: `SGLANG_ENCODER_DISPATCH_MIN_ITEMS=1`，避免 language server 本地 ViT | 释放 language GPU 资源 |
+| 4 | **异步预取 Embedding**: Scheduler 在等待 encoder 时继续调度纯文本请求 | 减少等待 encoder 期间的 GPU idle |
+| 5 | **Language Server 卸载 ViT 权重**: 确保 `language_only` 不加载 visual 权重到 GPU | 释放更多 KV cache 空间 |
+| 6 | **Encoder 连接池 + 负载均衡**: 多 encoder 实例间分发请求 | 避免单 encoder 成为瓶颈 |
+| 7 | **Encoder 使用 GPU Direct RDMA**: 直接 GPU→GPU 传输 embedding | 消除 CPU 中转延迟 |
 
 ---
 
