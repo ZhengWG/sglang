@@ -529,11 +529,22 @@ class WaitingImageRequest:
                 return
 
             buffer = parts[1].buffer if hasattr(parts[1], "buffer") else parts[1]
-            recv_obj.embedding = (
-                torch.frombuffer(buffer, dtype=recv_obj.dtype)
-                .reshape(recv_obj.shape)
-                .clone()
+            # Copy out of the (transient) ZMQ frame into a tensor we own. Use
+            # pinned memory when possible: the embedding is later shipped to
+            # the language model's GPU via ``_move_items_to_device(...,
+            # non_blocking=True)``, and pinned source memory is what enables
+            # that H2D to actually run asynchronously instead of falling back
+            # to a sync staging copy.
+            view = torch.frombuffer(buffer, dtype=recv_obj.dtype).reshape(
+                recv_obj.shape
             )
+            try:
+                recv_obj.embedding = torch.empty_like(view, pin_memory=True)
+                recv_obj.embedding.copy_(view)
+            except RuntimeError:
+                # CPU-only or pinning unavailable (e.g. inside containers
+                # without IPC capability). Fall back to a regular clone.
+                recv_obj.embedding = view.clone()
 
             # Extract original req_id from part_req_id
             part_req_id = recv_obj.req_id
@@ -791,12 +802,17 @@ class MMReceiverBase(ABC):
                     buffer = (
                         parts[1].buffer if hasattr(parts[1], "buffer") else parts[1]
                     )
-                    # Clone so we don't depend on ZMQ buffer after next recv.
-                    recv_obj.embedding = (
-                        torch.frombuffer(buffer, dtype=recv_obj.dtype)
-                        .reshape(recv_obj.shape)
-                        .clone()
+                    # Copy out of the (transient) ZMQ frame into pinned host
+                    # memory so the subsequent H2D to the LLM GPU runs
+                    # asynchronously rather than via a sync staging copy.
+                    view = torch.frombuffer(buffer, dtype=recv_obj.dtype).reshape(
+                        recv_obj.shape
                     )
+                    try:
+                        recv_obj.embedding = torch.empty_like(view, pin_memory=True)
+                        recv_obj.embedding.copy_(view)
+                    except RuntimeError:
+                        recv_obj.embedding = view.clone()
                 if recv_embedding_data is None:
                     recv_embedding_data = MultiModalEmbeddingData.from_embedding_data(
                         recv_obj
