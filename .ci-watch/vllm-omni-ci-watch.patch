@@ -1,0 +1,339 @@
+From 2e6076531eabebc5e06df4b607516ac08fa1d9ea Mon Sep 17 00:00:00 2001
+From: cursor-agent <cursor-agent@cursor.com>
+Date: Wed, 6 May 2026 13:33:13 +0000
+Subject: [PATCH] ci-watch: add Cursor Automation prompt + helper poller for
+ upstream CI
+
+Adds .ci-watch/ tooling to monitor the upstream vllm-project/vllm-omni
+CI from this fork, without relying on a long-lived process.
+
+- automation-prompt.md: ready-to-paste prompt body and configuration
+  steps for a Cursor Automation (Scheduled trigger). Each tick spins
+  up a fresh Cloud Agent that diffs the upstream CI state against a
+  baseline stored in a tracking GitHub Issue (label 'ci-watch') in
+  this repository, and only comments when something changed. This is
+  the recommended persistent-monitoring path since Cursor-hosted
+  Cloud Agent VMs are not guaranteed to stay alive between turns.
+
+- poll.sh: optional self-contained bash polling loop, useful only on
+  long-lived hosts (My Machines worker, personal devbox, etc.).
+
+- README.md: how the pieces fit together; how to switch the alert
+  channel from a tracking issue to Slack/webhook; why this lives in
+  the fork rather than upstream.
+
+- .gitignore: excludes runtime artifacts (events.log, runner.log,
+  state/).
+---
+ .ci-watch/.gitignore           |   3 +
+ .ci-watch/README.md            |  41 ++++++++++
+ .ci-watch/automation-prompt.md | 145 +++++++++++++++++++++++++++++++++
+ .ci-watch/poll.sh              |  86 +++++++++++++++++++
+ 4 files changed, 275 insertions(+)
+ create mode 100644 .ci-watch/.gitignore
+ create mode 100644 .ci-watch/README.md
+ create mode 100644 .ci-watch/automation-prompt.md
+ create mode 100755 .ci-watch/poll.sh
+
+diff --git a/.ci-watch/.gitignore b/.ci-watch/.gitignore
+new file mode 100644
+index 00000000..a7cbf711
+--- /dev/null
++++ b/.ci-watch/.gitignore
+@@ -0,0 +1,3 @@
++events.log
++runner.log
++state/
+diff --git a/.ci-watch/README.md b/.ci-watch/README.md
+new file mode 100644
+index 00000000..771c6e05
+--- /dev/null
++++ b/.ci-watch/README.md
+@@ -0,0 +1,41 @@
++# vllm-omni CI watcher
++
++This folder contains tooling to monitor the upstream
++[`vllm-project/vllm-omni`](https://github.com/vllm-project/vllm-omni) CI from
++this fork (`ZhengWG/vllm-omni`), without requiring a long-lived process.
++
++## Files
++
++- `automation-prompt.md` — the prompt body and configuration to paste into a
++  **Cursor Automation** (Scheduled trigger). This is the recommended way to
++  get persistent CI monitoring; each tick spins up a fresh Cloud Agent that
++  does one polling iteration and exits.
++- `poll.sh` — a self-contained `bash` polling loop, useful only when you have
++  a long-lived host (e.g. a Cursor "My Machines" worker, a personal devbox,
++  or a laptop you keep open). On a normal Cursor-hosted Cloud Agent VM the
++  process dies the moment the VM is reclaimed.
++
++## How alerts are delivered
++
++The Automation maintains a single tracking GitHub Issue **in this repository**
++(`ZhengWG/vllm-omni`), labeled `ci-watch`, titled
++`[ci-watch] vllm-project/vllm-omni`. The issue body holds the last-known
++upstream CI state as a fenced JSON block. On every tick the agent diffs the
++current upstream state against the stored state and, only if something
++changed, posts a comment summarising the change. When everything is steady,
++no comment is written and no notification fires.
++
++To switch to Slack/email/webhook later, replace Step 4 of the prompt with the
++desired side-effect (a single `curl` to a webhook is enough).
++
++## Resetting state
++
++Close the tracking issue. The next Automation run will create a fresh one and
++re-baseline.
++
++## Why this lives in `ZhengWG/vllm-omni` and not upstream
++
++The Automation needs to write a tracking Issue + comments somewhere. Doing
++that on `vllm-project/vllm-omni` would pollute the upstream issue tracker.
++This fork is the natural home: same repo lineage, same `gh` token can both
++read upstream and write here, and any noise stays out of the public project.
+diff --git a/.ci-watch/automation-prompt.md b/.ci-watch/automation-prompt.md
+new file mode 100644
+index 00000000..b96a3a45
+--- /dev/null
++++ b/.ci-watch/automation-prompt.md
+@@ -0,0 +1,145 @@
++# Cursor Automation — vllm-omni CI watcher
++
++## Setup steps (do this once in the Cursor dashboard)
++
++1. Open <https://cursor.com> → **Cloud Agents** → **Automations** → **Create automation**.
++2. **Trigger**: *Scheduled*.
++   - Cron: `*/15 * * * *` (every 15 min). Tighten to `*/5 * * * *` if you want
++     sharper signal; loosen to `0 * * * *` if you only want hourly checks.
++3. **Repository**: `ZhengWG/vllm-omni` (this fork).
++   - The agent only needs `gh` access. It reads `vllm-project/vllm-omni`
++     (public, no auth needed beyond the standard token) and writes a tracking
++     Issue + comments in `ZhengWG/vllm-omni`.
++4. **Branch**: `main`.
++5. **Model**: leave default. The work is light and does not require codebase
++   reasoning.
++6. **Prompt**: paste the entire contents of the `## Prompt body` section below
++   (everything between the opening `>>>` and closing `<<<` markers, exclusive).
++7. Save → click **Run now** once to verify. The first run will create the
++   tracking Issue with a baseline state. Subsequent runs will only comment
++   when something changes.
++
++## Operational notes
++
++- **Resetting**: close the tracking Issue. Next run re-baselines.
++- **Switching to Slack / webhook**: replace Step 4 in the prompt with a single
++  `curl -X POST <webhook> -d "$REPORT"` (and drop the `gh issue comment` /
++  `gh issue edit` calls).
++- **Cost**: each run is a short Cloud Agent invocation (a handful of `gh` API
++  calls). At `*/15` that's ~96 runs/day.
++- **Schedule drift**: per Cursor docs, scheduled automations may run with a
++  delay but will not start before the indicated time. Treat the cron as a
++  lower bound, not a hard deadline.
++
++---
++
++## Prompt body
++
++>>>
++You are a CI health watcher for the upstream repository `vllm-project/vllm-omni`. Your job: detect changes in the upstream CI state and report them via a tracking GitHub Issue in `ZhengWG/vllm-omni`. When nothing has changed, stay completely silent (no comments, no edits).
++
++Use the `gh` CLI for every GitHub interaction. Do not edit any files in the working tree, do not commit, do not open PRs.
++
++### Step 1 — Locate or create the tracking issue
++
++Run:
++
++    gh issue list --repo ZhengWG/vllm-omni --label ci-watch --state open --limit 1 --json number,body
++
++If the result is `[]`, create the label (idempotent) and open the tracking issue:
++
++    gh label create ci-watch --repo ZhengWG/vllm-omni --color BFD4F2 --description "Upstream vllm-omni CI watcher" 2>/dev/null || true
++
++    gh issue create --repo ZhengWG/vllm-omni \
++      --title "[ci-watch] vllm-project/vllm-omni" \
++      --label ci-watch \
++      --body $'Tracking issue for the Cursor Automation that watches upstream `vllm-project/vllm-omni` CI.\n\nLast-seen state is stored below as a fenced JSON block. Do not hand-edit unless you intend to reset the watcher (in which case, just close this issue — the next run will recreate it).\n\n```json\n{}\n```'
++
++Then re-run the `gh issue list` query to capture `ISSUE_NUMBER` and `PREV_BODY`.
++
++Parse `PREV_STATE` as the JSON object inside the **last** ```json fenced block in `PREV_BODY`. Treat `{}` as "no previous state".
++
++### Step 2 — Snapshot the upstream CI state
++
++    SHA=$(gh api repos/vllm-project/vllm-omni/commits/main --jq .sha)
++
++    MAIN_STATUS=$(gh api repos/vllm-project/vllm-omni/commits/$SHA/status \
++      --jq '{state, statuses: [.statuses[] | {context, state, target_url}] | sort_by(.context)}')
++
++    MAIN_CHECKS=$(gh api repos/vllm-project/vllm-omni/commits/$SHA/check-runs \
++      --jq '[.check_runs[] | {name, conclusion: (.conclusion // .status), html_url}] | sort_by(.name)')
++
++    RECENT_RUNS=$(gh run list --repo vllm-project/vllm-omni --limit 50 \
++      --json databaseId,conclusion,workflowName,headBranch,displayTitle,url,createdAt)
++
++Build `CURRENT_STATE` as a JSON object with these fields (sorted keys, sorted arrays):
++
++    {
++      "sha": "<SHA>",
++      "main_combined_state": "<MAIN_STATUS.state>",
++      "main_failing_contexts": [ <contexts where state != 'success'> ],
++      "main_failing_checks":   [ <check names where conclusion in {failure, cancelled, timed_out, action_required, stale}> ],
++      "recent_failed_run_ids": [ <sorted databaseId list of RECENT_RUNS where conclusion == 'failure'> ]
++    }
++
++### Step 3 — Diff and decide
++
++Compute:
++
++- `main_regressed` = previous `main_combined_state` was `success` (or absent) AND current is not `success`.
++- `main_recovered` = previous `main_combined_state` was not `success` AND current is `success`.
++- `sha_changed` = previous `sha` differs from current `sha`.
++- `new_failing_contexts` = items in current `main_failing_contexts` not in previous.
++- `new_failing_checks`   = items in current `main_failing_checks` not in previous.
++- `new_failed_run_ids`   = items in current `recent_failed_run_ids` not in previous `recent_failed_run_ids`.
++
++`should_alert` = (`main_regressed`) OR (`main_recovered`) OR (`new_failing_contexts` non-empty) OR (`new_failing_checks` non-empty) OR (`new_failed_run_ids` non-empty AND new_failed_run_ids has at least 1 entry whose branch != "main").
++
++Note: `sha_changed` alone does NOT trigger an alert (we don't want a comment on every green merge to main). It only matters insofar as it may bring along a regression.
++
++If `should_alert` is false:
++
++- Do NOT comment, do NOT edit the issue body.
++- Respond with the literal single line: `OK: no CI state change` and stop.
++
++### Step 4 — Build the report and post it
++
++Build a markdown report (UTC timestamps, links where available):
++
++    ## CI watch update — <UTC ISO timestamp>
++
++    **Upstream main**: [`<short SHA>`](https://github.com/vllm-project/vllm-omni/commit/<SHA>) — combined status: **<main_combined_state>**
++
++    <if main_regressed>:rotating_light: **main has REGRESSED** (was `<prev>`, now `<curr>`)<endif>
++    <if main_recovered>:white_check_mark: **main has RECOVERED** (was `<prev>`, now `success`)<endif>
++
++    | Context | State |
++    |---|---|
++    | <each row from MAIN_STATUS.statuses> |
++
++    **Failed check-runs on main** (<count>):
++    - <name> — <html_url>
++
++    **New failed PR runs since last check** (<count>):
++    - [<workflowName>] <displayTitle truncated to 80 chars> — branch `<headBranch>` — <url>
++
++Post the report:
++
++    gh issue comment <ISSUE_NUMBER> --repo ZhengWG/vllm-omni --body "$REPORT"
++
++### Step 5 — Update stored state
++
++Rewrite the issue body so the trailing fenced ```json block contains `CURRENT_STATE` (pretty-printed, sorted keys, two-space indent). Preserve the human preamble exactly as it was.
++
++    gh issue edit <ISSUE_NUMBER> --repo ZhengWG/vllm-omni --body "$NEW_BODY"
++
++Respond with the literal line: `ALERTED: <short summary>` and stop.
++
++### Hard rules
++
++- Only ever touch the tracking issue identified by the label `ci-watch` in `ZhengWG/vllm-omni`.
++- Never open additional issues, PRs, or commits.
++- Never write to the working tree or run `git`.
++- If any `gh` call fails non-recoverably, respond with `ERROR: <message>` and stop. Do not retry destructively.
++
++<<<
+diff --git a/.ci-watch/poll.sh b/.ci-watch/poll.sh
+new file mode 100755
+index 00000000..385d2359
+--- /dev/null
++++ b/.ci-watch/poll.sh
+@@ -0,0 +1,86 @@
++#!/usr/bin/env bash
++# Polls vllm-project/vllm-omni CI state and appends a structured log entry
++# whenever something interesting changes. Designed to be run under tmux as a
++# loop. Not committed to the repo (lives under .ci-watch which is gitignored
++# implicitly via no add).
++set -uo pipefail
++
++REPO="vllm-project/vllm-omni"
++LOG="/workspace/.ci-watch/events.log"
++STATE_DIR="/workspace/.ci-watch/state"
++mkdir -p "$STATE_DIR"
++
++ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
++
++snapshot_main_status() {
++    # Combined commit status (Buildkite contexts) + GitHub Actions check runs.
++    local sha state contexts actions
++    sha=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null) || return 1
++    state=$(gh api "repos/$REPO/commits/$sha/status" --jq '.state' 2>/dev/null)
++    contexts=$(gh api "repos/$REPO/commits/$sha/status" \
++        --jq '[.statuses[] | "\(.context)=\(.state)"] | sort | join(",")' 2>/dev/null)
++    actions=$(gh api "repos/$REPO/commits/$sha/check-runs" \
++        --jq '[.check_runs[] | "\(.name)=\(.conclusion // .status)"] | sort | join(",")' 2>/dev/null)
++    printf '%s\t%s\t%s\t%s\n' "$sha" "$state" "$contexts" "$actions"
++}
++
++snapshot_failures() {
++    # Compact list of recent failed Actions runs (last 50)
++    gh run list --repo "$REPO" --limit 50 \
++        --json databaseId,conclusion,workflowName,headBranch,event,displayTitle,url \
++        --jq '[.[] | select(.conclusion=="failure") | "\(.databaseId)|\(.workflowName)|\(.headBranch)|\(.displayTitle[:80])|\(.url)"] | join("\n")' 2>/dev/null
++}
++
++emit() {
++    printf '[%s] %s\n' "$(ts)" "$*" >> "$LOG"
++}
++
++iter=0
++while true; do
++    iter=$((iter+1))
++
++    main_now=$(snapshot_main_status || echo "")
++    fails_now=$(snapshot_failures || echo "")
++
++    main_prev_file="$STATE_DIR/main.txt"
++    fails_prev_file="$STATE_DIR/failures.txt"
++
++    main_prev=""
++    [ -f "$main_prev_file" ] && main_prev=$(cat "$main_prev_file")
++
++    fails_prev=""
++    [ -f "$fails_prev_file" ] && fails_prev=$(cat "$fails_prev_file")
++
++    if [ "$iter" -eq 1 ]; then
++        emit "WATCH_START repo=$REPO"
++        emit "MAIN_STATE_INITIAL $main_now"
++        if [ -n "$fails_now" ]; then
++            emit "RECENT_FAILURES_INITIAL"
++            while IFS= read -r line; do
++                [ -n "$line" ] && emit "  FAIL $line"
++            done <<< "$fails_now"
++        fi
++    else
++        if [ "$main_now" != "$main_prev" ]; then
++            emit "MAIN_STATE_CHANGED prev=$main_prev"
++            emit "MAIN_STATE_NOW     now=$main_now"
++        fi
++
++        # Detect new failures by id
++        new_ids=$(comm -23 \
++            <(printf '%s\n' "$fails_now" | awk -F'|' '$1!=""{print $1}' | sort) \
++            <(printf '%s\n' "$fails_prev" | awk -F'|' '$1!=""{print $1}' | sort))
++        if [ -n "$new_ids" ]; then
++            while IFS= read -r id; do
++                [ -z "$id" ] && continue
++                line=$(printf '%s\n' "$fails_now" | awk -F'|' -v id="$id" '$1==id{print $0}')
++                emit "NEW_FAILURE $line"
++            done <<< "$new_ids"
++        fi
++    fi
++
++    printf '%s' "$main_now" > "$main_prev_file"
++    printf '%s' "$fails_now" > "$fails_prev_file"
++
++    sleep 300
++done
+-- 
+2.43.0
+
