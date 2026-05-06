@@ -1697,6 +1697,7 @@ class CheckWeightsReqInput(BaseReq):
 class CheckWeightsReqOutput(BaseReq):
     success: bool
     message: str
+    payload: Optional[Dict] = None
 
 
 @dataclass

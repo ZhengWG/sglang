@@ -190,6 +190,12 @@ class CommonKVManager(BaseKVManager):
         ):
             self.req_to_decode_prefix_len.pop(bootstrap_room, None)
         if bootstrap_room not in self.request_status:
+            # Do not resurrect a cleared entry with Failed: once clear() has
+            # popped the room from request_status, any late update_status(Failed)
+            # (e.g. from abort()) must be a no-op. Otherwise a Failed entry could
+            # pollute a future request that reuses the same bootstrap_room.
+            if status == KVPoll.Failed:
+                return
             self.request_status[bootstrap_room] = status
         else:
             if status == KVPoll.Failed:
@@ -544,7 +550,7 @@ class CommonKVSender(BaseKVSender):
             self.bootstrap_room,
             "Aborted by AbortReq.",
         )
-        # Explicitly set the status to failure since this request has been aborted
+        self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
         self.conclude_state = KVPoll.Failed
 
 
@@ -739,7 +745,7 @@ class CommonKVReceiver(BaseKVReceiver):
             self.bootstrap_room,
             "Aborted by AbortReq.",
         )
-        # Explicitly set the status to failure since this request has been aborted
+        self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
         self.conclude_state = KVPoll.Failed
 
 
