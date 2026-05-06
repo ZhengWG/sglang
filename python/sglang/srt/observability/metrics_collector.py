@@ -123,6 +123,7 @@ class SchedulerStats:
 
     # Utilization
     utilization: float = 0.0
+    fwd_occupancy: float = float("nan")
 
     # Scheduler policy
     new_token_ratio: float = 0.0
@@ -464,6 +465,12 @@ class SchedulerMetricsCollector:
         self.utilization = Gauge(
             name="sglang:utilization",
             documentation="The utilization.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.fwd_occupancy = Gauge(
+            name="sglang:fwd_occupancy",
+            documentation="Forward pass GPU occupancy percentage.",
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
@@ -1146,6 +1153,7 @@ class SchedulerMetricsCollector:
 
         # Utilization
         self._log_gauge(self.utilization, stats.utilization)
+        self._log_gauge(self.fwd_occupancy, stats.fwd_occupancy)
 
         # Scheduler policy
         self._log_gauge(self.new_token_ratio, stats.new_token_ratio)

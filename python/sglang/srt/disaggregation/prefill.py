@@ -478,6 +478,9 @@ class SchedulerDisaggregationPrefillMixin:
         if result.routed_experts_output is not None:
             result.routed_experts_output.finalize()
             result.routed_experts_output = None
+        if result.indexer_topk_output is not None:
+            result.indexer_topk_output.finalize()
+            result.indexer_topk_output = None
 
         batch.mark_end_time()
 
