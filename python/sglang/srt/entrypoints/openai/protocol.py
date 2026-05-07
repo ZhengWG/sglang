@@ -31,6 +31,7 @@ from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
     model_serializer,
@@ -1175,63 +1176,41 @@ class RerankResponse(BaseModel):
         return data
 
 
-class TokenizeCompletionRequest(BaseModel):
+class TokenizeRequest(BaseModel):
     """Request schema for the /tokenize endpoint."""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str = DEFAULT_MODEL_NAME
-    prompt: Union[str, List[str]]
+    prompt: Optional[Union[str, List[str]]] = None
+    messages: Optional[List[ChatCompletionMessageParam]] = None
+    tools: Optional[List[Tool]] = Field(default=None, examples=[None])
+    tool_choice: Optional[Union[ToolChoice, Literal["auto", "required", "none"]]] = (
+        Field(default=None, examples=["auto"])
+    )
+    reasoning_effort: Optional[Literal["none", "low", "medium", "high"]] = None
+    continue_final_message: bool = False
+    chat_template_kwargs: Optional[Dict] = None
     add_special_tokens: bool = Field(
         default=True,
         description="whether to add model-specific special tokens (e.g. BOS/EOS) during encoding.",
     )
 
+    @model_validator(mode="after")
+    def validate_tokenize_input(self) -> "TokenizeRequest":
+        if (self.prompt is None) == (self.messages is None):
+            raise ValueError("Exactly one of 'prompt' or 'messages' must be provided.")
+        return self
 
-class TokenizeChatRequest(BaseModel):
-    model: Optional[str] = None
-    messages: List[ChatCompletionMessageParam]
-
-    add_generation_prompt: bool = Field(
-        default=True,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
-    )
-    continue_final_message: bool = Field(
-        default=False,
-        description=
-        ("If this is set, the chat will be formatted so that the final "
-         "message in the chat is open-ended, without any EOS tokens. The "
-         "model will continue this message rather than starting a new one. "
-         "This allows you to \"prefill\" part of the model's response for it. "
-         "Cannot be used at the same time as `add_generation_prompt`."),
-    )
-    add_special_tokens: bool = Field(
-        default=False,
-        description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt "
-            "on top of what is added by the chat template. "
-            "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false (as is the "
-            "default)."),
-    )
-    chat_template_kwargs: Optional[dict[str, Any]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get(
-            "add_generation_prompt"):
-            raise ValueError("Cannot set both `continue_final_message` and "
-                             "`add_generation_prompt` to True.")
-        return data
-
-
-TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
+    def to_chat_completion_request(self) -> ChatCompletionRequest:
+        data = self.model_dump(
+            exclude={"prompt", "add_special_tokens"},
+            exclude_none=True,
+        )
+        extra = getattr(self, "__pydantic_extra__", None)
+        if extra:
+            data.update(extra)
+        return ChatCompletionRequest.model_validate(data)
 
 
 class TokenizeResponse(BaseModel):
@@ -1268,8 +1247,6 @@ OpenAIServingRequest = Union[
     V1RerankReqInput,
     TokenizeRequest,
     DetokenizeRequest,
-    TokenizeCompletionRequest,
-    TokenizeChatRequest
 ]
 
 

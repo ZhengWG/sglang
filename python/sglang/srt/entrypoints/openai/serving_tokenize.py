@@ -1,6 +1,6 @@
 import logging
 from http import HTTPStatus
-from typing import List, Union
+from typing import List, Optional, Union
 
 from fastapi import Request
 
@@ -10,15 +10,23 @@ from sglang.srt.entrypoints.openai.protocol import (
     ErrorResponse,
     TokenizeRequest,
     TokenizeResponse,
-    TokenizeChatRequest,
 )
 from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
+from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIServingTokenize(OpenAIServingBase):
     """Handler for /v1/tokenize requests"""
+
+    def __init__(self, tokenizer_manager, template_manager=None):
+        super().__init__(tokenizer_manager)
+        self.chat_serving: Optional[OpenAIServingChat] = (
+            OpenAIServingChat(tokenizer_manager, template_manager)
+            if template_manager is not None
+            else None
+        )
 
     def _request_id_prefix(self) -> str:
         return "tok-"
@@ -38,63 +46,36 @@ class OpenAIServingTokenize(OpenAIServingBase):
             tokenizer = self.tokenizer_manager.tokenizer
             max_model_len = self.tokenizer_manager.context_len
 
-            if isinstance(request, TokenizeChatRequest):
-                # process messages
-                openai_compatible_messages = []
-                for message in request.messages:
-                    if message.content is None:
-                        message.content = ""
-                    msg_dict = message.dict()
-                    if isinstance(msg_dict.get("content"), list):
-                        for chunk in msg_dict["content"]:
-                            if isinstance(chunk, dict) and chunk.get("type") == "text":
-                                new_msg = msg_dict.copy()
-                                new_msg["content"] = chunk["text"]
-                                new_msg = {
-                                    k: v for k, v in new_msg.items() if v is not None
-                                }
-                                openai_compatible_messages.append(new_msg)
-                    else:
-                        msg_dict = {k: v for k, v in msg_dict.items() if v is not None}
-                        openai_compatible_messages.append(msg_dict)
-                token_ids = tokenizer.apply_chat_template(
-                    openai_compatible_messages,
-                    tokenize=True,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    **(
-                        request.chat_template_kwargs
-                        if request.chat_template_kwargs
-                        else {}
-                    ),
+            if request.messages is not None:
+                token_ids = self._tokenize_chat_request(request)
+                tokens = token_ids
+                count = len(token_ids)
+            elif isinstance(request.prompt, str):
+                token_ids = tokenizer.encode(
+                    request.prompt,
+                    add_special_tokens=request.add_special_tokens,
                 )
                 tokens = token_ids
                 count = len(token_ids)
+            elif isinstance(request.prompt, list):
+                token_ids_list = [
+                    tokenizer.encode(
+                        text, add_special_tokens=request.add_special_tokens
+                    )
+                    for text in request.prompt
+                ]
+                tokens = token_ids_list
+                count = [len(ids) for ids in token_ids_list]
             else:
-                if isinstance(request.prompt, str):
-                    token_ids = tokenizer.encode(
-                        request.prompt,
-                        add_special_tokens=request.add_special_tokens,
-                    )
-                    tokens = token_ids
-                    count = len(token_ids)
-                elif isinstance(request.prompt, list):
-                    token_ids_list = [
-                        tokenizer.encode(
-                            text, add_special_tokens=request.add_special_tokens
-                        )
-                        for text in request.prompt
-                    ]
-                    tokens = token_ids_list
-                    count = [len(ids) for ids in token_ids_list]
-                else:
-                    return self.create_error_response(
-                        f"Invalid prompt type: {type(request.prompt)}. Expected str or List[str]."
-                    )
+                return self.create_error_response(
+                    f"Invalid prompt type: {type(request.prompt)}. Expected str or List[str]."
+                )
 
             return TokenizeResponse(
                 tokens=tokens, count=count, max_model_len=max_model_len
             )
+        except ValueError as e:
+            return self.create_error_response(str(e))
         except Exception as e:
             logger.error("Error during tokenization", exc_info=True)
             return self.create_error_response(
@@ -102,6 +83,36 @@ class OpenAIServingTokenize(OpenAIServingBase):
                 err_type="InternalServerError",
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+    def _tokenize_chat_request(self, request: TokenizeRequest) -> List[int]:
+        if self.chat_serving is None:
+            raise ValueError("Chat template tokenization requires a template manager.")
+
+        chat_request = request.to_chat_completion_request()
+        validation_error = self.chat_serving._validate_request(chat_request)
+        if validation_error:
+            raise ValueError(validation_error)
+
+        is_multimodal = self.tokenizer_manager.model_config.is_multimodal
+        processed_messages = self.chat_serving._process_messages(
+            chat_request, is_multimodal
+        )
+
+        prompt_ids = processed_messages.prompt_ids
+        if isinstance(prompt_ids, list) and (
+            prompt_ids or not processed_messages.prompt
+        ):
+            return prompt_ids
+        if isinstance(prompt_ids, str):
+            return self.tokenizer_manager.tokenizer.encode(
+                prompt_ids, add_special_tokens=False
+            )
+        if processed_messages.prompt:
+            return self.tokenizer_manager.tokenizer.encode(
+                processed_messages.prompt, add_special_tokens=False
+            )
+
+        raise ValueError("Failed to render chat messages into token ids.")
 
 
 class OpenAIServingDetokenize(OpenAIServingBase):
