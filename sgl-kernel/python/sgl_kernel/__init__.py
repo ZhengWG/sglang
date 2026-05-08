@@ -116,6 +116,15 @@ except ImportError:
 if torch.version.hip is not None:
     from sgl_kernel.elementwise import gelu_quick
 
+if hasattr(torch.version, "musa") and torch.version.musa is not None:
+    from sgl_kernel.musa import (
+        musa_batched_rotary_embedding_contiguous,
+        musa_fused_gemv,
+        musa_fused_moe_gemv,
+        musa_fused_mul_add,
+        musa_rotary_embedding_contiguous,
+    )
+
 
 _DEBUG_EXPORT_NAMES = [
     "apply_shuffle_mul_sum",
