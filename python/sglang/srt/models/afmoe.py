@@ -63,7 +63,7 @@ from sglang.srt.utils import add_prefix, is_npu
 _is_npu = is_npu()
 
 if not _is_npu:
-    from sglang.srt.layers.moe.fused_moe_triton import fused_moe
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
 else:
     from sglang.srt.hardware_backend.npu.quantization.fused_moe_method_npu import (
         fused_moe_npu as fused_moe,
