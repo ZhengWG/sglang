@@ -529,6 +529,9 @@ class DefaultModelLoader(BaseModelLoader):
             weight_loader_disable_mmap = server_args.weight_loader_disable_mmap
             weight_loader_prefetch = server_args.weight_loader_prefetch_checkpoints
             prefetch_num_threads = server_args.weight_loader_prefetch_num_threads
+            weight_loader_drop_cache_after_load = (
+                server_args.weight_loader_drop_cache_after_load
+            )
 
             if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
                 weights_iterator = fastsafetensors_weights_iterator(
@@ -543,6 +546,7 @@ class DefaultModelLoader(BaseModelLoader):
                     disable_mmap=weight_loader_disable_mmap,
                     prefetch=weight_loader_prefetch,
                     prefetch_num_threads=prefetch_num_threads,
+                    drop_cache_after_load=weight_loader_drop_cache_after_load,
                 )
             else:
                 if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
@@ -552,6 +556,7 @@ class DefaultModelLoader(BaseModelLoader):
                     disable_mmap=weight_loader_disable_mmap,
                     prefetch=weight_loader_prefetch,
                     prefetch_num_threads=prefetch_num_threads,
+                    drop_cache_after_load=weight_loader_drop_cache_after_load,
                 )
 
         else:
