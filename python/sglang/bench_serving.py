@@ -32,6 +32,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, U
 
 import aiohttp
 import numpy as np
+import pyarrow  # noqa: F401  # 先于 sglang 加载，避免 jemalloc bg_thread SIGSEGV
 import requests
 from tqdm.asyncio import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -1613,10 +1614,15 @@ async def benchmark(
     else:
         now = datetime.now().strftime("%m%d")
         if args.dataset_name == "image":
+            image_source_tag = (
+                "urllist"
+                if getattr(args, "image_url_list", None)
+                else args.image_resolution
+            )
             output_file_name = (
                 f"{args.backend}_{now}_{args.num_prompts}_{args.random_input_len}_"
                 f"{args.random_output_len}_{args.image_count}imgs_"
-                f"{args.image_resolution}.jsonl"
+                f"{image_source_tag}.jsonl"
             )
         elif args.dataset_name.startswith("random"):
             output_file_name = f"{args.backend}_{now}_{args.num_prompts}_{args.random_input_len}_{args.random_output_len}.jsonl"
@@ -2047,6 +2053,33 @@ if __name__ == "__main__":
         type=str,
         default="random",
         help=("Content for images for image dataset. " "Supports random and blank."),
+    )
+    parser.add_argument(
+        "--image-url-list",
+        type=str,
+        default=None,
+        help=(
+            "Optional source of image URLs for the 'image' dataset. Accepts a path "
+            "to a JSON file containing a list of strings, a text file with one URL "
+            "per line ('#' starts a comment), or an inline comma-separated list of "
+            "URLs. When provided, each request samples --image-count URLs (or a "
+            "random number if --random-image-count is set) from the list and sends "
+            "them as URL-typed image_data to the server. Supersedes --image-resolution"
+            " / --image-format / --image-content."
+        ),
+    )
+    parser.add_argument(
+        "--image-url-probe-count",
+        type=int,
+        default=1,
+        help=(
+            "Only used with --image-url-list. Number of probe images to actually "
+            "download locally (used purely to let the multimodal processor compute "
+            "prompt_len / vision_prompt_len). The probe images are reused across "
+            "all requests, while the real per-request URLs are still sent to the "
+            "server unchanged. Default 1 assumes the URL pool is roughly uniform "
+            "in resolution; raise it for more accurate length statistics."
+        ),
     )
     parser.add_argument(
         "--request-rate",

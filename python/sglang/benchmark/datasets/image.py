@@ -1,11 +1,14 @@
 import io
+import json
+import os
 import warnings
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pybase64
+import requests
 from PIL import Image
 from transformers import AutoProcessor
 
@@ -14,6 +17,7 @@ from sglang.benchmark.datasets.common import (
     DatasetRow,
     compute_random_lens,
     gen_mm_prompt,
+    log_special_token_filter_stats,
 )
 from sglang.benchmark.utils import get_processor
 
@@ -30,6 +34,8 @@ class ImageDataset(BaseDataset):
     image_resolution: str
     backend: str
     random_image_count: bool
+    image_url_list: Optional[str] = None
+    image_url_probe_count: int = 1
 
     @classmethod
     def from_args(cls, args: Namespace) -> "ImageDataset":
@@ -44,6 +50,8 @@ class ImageDataset(BaseDataset):
             image_resolution=args.image_resolution,
             backend=args.backend,
             random_image_count=args.random_image_count,
+            image_url_list=getattr(args, "image_url_list", None),
+            image_url_probe_count=getattr(args, "image_url_probe_count", 1),
         )
 
     def load(self, tokenizer=None, model_id=None) -> List[DatasetRow]:
@@ -60,7 +68,66 @@ class ImageDataset(BaseDataset):
             image_resolution=self.image_resolution,
             backend=self.backend,
             random_image_count=self.random_image_count,
+            image_url_list=self.image_url_list,
+            image_url_probe_count=self.image_url_probe_count,
         )
+
+
+def load_image_url_list(path_or_inline: str) -> List[str]:
+    """Load a list of image URLs / paths.
+
+    Accepts either:
+    - A path to a JSON file containing a list of strings.
+    - A path to a text file with one URL per line (``#`` starts a comment).
+    - An inline comma-separated list of URLs.
+    """
+    if not path_or_inline:
+        return []
+
+    # Inline comma list (only when it's not an existing file path).
+    if "," in path_or_inline and not os.path.exists(path_or_inline):
+        return [s.strip() for s in path_or_inline.split(",") if s.strip()]
+
+    if not os.path.exists(path_or_inline):
+        raise FileNotFoundError(f"image_url_list file not found: {path_or_inline}")
+
+    with open(path_or_inline, "r") as f:
+        text = f.read()
+
+    text_stripped = text.strip()
+    if text_stripped.startswith("["):
+        try:
+            data = json.loads(text_stripped)
+            if isinstance(data, list):
+                urls = [str(x).strip() for x in data if str(x).strip()]
+                if urls:
+                    return urls
+        except json.JSONDecodeError:
+            pass
+
+    urls: List[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        urls.append(s)
+    return urls
+
+
+def fetch_image_from_source(url_or_path: str, timeout: float = 30.0) -> Image.Image:
+    """Fetch a single image into a PIL Image, supporting http(s), data URIs,
+    and local files."""
+    if url_or_path.startswith(("http://", "https://")):
+        resp = requests.get(url_or_path, timeout=timeout)
+        resp.raise_for_status()
+        buf = io.BytesIO(resp.content)
+    elif url_or_path.startswith("data:"):
+        _, _, b64 = url_or_path.partition(",")
+        buf = io.BytesIO(pybase64.b64decode(b64))
+    else:
+        with open(url_or_path, "rb") as f:
+            buf = io.BytesIO(f.read())
+    return Image.open(buf).convert("RGB")
 
 
 def parse_image_resolution(image_resolution: str) -> Tuple[int, int]:
@@ -190,32 +257,56 @@ def sample_image_requests(
     image_resolution: str,
     backend: str,
     random_image_count: bool = False,
+    image_url_list: Optional[str] = None,
+    image_url_probe_count: int = 1,
 ) -> List[DatasetRow]:
     """Generate requests with images.
 
     - If ``random_image_count`` is True, each request includes a random number of images between 1 and ``image_count``.
     - If ``random_image_count`` is False, each request includes exactly ``image_count`` images.
+    - When ``image_url_list`` is provided, images are randomly sampled (with replacement)
+      from that list of URLs / file paths. The raw URL strings are passed through to
+      the server in ``image_data`` so the server fetches them; we additionally download
+      each unique URL once locally so the multimodal processor can compute accurate
+      ``prompt_len`` / ``vision_prompt_len``. ``image_resolution`` / ``image_format`` /
+      ``image_content`` are ignored in this mode.
     - Supported resolutions: 4k (3840x2160), 1080p (1920x1080), 720p (1280x720), 360p (640x360),
       or custom 'heightxwidth' (e.g., 1080x1920).
     - Text lengths follow the 'random' dataset sampling rule. ``prompt_len``
       only counts text tokens and excludes image data.
     """
 
-    # Parse resolution (supports presets and 'heightxwidth')
-    width, height = parse_image_resolution(image_resolution)
+    use_url_list = bool(image_url_list)
+
+    if use_url_list:
+        url_pool = load_image_url_list(image_url_list)
+        if not url_pool:
+            raise ValueError(
+                f"image_url_list '{image_url_list}' did not yield any URLs/paths"
+            )
+        print(
+            f"[image-dataset] loaded {len(url_pool)} entries from "
+            f"image_url_list='{image_url_list}'; ignoring "
+            f"image_resolution/image_format/image_content in URL mode."
+        )
+        width = height = 0
+    else:
+        url_pool = []
+        # Parse resolution (supports presets and 'heightxwidth')
+        width, height = parse_image_resolution(image_resolution)
 
     # Determine image counts for each request
     if random_image_count:
         # Random number of images per request
         image_counts = np.random.randint(1, image_count + 1, size=num_requests)
-        total_images = np.sum(image_counts)
+        total_images = int(np.sum(image_counts))
     else:
         # Fixed number of images per request
         image_counts = np.full(num_requests, image_count)
         total_images = image_count * num_requests
 
     # Check for potentially problematic combinations and warn user
-    if width * height >= 1920 * 1080 and total_images >= 100:
+    if not use_url_list and width * height >= 1920 * 1080 and total_images >= 100:
         warnings.warn(
             f"High resolution ({width}x{height}) with {total_images} total images "
             f"may take a long time. Consider reducing resolution or image count.",
@@ -252,6 +343,62 @@ def sample_image_requests(
         image_bytes = len(image_data.encode("utf-8"))
         return img, image_data, image_bytes
 
+    # Lazy per-URL PIL-image cache so the processor can tokenize without
+    # re-downloading on every request.
+    url_image_cache: Dict[str, Image.Image] = {}
+
+    def _get_image_for_url(url: str) -> Image.Image:
+        cached = url_image_cache.get(url)
+        if cached is not None:
+            return cached
+        img = fetch_image_from_source(url)
+        url_image_cache[url] = img
+        return img
+
+    # In URL-list mode, only download a small "probe" pool of images locally
+    # (used purely to let the processor compute prompt_len / vision_prompt_len).
+    # The per-request URLs sent to the server are still randomly sampled from
+    # the full pool, so this does NOT change the server-side workload.
+    probe_images: List[Image.Image] = []
+    if use_url_list:
+        probe_count = max(1, min(image_url_probe_count, len(url_pool)))
+        # Sample probe URLs deterministically from the front of the pool so
+        # repeated runs are reproducible.
+        probe_urls = url_pool[:probe_count]
+        print(
+            f"[image-dataset] downloading {probe_count} probe image(s) for "
+            f"local prompt_len estimation; per-request URLs will be sent to "
+            f"the server unchanged. "
+            f"(override with --image-url-probe-count)"
+        )
+        for u in probe_urls:
+            probe_images.append(_get_image_for_url(u))
+
+    # Vision-token cost only depends on (image_count, image_resolution).
+    # In URL-list mode every request uses the same probe image(s), so once
+    # we've measured ``vision_prompt_len`` for a given ``image_count`` we can
+    # reuse it for every subsequent request and skip the heavy image
+    # processor call (the expensive part is the per-image patch / grid_thw
+    # computation, which is image-dimension-dependent and identical here).
+    vision_len_cache: Dict[int, int] = {}
+
+    def _text_only_prompt_len(text_prompt: str) -> int:
+        """Cheap: tokenize the text-only chat-template (no images)."""
+        try:
+            text_only_prompt = processor.apply_chat_template(
+                [{"role": "user", "content": text_prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            return processor(
+                text=[text_only_prompt],
+                padding=False,
+                return_tensors="pt",
+            )["input_ids"].numel()
+        except Exception:
+            tok = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+            return len(tok.encode(text_prompt))
+
     dataset: List[DatasetRow] = []
     total_image_bytes = 0
     for i in range(num_requests):
@@ -266,20 +413,94 @@ def sample_image_requests(
         )
 
         # Generate image list
-        images, images_base64, images_bytes = zip(
-            *[_gen_random_image_data_uri() for _ in range(request_image_count)]
-        )
-        total_image_bytes += sum(images_bytes)
+        if use_url_list:
+            sampled_urls = [
+                url_pool[np.random.randint(0, len(url_pool))]
+                for _ in range(request_image_count)
+            ]
+            total_image_bytes += sum(len(u.encode("utf-8")) for u in sampled_urls)
 
-        data_row = create_mm_data_row(
-            text_prompt,
-            list(images),
-            list(images_base64),
-            int(output_lens[i]),
-            processor,
-            backend,
-        )
+            cached_vision_len = vision_len_cache.get(request_image_count)
+            if cached_vision_len is None:
+                # First time we see this image_count: pay the full processor
+                # cost once on the probe image(s), then cache the vision
+                # token contribution for reuse by all subsequent requests
+                # with the same image_count.
+                images = [
+                    probe_images[j % len(probe_images)]
+                    for j in range(request_image_count)
+                ]
+                data_row = create_mm_data_row(
+                    text_prompt,
+                    list(images),
+                    list(sampled_urls),
+                    int(output_lens[i]),
+                    processor,
+                    backend,
+                )
+                measured_vision_len = int(data_row.vision_prompt_len or 0)
+                vision_len_cache[request_image_count] = measured_vision_len
+                print(
+                    f"[image-dataset] cached vision_prompt_len="
+                    f"{measured_vision_len} for image_count="
+                    f"{request_image_count} (probe-derived, reused for "
+                    f"subsequent requests)",
+                    flush=True,
+                )
+            else:
+                # Fast path: skip image processor entirely. Only re-tokenize
+                # the (cheap) text portion and add the cached vision cost.
+                text_prompt_len = _text_only_prompt_len(text_prompt)
+                if backend == "sglang-oai-chat":
+                    # Server applies chat template; send raw text + URLs.
+                    prompt_field = text_prompt
+                else:
+                    content_items = [
+                        {"type": "image", "image": {"url": u}} for u in sampled_urls
+                    ]
+                    content_items.append({"type": "text", "text": text_prompt})
+                    try:
+                        prompt_field = processor.apply_chat_template(
+                            [{"role": "user", "content": content_items}],
+                            add_generation_prompt=True,
+                            tokenize=False,
+                        )
+                    except Exception:
+                        prompt_field = f"<image>{text_prompt}"
+                data_row = DatasetRow(
+                    prompt=prompt_field,
+                    prompt_len=text_prompt_len + cached_vision_len,
+                    output_len=int(output_lens[i]),
+                    text_prompt_len=text_prompt_len,
+                    vision_prompt_len=cached_vision_len,
+                    image_data=list(sampled_urls),
+                )
+        else:
+            images, images_base64, images_bytes = zip(
+                *[_gen_random_image_data_uri() for _ in range(request_image_count)]
+            )
+            images = list(images)
+            images_base64 = list(images_base64)
+            total_image_bytes += sum(images_bytes)
+            data_row = create_mm_data_row(
+                text_prompt,
+                list(images),
+                list(images_base64),
+                int(output_lens[i]),
+                processor,
+                backend,
+            )
+
         dataset.append(data_row)
+
+        # Light progress heartbeat so users can tell the dataset prep loop is
+        # making progress (the per-request processor() call on large images
+        # can otherwise look like a hang).
+        if (i + 1) == 1 or (i + 1) % 50 == 0 or (i + 1) == num_requests:
+            print(
+                f"[image-dataset] prepared {i + 1}/{num_requests} requests",
+                flush=True,
+            )
 
     # Print statistics
     print(f"#Input tokens: {np.sum([x.prompt_len for x in dataset])}")
@@ -293,7 +514,16 @@ def sample_image_requests(
     else:
         print(f"#Images per request: {image_count} (fixed)")
 
-    print(
-        f"\nCreated {len(dataset)} {image_content} {image_format} images with average {total_image_bytes // num_requests} bytes per request"
-    )
+    if use_url_list:
+        print(
+            f"\nCreated {len(dataset)} requests sampled from {len(url_pool)} image URL(s) "
+            f"({len(url_image_cache)} unique fetched), average "
+            f"{total_image_bytes // max(num_requests, 1)} URL bytes per request"
+        )
+    else:
+        print(
+            f"\nCreated {len(dataset)} {image_content} {image_format} images with average {total_image_bytes // num_requests} bytes per request"
+        )
+    # Confirm the bench-side multimodal special-token guards were exercised.
+    log_special_token_filter_stats()
     return dataset
