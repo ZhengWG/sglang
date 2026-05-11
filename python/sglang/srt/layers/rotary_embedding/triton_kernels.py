@@ -306,6 +306,11 @@ def _triton_vision_rope_fused(
     pad_n_kh: tl.constexpr,
     pad_hd: tl.constexpr,
 ):
+    """Per-token vision RoPE kernel (neox-style).
+
+    Grid: (num_tokens,).  Each program handles all heads for one token.
+    Uses a vectorized 2-D tile [heads, half_dim] for both q and k.
+    """
     pid = tl.program_id(0)
     half_rd = rd // 2
 
@@ -321,28 +326,30 @@ def _triton_vision_rope_fused(
     q_base = q_ptr + pid * q_stride_t
     k_base = k_ptr + pid * k_stride_t
 
-    qh = tl.arange(0, pad_n_qh)
-    kh = tl.arange(0, pad_n_kh)
+    # q: vectorized over [heads, half_dim]
+    qh_idx = tl.arange(0, pad_n_qh)[:, None]
+    d_idx = tl.arange(0, pad_hd // 2)[None, :]
+    q_mask = (qh_idx < n_qh) & (d_idx < half_rd)
 
-    # q: neox-style rotation
-    for h_idx in range(pad_n_qh):
-        if h_idx < n_qh:
-            off0 = h_idx * q_stride_h + d
-            off1 = h_idx * q_stride_h + d + half_rd
-            q0 = tl.load(q_base + off0, mask=d_mask, other=0.0).to(cos_row.dtype)
-            q1 = tl.load(q_base + off1, mask=d_mask, other=0.0).to(cos_row.dtype)
-            tl.store(q_base + off0, q0 * cos_row - q1 * sin_row, mask=d_mask)
-            tl.store(q_base + off1, q1 * cos_row + q0 * sin_row, mask=d_mask)
+    q_off0 = qh_idx * q_stride_h + d_idx
+    q_off1 = qh_idx * q_stride_h + d_idx + half_rd
 
-    # k: neox-style rotation
-    for h_idx in range(pad_n_kh):
-        if h_idx < n_kh:
-            off0 = h_idx * k_stride_h + d
-            off1 = h_idx * k_stride_h + d + half_rd
-            k0 = tl.load(k_base + off0, mask=d_mask, other=0.0).to(cos_row.dtype)
-            k1 = tl.load(k_base + off1, mask=d_mask, other=0.0).to(cos_row.dtype)
-            tl.store(k_base + off0, k0 * cos_row - k1 * sin_row, mask=d_mask)
-            tl.store(k_base + off1, k1 * cos_row + k0 * sin_row, mask=d_mask)
+    q0 = tl.load(q_base + q_off0, mask=q_mask, other=0.0).to(cos_row.dtype)
+    q1 = tl.load(q_base + q_off1, mask=q_mask, other=0.0).to(cos_row.dtype)
+    tl.store(q_base + q_off0, q0 * cos_row[None, :] - q1 * sin_row[None, :], mask=q_mask)
+    tl.store(q_base + q_off1, q1 * cos_row[None, :] + q0 * sin_row[None, :], mask=q_mask)
+
+    # k: vectorized over [heads, half_dim]
+    kh_idx = tl.arange(0, pad_n_kh)[:, None]
+    k_mask = (kh_idx < n_kh) & (d_idx < half_rd)
+
+    k_off0 = kh_idx * k_stride_h + d_idx
+    k_off1 = kh_idx * k_stride_h + d_idx + half_rd
+
+    k0 = tl.load(k_base + k_off0, mask=k_mask, other=0.0).to(cos_row.dtype)
+    k1 = tl.load(k_base + k_off1, mask=k_mask, other=0.0).to(cos_row.dtype)
+    tl.store(k_base + k_off0, k0 * cos_row[None, :] - k1 * sin_row[None, :], mask=k_mask)
+    tl.store(k_base + k_off1, k1 * cos_row[None, :] + k0 * sin_row[None, :], mask=k_mask)
 
 
 def triton_vision_rope_fused_inplace(
