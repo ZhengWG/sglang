@@ -51,6 +51,13 @@ The feature reallocates a larger sin_cos_ws when seq_len increases.
 The max_content_len is used to make sure the maximum size of the allocated rotary buffer.
 
 
+## Known supported models
+- Qwen2.5-VL
+- Qwen3-VL
+- Qwen3.5 / Qwen3.5-MoE (shares the Qwen3-VL ViT runner; the
+  `apply_rotary_pos_emb` op uses a Triton kernel on CUDA instead of
+  `torch.compile`, removing the previous CUDA-graph capture conflict)
+
 ## Command Example
 You can enable CUDA Graph for ViT by setting env variable `SGLANG_VIT_ENABLE_CUDA_GRAPH=1`, for example:
 ```
