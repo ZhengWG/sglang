@@ -636,7 +636,7 @@ class DFlashWorker:
             # derive kv_len by adding `draft_token_num`.
             draft_spec_info = self._draft_block_spec_info
             seq_lens = draft_prefix_lens
-            seq_lens_sum = int(draft_prefix_lens.sum().item())
+            seq_lens_sum = int(seq_lens_cpu.sum().item())
             forward_batch = ForwardBatch(
                 forward_mode=ForwardMode.TARGET_VERIFY,
                 batch_size=bs,
