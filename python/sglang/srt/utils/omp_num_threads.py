@@ -42,7 +42,7 @@ def _get_cgroup_v2_cpu_limit() -> Optional[int]:
             continue
         quota_str, period_str = content
         if quota_str == "max":
-            return None
+            continue
         try:
             quota = int(quota_str)
             period = int(period_str)
@@ -78,7 +78,9 @@ def get_available_cpu_count() -> int:
 
     cgroup_limit = _get_cgroup_v2_cpu_limit() or _get_cgroup_v1_cpu_limit()
 
-    candidates = [v for v in (affinity_cpu_count, cgroup_limit) if v is not None and v > 0]
+    candidates = [
+        v for v in (affinity_cpu_count, cgroup_limit) if v is not None and v > 0
+    ]
     if candidates:
         return min(candidates)
 
