@@ -1607,13 +1607,17 @@ async def handle_send_request(request: dict):
 @app.post("/scheduler_receive_url")
 async def handle_scheduler_receive_url_request(request: dict):
     rid = request["req_id"]
+    recv_url = request["receive_url"]
+    logger.debug(f"[recv_url] enter rid={rid} url={recv_url}")
     async with rid_lock:
         global rid_to_receive_endpoint
         if rid not in rid_to_receive_endpoint:
             rid_to_receive_endpoint[rid] = set()
             rid_to_receive_count[rid] = request["receive_count"]
         assert rid_to_receive_count[rid] == request["receive_count"]
-        rid_to_receive_endpoint[rid].add(request["receive_url"])
+        rid_to_receive_endpoint[rid].add(recv_url)
+        size_after = len(rid_to_receive_endpoint[rid])
+    logger.info(f"[recv_url] done rid={rid} url={recv_url} size={size_after}")
     cond = await get_condition(rid)
     async with cond:
         cond.notify_all()

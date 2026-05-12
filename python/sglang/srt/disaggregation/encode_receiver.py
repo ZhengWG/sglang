@@ -924,6 +924,10 @@ class MMReceiverBase(ABC):
                 logger.error(
                     f"Timed out waiting for image embeddings for request {waiting_req.rid}"
                 )
+                try:
+                    waiting_req.recv_socket.close()
+                except Exception:
+                    pass
                 abort_reqs.append(
                     (
                         self.create_req(waiting_req.recv_req),
@@ -953,6 +957,19 @@ class MMReceiverBase(ABC):
             )
         except Exception as e:
             logger.error(f"Encode failed for request {req_id}: {e}", exc_info=True)
+            for w in list(self.waiting_list):
+                if (
+                    getattr(w, "rid", None) == req_id
+                    and w.status == WaitingImageRequestStatus.PENDING
+                ):
+                    w.error_msg = f"Encode dispatch failed: {e}"
+                    w.error_code = HTTPStatus.INTERNAL_SERVER_ERROR
+                    w.status = WaitingImageRequestStatus.FAIL
+                    try:
+                        w.recv_socket.close()
+                    except Exception:
+                        pass
+                    break
 
     def create_req(self, recv_req: TokenizedGenerateReqInput):
         req = Req(
