@@ -81,6 +81,9 @@ def _init_distributed_single_process():
 
     The vision model uses ``ColumnParallelLinear`` / ``RowParallelLinear``
     which require an initialized distributed environment even at TP=1.
+
+    Mirrors the pattern used in
+    ``test/registered/quant/test_gptqmodel_dynamic.py``.
     """
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(29555))
@@ -88,32 +91,41 @@ def _init_distributed_single_process():
     os.environ.setdefault("WORLD_SIZE", "1")
     os.environ.setdefault("LOCAL_RANK", "0")
 
-    from sglang.srt.configs.model_config import ModelConfig  # noqa: F401
     from sglang.srt.distributed.parallel_state import (
         init_distributed_environment,
         initialize_model_parallel,
+        monkey_patch_vllm_parallel_state,
     )
     from sglang.srt.layers.dp_attention import initialize_dp_attention
-    from sglang.srt.server_args import ServerArgs
+    from sglang.srt.server_args import (
+        ServerArgs,
+        set_global_server_args_for_scheduler,
+    )
 
-    if not torch.distributed.is_initialized():
-        init_distributed_environment(
-            backend="nccl",
-            world_size=1,
-            rank=0,
-            distributed_init_method="tcp://127.0.0.1:29555",
-            local_rank=0,
-        )
-        initialize_model_parallel(tensor_model_parallel_size=1)
-        # initialize_dp_attention requires a ServerArgs and ModelConfig but
-        # tolerates minimal stubs; we only need it for module construction.
-        try:
-            sa = ServerArgs(model_path="dummy")
-            initialize_dp_attention(sa, None)
-        except Exception:
-            # Many SGLang trees have a defaults-only init path; if not, the
-            # vision module will still construct (it falls back to TP=1).
-            pass
+    try:
+        if not torch.distributed.is_initialized():
+            init_distributed_environment(
+                backend="nccl",
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method="tcp://127.0.0.1:29555",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=1)
+            monkey_patch_vllm_parallel_state()
+    except AssertionError:
+        # Already initialized — ignore (consistent with sglang test conventions)
+        pass
+
+    # Some module constructors expect a global ServerArgs to be registered.
+    sa = ServerArgs(model_path="dummy")
+    set_global_server_args_for_scheduler(sa)
+    try:
+        initialize_dp_attention(sa, None)
+    except Exception:
+        # Older trees use a slightly different signature; the vision module
+        # still constructs at TP=1 if DP-attention init is skipped.
+        pass
 
 
 def _make_vision_config():
