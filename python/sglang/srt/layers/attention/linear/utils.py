@@ -17,6 +17,11 @@ class LinearAttnKernelBackend(Enum):
     CUTEDSL = "cutedsl"
     FLASHINFER = "flashinfer"
     CULA = "cula"
+    CUSTOM = "custom"
+
+    @classmethod
+    def _missing_(cls, value):
+        return cls.CUSTOM
 
     def is_triton(self):
         return self == LinearAttnKernelBackend.TRITON
@@ -29,6 +34,9 @@ class LinearAttnKernelBackend(Enum):
 
     def is_cula(self):
         return self == LinearAttnKernelBackend.CULA
+
+    def is_custom(self):
+        return self == LinearAttnKernelBackend.CUSTOM
 
 
 LINEAR_ATTN_DECODE_BACKEND: Optional[LinearAttnKernelBackend] = None
@@ -45,11 +53,8 @@ def initialize_linear_attn_config(server_args: ServerArgs):
 
     LINEAR_ATTN_DECODE_BACKEND = LinearAttnKernelBackend(decode)
     LINEAR_ATTN_PREFILL_BACKEND = LinearAttnKernelBackend(prefill)
-    rank0_log(
-        f"Linear attention kernel backend: "
-        f"decode={LINEAR_ATTN_DECODE_BACKEND.value}, "
-        f"prefill={LINEAR_ATTN_PREFILL_BACKEND.value}"
-    )
+
+    rank0_log(f"Linear attention kernel backend: decode={decode}, prefill={prefill}")
 
 
 def get_linear_attn_decode_backend() -> LinearAttnKernelBackend:
