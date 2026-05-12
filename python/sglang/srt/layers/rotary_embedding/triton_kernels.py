@@ -372,6 +372,11 @@ def triton_vision_rope_fused_inplace(
     n_kh = k.shape[1]
     rd = cos.shape[-1]
 
+    # Degenerate case (e.g. an encoder request with no patches): nothing to
+    # do and a zero-block grid is unsafe to launch under CUDA Graph capture.
+    if num_tokens == 0:
+        return
+
     if cos.dtype != q.dtype:
         cos = cos.to(q.dtype)
     if sin.dtype != q.dtype:

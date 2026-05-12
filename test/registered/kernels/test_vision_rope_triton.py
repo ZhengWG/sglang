@@ -167,6 +167,25 @@ def test_triton_cuda_graph_capture_replay():
     )
 
 
+@pytest.mark.skipif(not CUDA, reason="requires CUDA + Triton")
+def test_triton_handles_zero_tokens_cuda():
+    """Empty-input (N=0) requests must not crash. Vision encoder may be
+    called with zero patches when a request has no images of the relevant
+    modality; the kernel must early-return and leave q / k unchanged.
+    """
+    from sglang.srt.layers.rotary_embedding.triton_kernels import (
+        triton_apply_rotary_pos_emb,
+    )
+
+    q = torch.empty((0, 12, 128), dtype=torch.float16, device="cuda")
+    k = torch.empty((0, 4, 128), dtype=torch.float16, device="cuda")
+    cos = torch.empty((0, 64), dtype=torch.float16, device="cuda")
+    sin = torch.empty((0, 64), dtype=torch.float16, device="cuda")
+    q_out, k_out = triton_apply_rotary_pos_emb(q, k, cos, sin)
+    assert q_out.shape == q.shape
+    assert k_out.shape == k.shape
+
+
 def test_triton_rejects_4d_inputs_cpu():
     """4D q/k are LM-side callers (e.g. Gemma3); the wrapper must refuse so a
     caller doing a global swap of apply_rotary_pos_emb cannot silently break
