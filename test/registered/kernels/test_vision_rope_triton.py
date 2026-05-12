@@ -215,6 +215,79 @@ def test_triton_rejects_4d_inputs_cpu():
         triton_apply_rotary_pos_emb(q, k, cos, sin)
 
 
+@pytest.mark.skipif(not CUDA, reason="sglang.srt.layers.attention.vision import requires CUDA torch")
+class TestVisionRopeSelector:
+    """End-to-end selector wiring: VisionAttention picks the right rope fn
+    based on ``(SGLANG_VIT_ENABLE_CUDA_GRAPH, _is_cuda)``. Gated on CUDA
+    because importing ``sglang.srt.layers.attention.vision`` pulls in CUDA
+    torch symbols that are absent on a CPU build (unrelated to the rope
+    fix itself); on a CUDA host, the test patches ``vision._is_cuda`` to
+    exercise both branches without depending on the actual hardware.
+    """
+
+    def setup_method(self):
+        # Reset the module-level cache before each case so monkey-patching
+        # the env var / _is_cuda actually affects resolution.
+        from sglang.srt.layers.attention import vision
+
+        vision._vision_rope_fn = None
+
+    def teardown_method(self):
+        from sglang.srt.layers.attention import vision
+
+        vision._vision_rope_fn = None
+
+    def test_selector_returns_native_when_env_off(self, monkeypatch):
+        from sglang.srt.layers.attention import vision
+        from sglang.srt.layers.rotary_embedding.utils import (
+            apply_rotary_pos_emb,
+        )
+
+        monkeypatch.delenv("SGLANG_VIT_ENABLE_CUDA_GRAPH", raising=False)
+        # Even if hardware is CUDA, env-off must keep behavior identical to
+        # the unpatched main branch.
+        monkeypatch.setattr(vision, "_is_cuda", True)
+        fn = vision._get_vision_rope_fn()
+        assert fn is apply_rotary_pos_emb
+
+    def test_selector_returns_native_on_non_cuda_even_with_env_on(
+        self, monkeypatch
+    ):
+        from sglang.srt.layers.attention import vision
+        from sglang.srt.layers.rotary_embedding.utils import (
+            apply_rotary_pos_emb,
+        )
+
+        monkeypatch.setenv("SGLANG_VIT_ENABLE_CUDA_GRAPH", "1")
+        monkeypatch.setattr(vision, "_is_cuda", False)
+        fn = vision._get_vision_rope_fn()
+        assert fn is apply_rotary_pos_emb
+
+    def test_selector_returns_triton_on_cuda_when_env_on(self, monkeypatch):
+        from sglang.srt.layers.attention import vision
+        from sglang.srt.layers.rotary_embedding.triton_kernels import (
+            triton_apply_rotary_pos_emb,
+        )
+
+        monkeypatch.setenv("SGLANG_VIT_ENABLE_CUDA_GRAPH", "1")
+        monkeypatch.setattr(vision, "_is_cuda", True)
+        fn = vision._get_vision_rope_fn()
+        assert fn is triton_apply_rotary_pos_emb
+
+    def test_selector_caches_resolution(self, monkeypatch):
+        from sglang.srt.layers.attention import vision
+
+        monkeypatch.setenv("SGLANG_VIT_ENABLE_CUDA_GRAPH", "1")
+        monkeypatch.setattr(vision, "_is_cuda", True)
+        first = vision._get_vision_rope_fn()
+        # Even if env / hardware change after first resolve, the cached
+        # callable is returned (resolution is process-level).
+        monkeypatch.setattr(vision, "_is_cuda", False)
+        monkeypatch.delenv("SGLANG_VIT_ENABLE_CUDA_GRAPH", raising=False)
+        second = vision._get_vision_rope_fn()
+        assert first is second
+
+
 if __name__ == "__main__":
     # Required by sglang's CI runner (`python3 file.py -f`) — without this
     # block, pytest-style tests would silently skip under that invocation.
