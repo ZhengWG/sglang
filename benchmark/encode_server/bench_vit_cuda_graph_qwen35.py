@@ -129,26 +129,26 @@ def _init_distributed_single_process():
 
 
 def _make_vision_config():
-    """Build a Qwen3-VL-style vision config that exercises real depths and
-    head shapes. Defaults match Qwen3-VL-8B-Instruct's vision tower so the
-    measurement is representative; can be overridden via env vars for quick
-    runs.
+    """Build a Qwen3-VL / Qwen3.5-style vision config that exercises real
+    depths and head shapes. Defaults mirror sglang's `Qwen3VLVisionConfig`
+    defaults (which match the Qwen3-VL public checkpoints) so the
+    measurement is representative; can be overridden via env vars.
     """
     from sglang.srt.configs.qwen3_vl import Qwen3VLVisionConfig
 
     cfg = Qwen3VLVisionConfig(
-        depth=int(os.getenv("BENCH_VIT_DEPTH", "32")),
+        depth=int(os.getenv("BENCH_VIT_DEPTH", "27")),
         hidden_size=int(os.getenv("BENCH_VIT_HIDDEN", "1152")),
         intermediate_size=int(os.getenv("BENCH_VIT_INTER", "4304")),
         num_heads=int(os.getenv("BENCH_VIT_HEADS", "16")),
         in_channels=3,
-        patch_size=14,
+        patch_size=int(os.getenv("BENCH_VIT_PATCH", "16")),
         spatial_merge_size=2,
         temporal_patch_size=2,
         out_hidden_size=int(os.getenv("BENCH_VIT_OUT_HIDDEN", "3584")),
         num_position_embeddings=2304,  # 48*48
-        deepstack_visual_indexes=[7, 15, 23],
-        hidden_act="silu",
+        deepstack_visual_indexes=[8, 16, 24],
+        hidden_act="gelu_pytorch_tanh",
     )
     return cfg
 
