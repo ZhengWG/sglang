@@ -39,7 +39,7 @@ opentelemetry_initialized = False
 _trace_context_propagator = None
 tracer: Optional[trace.Tracer] = None
 
-global_trace_level = 1
+global_trace_level = get_int_env_var("SGLANG_TRACE_LEVEL", 1)
 
 NORMAL_TRACE_LEVEL = 1
 ENHANCED_TRACE_LEVEL = 2
