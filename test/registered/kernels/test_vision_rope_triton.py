@@ -28,6 +28,11 @@ from sglang.srt.layers.rotary_embedding import (
     apply_rotary_pos_emb_eager,
 )
 from sglang.srt.layers.rotary_embedding.utils import apply_rotary_pos_emb_native
+from sglang.test.ci.ci_register import register_cuda_ci
+
+# Quick kernel-level test: parity + tiny CUDA-graph capture. Estimated runtime
+# is well under 10s on a single GPU.
+register_cuda_ci(est_time=10, suite="stage-b-test-1-gpu-large")
 
 CUDA = torch.cuda.is_available()
 SHAPES = [
@@ -189,3 +194,11 @@ def test_triton_rejects_4d_inputs_cpu():
     sin = torch.randn(16, 64)
     with pytest.raises(AssertionError):
         triton_apply_rotary_pos_emb(q, k, cos, sin)
+
+
+if __name__ == "__main__":
+    # Required by sglang's CI runner (`python3 file.py -f`) — without this
+    # block, pytest-style tests would silently skip under that invocation.
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))
