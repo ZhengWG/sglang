@@ -134,3 +134,34 @@ elif _is_cpu and _is_cpu_amx_available:
     apply_rotary_pos_emb = torch.ops.sgl_kernel.apply_rotary_pos_emb_cpu
 else:
     apply_rotary_pos_emb = apply_rotary_pos_emb_native
+
+
+def apply_rotary_pos_emb_eager(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Eager (non-compiled) version of ``apply_rotary_pos_emb_native``.
+
+    Identical math (fp32 internal accumulation) but without the
+    ``@torch.compile`` decorator. Use this as a CUDA-graph-safe fallback
+    when the Triton vision-rope kernel is unavailable: ``torch.compile``
+    inside ``torch.cuda.graph(...)`` injects dynamo-guard / dynamic-shape
+    state that breaks capture (the well-known ``random_rng`` failure for
+    vision encoders).
+    """
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+
+    cos = cos.unsqueeze(unsqueeze_dim).float()
+    sin = sin.unsqueeze(unsqueeze_dim).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+
+    return q_embed, k_embed
