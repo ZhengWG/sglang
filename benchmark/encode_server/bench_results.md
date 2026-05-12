@@ -64,6 +64,26 @@ and confirm:
 2. **Lint** clean across all changed files.
 3. **Wrapper rejects 4D q/k** (negative test passes on CPU).
 4. **No-CUDA branch** of the benchmark script exits cleanly.
+5. **Root-cause confirmed via inductor output_code dump.** Running the
+   existing `apply_rotary_pos_emb_native` under
+   `TORCH_LOGS=output_code` shows that inductor emits a wrapper that
+   imports host-side state incompatible with CUDA-graph capture:
+
+   ```
+   import random
+   assert_size_stride = torch._C._dynamo.guards.assert_size_stride
+   empty_strided_cpu  = torch._C._dynamo.guards._empty_strided_cpu
+   empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
+   reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
+       from torch._dynamo.testing import rand_strided
+       arg3_1 = rand_strided((16, 12, 128), ...)
+   ```
+
+   Those `_dynamo.guards.*` host calls and the `random` / `rand_strided`
+   shim are exactly what surface as the `random_rng` capture failure
+   inside `torch.cuda.graph(...)`. The Triton kernel emits no such
+   host-side state, so capture proceeds. (Bench thresholds above will
+   confirm the resulting end-to-end speedup on a GPU host.)
 
 ## What CANNOT be validated on this CPU sandbox
 
