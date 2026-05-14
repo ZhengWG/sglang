@@ -136,6 +136,10 @@ QUANTIZATION_CHOICES = [
     "modelslim",  # for NPU
     "quark",  # AMD Quark quantizer (FP8 / MXFP4 / Int4FP8 etc.)
     "quark_int4fp8_moe",
+    # Apple Silicon MLX backend — on-the-fly quantization of fp16 weights at load
+    # time via mlx.nn.quantize. Only takes effect when SGLANG_USE_MLX=1.
+    "mlx_q4",  # 4 bits, group_size=64 (mlx-community default)
+    "mlx_q8",  # 8 bits, group_size=64
     "unquant",
 ]
 
@@ -156,6 +160,7 @@ ATTENTION_BACKEND_CHOICES = [
     "flashinfer",
     "flashmla",
     "trtllm_mla",
+    "tokenspeed_mla",
     "trtllm_mha",
     "dual_chunk_flash_attn",
     # AMD specific
@@ -635,6 +640,7 @@ class ServerArgs:
     elastic_ep_backend: Literal[None, "mooncake", "nixl"] = None
     enable_elastic_expert_backup: bool = False
     mooncake_ib_device: Optional[str] = None
+    enable_deepep_waterfill: bool = False
     elastic_ep_rejoin: bool = False
 
     # Mamba cache
@@ -2068,6 +2074,11 @@ class ServerArgs:
                     logger.warning(
                         "Detected ROCm with SGLANG_USE_AITER for GPT-OSS bf16 model, using triton MOE kernel."
                     )
+                elif is_musa() and envs.SGLANG_DEEPEP_BF16_DISPATCH.get():
+                    self.moe_runner_backend = "deep_gemm"
+                    logger.warning(
+                        "Detected MUSA with SGLANG_DEEPEP_BF16_DISPATCH for bf16 model, using deep_gemm kernel."
+                    )
                 elif (
                     self.ep_size == 1
                     and is_triton_kernels_available()
@@ -2715,6 +2726,25 @@ class ServerArgs:
                 )
 
         if (
+            self.attention_backend == "tokenspeed_mla"
+            or self.decode_attention_backend == "tokenspeed_mla"
+        ):
+            if not is_blackwell_supported():
+                raise ValueError(
+                    "tokenspeed_mla backend is only supported on Blackwell GPUs (SM100/SM12x)."
+                )
+            if self.page_size not in [32, 64]:
+                logger.warning(
+                    f"tokenspeed_mla only supports page_size of 32 or 64, changing page_size from {self.page_size} to 64."
+                )
+                self.page_size = 64
+            if self.kv_cache_dtype not in ["fp8_e4m3"]:
+                raise ValueError(
+                    "tokenspeed_mla backend requires kv-cache-dtype=fp8_e4m3, "
+                    f"got {self.kv_cache_dtype}."
+                )
+
+        if (
             self.attention_backend == "trtllm_mha"
             or self.decode_attention_backend == "trtllm_mha"
             or self.prefill_attention_backend == "trtllm_mha"
@@ -3168,6 +3198,13 @@ class ServerArgs:
             )
 
     def _handle_a2a_moe(self):
+        if self.enable_deepep_waterfill and self.moe_a2a_backend != "deepep":
+            logger.warning(
+                "moe_a2a_backend is overridden to 'deepep' because DeepEP "
+                "Waterfill requires the DeepEP backend."
+            )
+            self.moe_a2a_backend = "deepep"
+
         if self.moe_a2a_backend == "deepep":
             if self.deepep_mode == "normal":
                 logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
@@ -3176,6 +3213,16 @@ class ServerArgs:
             logger.warning(
                 f"DeepEP MoE is enabled. The expert parallel size is adjusted to be the same as the tensor parallel size[{self.tp_size}]."
             )
+            if self.enable_deepep_waterfill:
+                if self.disable_shared_experts_fusion:
+                    logger.warning(
+                        "disable_shared_experts_fusion is overridden to False because DeepEP Waterfill requires shared expert fusion."
+                    )
+                    self.disable_shared_experts_fusion = False
+                self.enforce_shared_experts_fusion = True
+                logger.info(
+                    "DeepEP Waterfill is enabled. Shared expert will be dispatched through DeepEP for load balancing."
+                )
 
         if self.moe_a2a_backend == "mooncake":
             self.ep_size = self.tp_size
@@ -4029,11 +4076,11 @@ class ServerArgs:
         if self.disaggregation_mode in ("prefill", "decode"):
             if (
                 envs.SGLANG_DISAGG_STAGING_BUFFER.get()
-                and self.disaggregation_transfer_backend != "mooncake"
+                and self.disaggregation_transfer_backend not in ("mooncake", "nixl")
             ):
                 raise ValueError(
                     f"SGLANG_DISAGG_STAGING_BUFFER requires "
-                    f"disaggregation_transfer_backend='mooncake', "
+                    f"disaggregation_transfer_backend='mooncake' or 'nixl', "
                     f"got '{self.disaggregation_transfer_backend}'."
                 )
 
@@ -6077,6 +6124,18 @@ class ServerArgs:
             "Default is None, which triggers automatic device detection when Mooncake Backend is enabled.",
         )
         parser.add_argument(
+            "--enable-deepep-waterfill",
+            action="store_true",
+            default=ServerArgs.enable_deepep_waterfill,
+            help="Enable DeepEP Waterfill: dispatch the shared expert as the 9th "
+            "routed expert to the least-loaded EP rank. Automatically sets "
+            "--moe-a2a-backend deepep, implicitly enables shared-expert fusion, "
+            "and supports --deepep-mode auto, normal, or low_latency. Use auto "
+            "or low_latency for production decode so CUDA graph remains enabled. "
+            "Supported on DeepSeek-V3/R1 "
+            "with EP >= 2.",
+        )
+        parser.add_argument(
             "--elastic-ep-rejoin",
             action="store_true",
             default=ServerArgs.elastic_ep_rejoin,
@@ -6634,7 +6693,12 @@ class ServerArgs:
         parser.add_argument(
             "--disable-shared-experts-fusion",
             action="store_true",
-            help="Disable shared experts fusion optimization for deepseek v3/r1.",
+            help=(
+                "Disable the built-in shared experts fusion optimization for DeepSeek V3/R1. "
+                "Note: DeepEP Waterfill (--enable-deepep-waterfill) still routes shared expert "
+                "through DeepEP as an extra MoE slot, so shared expert is not separated from the "
+                "MoE path when Waterfill is enabled."
+            ),
         )
         parser.add_argument(
             "--enforce-shared-experts-fusion",
