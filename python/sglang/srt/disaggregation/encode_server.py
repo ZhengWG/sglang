@@ -270,6 +270,9 @@ class MMEncoder:
             else 64
         )
         self.encode_semaphore = asyncio.Semaphore(self.encoder_max_running_requests)
+        # Serializes send_pyobj + forward launch so rank0's NCCL launch order
+        # stays aligned with other-ranks' ZMQ-FIFO recv order
+        self.encode_dispatch_lock = asyncio.Lock()
         self.running_encode_count = 0
         logger.info(
             f"Encoder max running requests: {self.encoder_max_running_requests}"
@@ -1227,6 +1230,10 @@ class MMEncoder:
     ):
         mm_data = self.embedding_to_send.get(req_id)
         if not mm_data:
+            logger.warning(
+                f"[{req_id}] send_with_url: no mm_data in embedding_to_send; "
+                f"encode forward never completed for this req (silent skip)"
+            )
             return
         sent_urls: Set[str] = set()
         all_tasks: List[Tuple[asyncio.Task, str]] = []
@@ -1464,6 +1471,7 @@ async def get_condition(rid):
 @app.post("/encode")
 async def handle_encode_request(request: dict):
     req_id = request["req_id"]
+    handler_start = time.time()
     try:
 
         def start_background_send(req_id):
@@ -1511,9 +1519,10 @@ async def handle_encode_request(request: dict):
             wait_duration = time.time() - wait_start
             encoder.running_encode_count += 1
             try:
-                nbytes, embedding_len, embedding_dim, error_msg, error_code = (
-                    await _broadcast_and_encode()
-                )
+                async with encoder.encode_dispatch_lock:
+                    nbytes, embedding_len, embedding_dim, error_msg, error_code = (
+                        await _broadcast_and_encode()
+                    )
             finally:
                 encoder.running_encode_count -= 1
                 if throttled:
@@ -1578,7 +1587,11 @@ async def handle_encode_request(request: dict):
             return ORJSONResponse(content=None)
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Unexpected error in encoder logic for {req_id}: {error_msg}")
+        logger.error(
+            f"[{req_id}] /encode handler exception after "
+            f"{time.time() - handler_start:.3f}s: {error_msg}",
+            exc_info=True,
+        )
         rid_to_err_msg[req_id] = error_msg
         return ORJSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -1662,21 +1675,24 @@ async def health_generate():
             "part_idx": 0,
         }
 
-        # Broadcast to other TP ranks so distributed ops stay in sync
-        for socket in send_sockets:
-            socket.send_pyobj(dummy_request)
+        # Share encode_dispatch_lock with /encode so health checks can't
+        # interleave their send_pyobj + launch with real requests.
+        async with encoder.encode_dispatch_lock:
+            # Broadcast to other TP ranks so distributed ops stay in sync
+            for socket in send_sockets:
+                socket.send_pyobj(dummy_request)
 
-        # Run encode on rank 0 with timeout
-        _, _, _, error_msg, _ = await asyncio.wait_for(
-            encoder.encode(
-                mm_items=mm_items,
-                modality=modality,
-                req_id=req_id,
-                num_parts=1,
-                part_idx=0,
-            ),
-            timeout=HEALTH_CHECK_TIMEOUT,
-        )
+            # Run encode on rank 0 with timeout
+            _, _, _, error_msg, _ = await asyncio.wait_for(
+                encoder.encode(
+                    mm_items=mm_items,
+                    modality=modality,
+                    req_id=req_id,
+                    num_parts=1,
+                    part_idx=0,
+                ),
+                timeout=HEALTH_CHECK_TIMEOUT,
+            )
 
         # Clean up stored embedding
         encoder.embedding_to_send.pop(req_id, None)

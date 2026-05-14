@@ -944,6 +944,7 @@ class MMReceiverBase(ABC):
     def _run_encode_in_thread(
         self, req_id, mm_data, endpoint_encode, num_items_assigned, embedding_port
     ):
+        thread_start = time.time()
         try:
             asyncio.run(
                 self.encode(
@@ -956,7 +957,11 @@ class MMReceiverBase(ABC):
                 )
             )
         except Exception as e:
-            logger.error(f"Encode failed for request {req_id}: {e}", exc_info=True)
+            logger.error(
+                f"[{req_id}] _run_encode_in_thread failed after "
+                f"{time.time() - thread_start:.3f}s: {e}",
+                exc_info=True,
+            )
             for w in list(self.waiting_list):
                 if (
                     getattr(w, "rid", None) == req_id
@@ -1196,17 +1201,30 @@ class MMReceiverHTTP(MMReceiverBase):
             )  # Add timeout for request reliability
         ) as session:
             # Send encode requests
+            target_urls = [
+                f"{self.encode_urls[er['encoder_idx']]}/{endpoint_encode}"
+                for er in encode_requests
+            ]
+            part_ids = [er["req_id"] for er in encode_requests]
+            gather_start = time.time()
 
             tasks = [
-                session.post(
-                    f"{self.encode_urls[encode_request['encoder_idx']]}/{endpoint_encode}",
-                    json=encode_request,
-                )
-                for encode_request in encode_requests
+                session.post(url, json=er)
+                for url, er in zip(target_urls, encode_requests)
             ]
 
-            responses = await asyncio.gather(*tasks)
-            for response in responses:
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            elapsed = time.time() - gather_start
+            failed = False
+            for idx, response in enumerate(responses):
+                if isinstance(response, BaseException):
+                    logger.error(
+                        f"[{req_id}] encode POST failed after {elapsed:.3f}s "
+                        f"part={part_ids[idx]} url={target_urls[idx]} "
+                        f"exc={type(response).__name__}: {response}"
+                    )
+                    failed = True
+                    continue
                 if response.status != 200:
                     try:
                         err_data = await response.json()
@@ -1214,8 +1232,20 @@ class MMReceiverHTTP(MMReceiverBase):
                     except:
                         msg = await response.text()
 
-                    logger.error(f"Encoder returned error {response.status}: {msg}")
-                    return
+                    logger.error(
+                        f"[{req_id}] encoder returned status={response.status} "
+                        f"part={part_ids[idx]} url={target_urls[idx]} msg={msg}"
+                    )
+                    failed = True
+            if failed:
+                logger.error(
+                    f"[{req_id}] encode aborted: at least one part failed; "
+                    f"closing other responses and returning"
+                )
+                for r in responses:
+                    if not isinstance(r, BaseException):
+                        r.release()
+                return
             response_json_list_unsort = [
                 await response.json() for response in responses
             ]
