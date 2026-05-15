@@ -1956,6 +1956,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 if is_stream and self.enable_trace:
                     _append_stream_trace_text(state, delta_text, delta_output_ids)
 
+                if self.enable_trace and delta_output_ids:
+                    if is_stream:
+                        _append_stream_trace_text(state, delta_text, delta_output_ids)
+                    else:
+                        state.text_in_list.extend(self.tokenizer.batch_decode([[idx] for idx in delta_output_ids]))
+
                 if is_stream:
                     if incremental:
                         output_token_ids = delta_output_ids
@@ -1987,9 +1993,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         "output_ids": state.output_ids.copy(),
                         "meta_info": meta_info,
                     }
-                    # req trace metric stats
-                    if self.enable_trace:
-                        state.text_in_list.extend(self.tokenizer.batch_decode(delta_output_ids))
                 else:
                     out_dict = None
             elif isinstance(recv_obj, BatchTokenIDOutput):
