@@ -38,6 +38,7 @@ import uvloop
 import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
+from orjson import dumps as orjson_dumps
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.encode_receiver import create_mm_receiver
@@ -64,17 +65,21 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     OpenSessionReqOutput,
     PauseGenerationReqInput,
+    ReqMetric,
     SessionParams,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     UpdateWeightFromDiskReqInput,
     UpdateWeightFromDiskReqOutput,
     WatchLoadUpdateReq,
-    ReqMetric,
 )
 from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalProcessorOutput
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalProcessorOutput,
+)
 from sglang.srt.managers.scheduler import is_health_check_generate_req
 from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_region
 from sglang.srt.managers.tokenizer_control_mixin import TokenizerControlMixin
@@ -126,7 +131,6 @@ from sglang.srt.utils.network import get_zmq_socket
 from sglang.srt.utils.request_logger import RequestLogger
 from sglang.srt.utils.watchdog import Watchdog
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
-from orjson import dumps as orjson_dumps
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -633,15 +637,21 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             self._attach_multi_http_worker_info(obj)
 
         # Log the request
-        req_skip_names = {
-            "text",
-            "input_ids",
-            "input_embeds",
-            "image_data",
-            "audio_data",
-            "video_data",
-        } if request and "X-Mask-Content" in request.headers else set()
-        self.request_logger.log_received_request(obj, self.tokenizer, request, req_skip_names)
+        req_skip_names = (
+            {
+                "text",
+                "input_ids",
+                "input_embeds",
+                "image_data",
+                "audio_data",
+                "video_data",
+            }
+            if request and "X-Mask-Content" in request.headers
+            else set()
+        )
+        self.request_logger.log_received_request(
+            obj, self.tokenizer, request, req_skip_names
+        )
 
         async with self.is_pause_cond:
             await self.is_pause_cond.wait_for(lambda: not self.is_pause)
@@ -1001,7 +1011,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             and max_new_tokens is not None
             and (max_new_tokens + input_token_num) >= _max_req_len
         ):
-            if self.server_args.allow_auto_truncate or self.server_args.allow_auto_output_truncate:
+            if (
+                self.server_args.allow_auto_truncate
+                or self.server_args.allow_auto_output_truncate
+            ):
                 logger.warning(
                     f"Requested token count ({input_token_num} input + {max_new_tokens} new) "
                     f"exceeds the model's context length ({self.context_len} tokens). "
@@ -1179,6 +1192,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
                 num_items_assigned=obj.num_items_assigned,
                 multi_item_delimiter_indices=obj.multi_item_delimiter_indices,
+                mm_data_mooncake=obj.mm_data_mooncake,
             )
         elif isinstance(obj, EmbeddingReqInput):
             # Resolve unresolved embed overrides now that input_ids are available
@@ -1495,15 +1509,19 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     out["meta_info"][
                         "response_sent_to_client_ts"
                     ] = state.time_stats.get_response_sent_to_client_realtime()
-                req_skip_names = {
-                    "text",
-                    "input_ids",
-                    "input_embeds",
-                    "image_data",
-                    "audio_data",
-                    "video_data",
-                    "output_ids",
-                } if request and "X-Mask-Content" in request.headers else set()
+                req_skip_names = (
+                    {
+                        "text",
+                        "input_ids",
+                        "input_embeds",
+                        "image_data",
+                        "audio_data",
+                        "video_data",
+                        "output_ids",
+                    }
+                    if request and "X-Mask-Content" in request.headers
+                    else set()
+                )
                 self.request_logger.log_finished_request(
                     obj,
                     out,
@@ -1659,7 +1677,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         if self.enable_metrics:
             # TODO: also use custom_labels from the request
             self.metrics_collector.observe_one_aborted_request(
-                {**self.metrics_collector.labels, "lora_adapter": str(lora_path or "base")}
+                {
+                    **self.metrics_collector.labels,
+                    "lora_adapter": str(lora_path or "base"),
+                }
             )
 
     async def pause_generation(self, obj: PauseGenerationReqInput):
@@ -1931,7 +1952,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         }
                         # req trace metric stats
                         if self.enable_trace:
-                            state.text_in_list.extend(self.tokenizer.batch_decode(delta_output_ids))
+                            state.text_in_list.extend(
+                                self.tokenizer.batch_decode(delta_output_ids)
+                            )
                     else:
                         # Non-incremental intermediate: pass reference (no
                         # copy) and defer text to _wait_one_response to avoid
@@ -1949,7 +1972,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     }
                     # req trace metric stats
                     if self.enable_trace:
-                        state.text_in_list.extend(self.tokenizer.batch_decode(delta_output_ids))
+                        state.text_in_list.extend(
+                            self.tokenizer.batch_decode(delta_output_ids)
+                        )
                 else:
                     out_dict = None
             elif isinstance(recv_obj, BatchTokenIDOutput):
@@ -2049,7 +2074,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     if state.time_stats.first_token_time > 0.0
                     else time.perf_counter()
                 )
-                meta_info["ttft_latency"] = first_token_time - state.time_stats.created_time
+                meta_info["ttft_latency"] = (
+                    first_token_time - state.time_stats.created_time
+                )
 
                 del self.rid_to_state[rid]
 
@@ -2206,7 +2233,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             recv_obj.output_token_logprobs_idx[recv_obj_index]
         )
 
-
         if top_logprobs_num > 0:
             if len(recv_obj.input_top_logprobs_val) > 0:
                 state.input_top_logprobs_val.extend(
@@ -2216,14 +2242,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     recv_obj.input_top_logprobs_idx[recv_obj_index]
                 )
 
-
             state.output_top_logprobs_val.extend(
                 recv_obj.output_top_logprobs_val[recv_obj_index]
             )
             state.output_top_logprobs_idx.extend(
                 recv_obj.output_top_logprobs_idx[recv_obj_index]
             )
-
 
         if token_ids_logprob is not None:
             if len(recv_obj.input_token_ids_logprobs_val) > 0:
@@ -2233,7 +2257,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 state.input_token_ids_logprobs_idx.extend(
                     recv_obj.input_token_ids_logprobs_idx[recv_obj_index]
                 )
-
 
             state.output_token_ids_logprobs_val.extend(
                 recv_obj.output_token_ids_logprobs_val[recv_obj_index]
@@ -2336,7 +2359,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     i
                 ]
 
-    def _extract_mm_metadata(self, tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]) -> Optional[List[Dict[str, Any]]]:
+    def _extract_mm_metadata(
+        self,
+        tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
+    ) -> Optional[List[Dict[str, Any]]]:
         """Extract multimodal metadata from mm_items.
 
         Args:
@@ -2349,7 +2375,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             return None
 
         mm_inputs = tokenized_obj.mm_inputs
-        if not isinstance(mm_inputs, MultimodalProcessorOutput) or not mm_inputs.mm_items:
+        if (
+            not isinstance(mm_inputs, MultimodalProcessorOutput)
+            or not mm_inputs.mm_items
+        ):
             return None
 
         mm_items = mm_inputs.mm_items
@@ -2398,7 +2427,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         return metadata_list if metadata_list else None
 
-    def _add_multimodal_metadata(self, state: "ReqState", meta_info: Dict[str, Any]) -> None:
+    def _add_multimodal_metadata(
+        self, state: "ReqState", meta_info: Dict[str, Any]
+    ) -> None:
         """Add multimodal metadata to meta_info if the request contains multimodal data.
 
         Args:
@@ -2417,11 +2448,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             try:
                 if hasattr(self.mm_processor, "patch_size"):
                     patch_size = self.mm_processor.patch_size
-                elif hasattr(self.mm_processor, "vision_config") and hasattr(self.mm_processor.vision_config, "patch_size"):
+                elif hasattr(self.mm_processor, "vision_config") and hasattr(
+                    self.mm_processor.vision_config, "patch_size"
+                ):
                     patch_size = self.mm_processor.vision_config.patch_size
                 elif hasattr(self.mm_processor, "_processor"):
                     _processor = self.mm_processor._processor
-                    if hasattr(_processor, "image_processor") and hasattr(_processor.image_processor, "patch_size"):
+                    if hasattr(_processor, "image_processor") and hasattr(
+                        _processor.image_processor, "patch_size"
+                    ):
                         patch_size = _processor.image_processor.patch_size
                     else:
                         patch_size = _processor.patch_size
@@ -2446,18 +2481,29 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
             # Create one dict per grid_thw entry
             if grid_thws:
-                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(offsets, grid_thws)
+                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(
+                    offsets, grid_thws
+                )
                 if offsets_start_idxs is None or offsets_end_idxs is None:
-                    logger.warning(f"No support for offsets and grid_thws length mismatch, {offsets=}, {grid_thws=}")
+                    logger.warning(
+                        f"No support for offsets and grid_thws length mismatch, {offsets=}, {grid_thws=}"
+                    )
                     return
                 for item_idx, grid_thw in enumerate(grid_thws):
                     # Calculate size from grid_thw if patch_size is available, for qwen-series models
                     size = None
                     if grid_thw and patch_size:
                         try:
-                            if isinstance(grid_thw, (list, tuple)) and len(grid_thw) > 2:
+                            if (
+                                isinstance(grid_thw, (list, tuple))
+                                and len(grid_thw) > 2
+                            ):
                                 # n_frames, width, height
-                                size = (grid_thw[0], grid_thw[2] * patch_size, grid_thw[1] * patch_size)
+                                size = (
+                                    grid_thw[0],
+                                    grid_thw[2] * patch_size,
+                                    grid_thw[1] * patch_size,
+                                )
                         except Exception:
                             pass
 
@@ -2466,43 +2512,55 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     start_idx = 0
                     offsets_start_idx = offsets_start_idxs[item_idx]
                     offsets_end_idx = offsets_end_idxs[item_idx]
-                    start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
+                    start_idx, num_tokens = _get_offset_data(
+                        offsets, offsets_start_idx, offsets_end_idx
+                    )
                     if size:
                         total_pixels += size[0] * size[1] * size[2]
                     if num_tokens:
                         total_vision_tokens += num_tokens
 
-                    mm_meta_infos.append({
-                        "modality": modality_str,
-                        "grid_thw": grid_thw,
-                        "size": size,
-                        "num_tokens": num_tokens,
-                        "start_idx": start_idx
-                    })
+                    mm_meta_infos.append(
+                        {
+                            "modality": modality_str,
+                            "grid_thw": grid_thw,
+                            "size": size,
+                            "num_tokens": num_tokens,
+                            "start_idx": start_idx,
+                        }
+                    )
             elif sizes:
                 # No grid_thw for some models, for example, internvl-series
                 num_tokens = 0
                 start_idx = 0
-                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(offsets, sizes)
+                offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(
+                    offsets, sizes
+                )
                 if offsets_start_idxs is None or offsets_end_idxs is None:
-                    logger.warning(f"No support for offsets and sizes length mismatch, {offsets=}, {sizes=}")
+                    logger.warning(
+                        f"No support for offsets and sizes length mismatch, {offsets=}, {sizes=}"
+                    )
                     return
 
                 for item_idx, size in enumerate(sizes):
                     offsets_start_idx = offsets_start_idxs[item_idx]
                     offsets_end_idx = offsets_end_idxs[item_idx]
-                    start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
+                    start_idx, num_tokens = _get_offset_data(
+                        offsets, offsets_start_idx, offsets_end_idx
+                    )
                     if size:
                         total_pixels += size[0] * size[1] * size[2]
                     if num_tokens:
                         total_vision_tokens += num_tokens
-                    mm_meta_infos.append({
-                        "modality": modality_str,
-                        "grid_thw": None,
-                        "size": size,
-                        "num_tokens": num_tokens,
-                        "start_idx": start_idx
-                    })
+                    mm_meta_infos.append(
+                        {
+                            "modality": modality_str,
+                            "grid_thw": None,
+                            "size": size,
+                            "num_tokens": num_tokens,
+                            "start_idx": start_idx,
+                        }
+                    )
             else:
                 # NOTE: fallback for other scenes, not guaranteed to be correct
                 if offsets:
@@ -2516,13 +2574,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                             num_tokens += end - start
                     if num_tokens:
                         total_vision_tokens += num_tokens
-                    mm_meta_infos.append({
-                        "modality": modality_str,
-                        "grid_thw": None,
-                        "size": None,
-                        "num_tokens": num_tokens,
-                        "start_idx": start_idx
-                    })
+                    mm_meta_infos.append(
+                        {
+                            "modality": modality_str,
+                            "grid_thw": None,
+                            "size": None,
+                            "num_tokens": num_tokens,
+                            "start_idx": start_idx,
+                        }
+                    )
 
         # Sort by offset start_idx
         mm_meta_infos.sort(key=lambda x: x.get("start_idx", 0))
@@ -3022,7 +3082,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             # This flag will be used in _tokenize_one_request to determine processing path
             if should_dispatch:
                 obj.need_wait_for_mm_inputs = True
-                if self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+                if self.server_args.encoder_transfer_backend in [
+                    "zmq_to_scheduler",
+                    "mooncake",
+                ]:
                     self.mm_receiver.send_encode_request(obj)
             else:
                 obj.need_wait_for_mm_inputs = False
@@ -3094,81 +3157,145 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Latency attributes
         span_attrs.update(state.time_stats.convert_to_gen_ai_span_attrs())
 
-        min_p = sampling_params.get('min_p')
+        min_p = sampling_params.get("min_p")
         if min_p is not None:
             span_attrs[SpanAttributes.GEN_AI_REQUEST_MIN_P] = min_p
-        repetition_penalty = sampling_params.get('repetition_penalty')
+        repetition_penalty = sampling_params.get("repetition_penalty")
         if repetition_penalty is not None:
-            span_attrs[SpanAttributes.GEN_AI_REQUEST_REPETITION_PENALTY] = repetition_penalty
-        frequency_penalty = sampling_params.get('frequency_penalty')
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_REPETITION_PENALTY] = (
+                repetition_penalty
+            )
+        frequency_penalty = sampling_params.get("frequency_penalty")
         if frequency_penalty is not None:
-            span_attrs[SpanAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY] = frequency_penalty
-        presence_penalty = sampling_params.get('presence_penalty')
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY] = (
+                frequency_penalty
+            )
+        presence_penalty = sampling_params.get("presence_penalty")
         if presence_penalty is not None:
-            span_attrs[SpanAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY] = presence_penalty
+            span_attrs[SpanAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY] = (
+                presence_penalty
+            )
 
-        span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS] = state.cached_tokens
-        span_attrs[SpanAttributes.ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING] = state.time_stats.api_server_dispatch_finish_time - state.time_stats.created_time
+        span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS] = (
+            state.cached_tokens
+        )
+        span_attrs[SpanAttributes.ALIPAY_LATENCY_TIME_IN_INPUT_PROCESSING] = (
+            state.time_stats.api_server_dispatch_finish_time
+            - state.time_stats.created_time
+        )
 
         # Use current time since finished_time is not set yet
         current_time = monotonic_time()
 
         if state.scheduler_req_metric:
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] = state.scheduler_req_metric.get_queueing_time()
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD] = state.scheduler_req_metric.get_forward_time()
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] = (
+                state.scheduler_req_metric.get_queueing_time()
+            )
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD] = (
+                state.scheduler_req_metric.get_forward_time()
+            )
             if state.output_ids and len(state.output_ids) > 1:
-                span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = current_time - state.time_stats.first_token_time
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = state.scheduler_req_metric.completion_time - state.scheduler_req_metric.forward_entry_time
+                span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = (
+                    current_time - state.time_stats.first_token_time
+                )
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] = (
+                state.scheduler_req_metric.completion_time
+                - state.scheduler_req_metric.forward_entry_time
+            )
             if state.scheduler_req_metric.prefill_bootstrap_queue_entry_time > 0.0:
                 span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] = 0.0
         # Use API server times for prefill calculation (same process, consistent time base)
-        if state.time_stats.first_token_time and state.time_stats.api_server_dispatch_finish_time:
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = state.time_stats.first_token_time - state.time_stats.api_server_dispatch_finish_time
+        if (
+            state.time_stats.first_token_time
+            and state.time_stats.api_server_dispatch_finish_time
+        ):
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] = (
+                state.time_stats.first_token_time
+                - state.time_stats.api_server_dispatch_finish_time
+            )
         if state.time_stats.first_token_time and state.time_stats.created_time:
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = state.time_stats.first_token_time - state.time_stats.created_time
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] = (
+                state.time_stats.first_token_time - state.time_stats.created_time
+            )
         if state.time_stats.created_time:
-            span_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] = current_time - state.time_stats.created_time
+            span_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] = (
+                current_time - state.time_stats.created_time
+            )
 
         # level 2
         if state.scheduler_req_metric:
             req_metrics_dict = state.scheduler_req_metric.to_selected_dict()
-            if state.obj and hasattr(state.obj, 'metrics'):
+            if state.obj and hasattr(state.obj, "metrics"):
                 req_metrics_dict.update(state.obj.metrics)
-                req_metrics_dict['request_sent_to_scheduler_ts'] = state.time_stats.api_server_dispatch_time + state.time_stats.diff_realtime_monotonic
-            span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = orjson_dumps(req_metrics_dict)
+                req_metrics_dict["request_sent_to_scheduler_ts"] = (
+                    state.time_stats.api_server_dispatch_time
+                    + state.time_stats.diff_realtime_monotonic
+                )
+            span_attrs[SpanAttributes.ALIPAY_REQ_METRIC] = orjson_dumps(
+                req_metrics_dict
+            )
             req_created_time = convert_time_to_realtime(state.time_stats.created_time)
-            if tokens_generation_time := state.scheduler_req_metric.tokens_generation_time:
+            if (
+                tokens_generation_time := state.scheduler_req_metric.tokens_generation_time
+            ):
                 span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_GENERATION_TIME] = (
                     orjson_dumps(
                         [round(x - req_created_time, 4) for x in tokens_generation_time]
                     )
                 )
-            if tokens_scheduled_time := state.scheduler_req_metric.tokens_scheduled_time:
+            if (
+                tokens_scheduled_time := state.scheduler_req_metric.tokens_scheduled_time
+            ):
                 span_attrs[SpanAttributes.GEN_AI_LATENCY_PER_TOKEN_SCHEDULED_TIME] = (
                     orjson_dumps(
                         [round(x - req_created_time, 4) for x in tokens_scheduled_time]
                     )
                 )
-            if tokens_iter_batch_size := state.scheduler_req_metric.tokens_iter_batch_size:
-                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE] = orjson_dumps(tokens_iter_batch_size)
-            if tokens_iter_total_token := state.scheduler_req_metric.tokens_iter_total_token:
-                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS] = orjson_dumps(tokens_iter_total_token)
-            if tokens_iter_waiting_size := state.scheduler_req_metric.tokens_iter_waiting_size:
-                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE] = orjson_dumps(tokens_iter_waiting_size)
+            if (
+                tokens_iter_batch_size := state.scheduler_req_metric.tokens_iter_batch_size
+            ):
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_BATCH_SIZE] = (
+                    orjson_dumps(tokens_iter_batch_size)
+                )
+            if (
+                tokens_iter_total_token := state.scheduler_req_metric.tokens_iter_total_token
+            ):
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_TOTAL_TOKENS] = (
+                    orjson_dumps(tokens_iter_total_token)
+                )
+            if (
+                tokens_iter_waiting_size := state.scheduler_req_metric.tokens_iter_waiting_size
+            ):
+                span_attrs[SpanAttributes.GEN_AI_ITERATION_PER_TOKEN_WAITING_SIZE] = (
+                    orjson_dumps(tokens_iter_waiting_size)
+                )
             # GEN_AI_ITERATION_PER_TOKEN_CACHED_TOKENS
             if state.output_ids and len(state.output_ids) >= state.completion_tokens:
-                span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS] = orjson_dumps(([id for id in state.output_ids[-state.completion_tokens:]]))
+                span_attrs[
+                    SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_TOKEN_IDS
+                ] = orjson_dumps(
+                    ([id for id in state.output_ids[-state.completion_tokens :]])
+                )
                 # GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS
                 decode_tokens = state.text_in_list
                 if decode_tokens and len(decode_tokens) >= state.completion_tokens:
-                    span_attrs[SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS] = orjson_dumps([token_name for token_name in decode_tokens[-state.completion_tokens:]])
+                    span_attrs[
+                        SpanAttributes.GEN_AI_RESPONSE_PER_TOKEN_CANDIDATE_DECODED_TOKENS
+                    ] = orjson_dumps(
+                        [
+                            token_name
+                            for token_name in decode_tokens[-state.completion_tokens :]
+                        ]
+                    )
             span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = ENHANCED_TRACE_LEVEL
         else:
             span_attrs[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE_LEVEL
 
         # Ant Group specific
         if sampling_params:
-            span_attrs[SpanAttributes.ALIPAY_REQUEST_PARAMS] = orjson_dumps(sampling_params)
+            span_attrs[SpanAttributes.ALIPAY_REQUEST_PARAMS] = orjson_dumps(
+                sampling_params
+            )
         span_attrs[SpanAttributes.APP_NAME] = APP_NAME
         if env_info := get_env_info():
             if pod_ip := env_info.pod_ip:

@@ -19,16 +19,16 @@ processes (TokenizerManager, DetokenizerManager, Scheduler).
 from __future__ import annotations
 
 import copy
-import json
+import dataclasses
 import uuid
 from abc import ABC
 from collections import Counter
-import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import torch
+from orjson import dumps as orjson_dumps
 
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.managers.embed_types import PositionalEmbeds
@@ -41,7 +41,6 @@ from sglang.srt.observability.req_time_stats import (
 )
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.utils import ImageData
-from orjson import dumps as orjson_dumps
 
 # Handle serialization of Image for pydantic
 if TYPE_CHECKING:
@@ -250,6 +249,7 @@ class GenerateReqInput(BaseReq):
     # For EPD-disaggregated inference
     need_wait_for_mm_inputs: Optional[bool] = None
     num_items_assigned: Optional[Dict[Modality, List[int]]] = None
+    mm_data_mooncake: Optional[List] = None
 
     # Multimodal tiling controls (extensions)
     max_dynamic_patch: Optional[int] = None
@@ -796,6 +796,7 @@ class TokenizedGenerateReqInput(BaseReq):
 
     need_wait_for_mm_inputs: bool = False
     num_items_assigned: Optional[Dict[Modality, List[int]]] = None
+    mm_data_mooncake: Optional[List] = None
 
     # Pre-computed delimiter indices for multi-item scoring
     multi_item_delimiter_indices: Optional[List[int]] = None
@@ -1072,6 +1073,7 @@ class BatchTokenizedEmbeddingReqInput(BaseBatchReq):
     def __iter__(self):
         return iter(self.batch)
 
+
 @dataclass
 class ReqMetric:
     # token level stats
@@ -1101,20 +1103,21 @@ class ReqMetric:
 
     def to_selected_dict(self) -> Dict[str, Any]:
         return {
-                "wait_queue_size": self.wait_queue_size,
-                "wait_queue_entry_time": self.wait_queue_entry_time,
-                "forward_entry_time": self.forward_entry_time,
-                "completion_time": self.completion_time,
-                "prefill_bootstrap_queue_entry_time": self.prefill_bootstrap_queue_entry_time,
-                "prefill_transfer_queue_entry_time": self.prefill_transfer_queue_entry_time,
-                "decode_prealloc_queue_entry_time": self.decode_prealloc_queue_entry_time,
-                "decode_transfer_queue_entry_time": self.decode_transfer_queue_entry_time,
-                "arrive_time": self.arrive_time,
-                "arrive_time_ts": self.arrive_time_ts,
-            }
+            "wait_queue_size": self.wait_queue_size,
+            "wait_queue_entry_time": self.wait_queue_entry_time,
+            "forward_entry_time": self.forward_entry_time,
+            "completion_time": self.completion_time,
+            "prefill_bootstrap_queue_entry_time": self.prefill_bootstrap_queue_entry_time,
+            "prefill_transfer_queue_entry_time": self.prefill_transfer_queue_entry_time,
+            "decode_prealloc_queue_entry_time": self.decode_prealloc_queue_entry_time,
+            "decode_transfer_queue_entry_time": self.decode_transfer_queue_entry_time,
+            "arrive_time": self.arrive_time,
+            "arrive_time_ts": self.arrive_time_ts,
+        }
 
     def to_selected_json(self) -> str:
         return orjson_dumps(self.to_selected_dict())
+
 
 @dataclass
 class MMProcessMetrics:
@@ -1127,6 +1130,7 @@ class MMProcessMetrics:
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
+
 
 @dataclass
 class BatchTokenIDOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):

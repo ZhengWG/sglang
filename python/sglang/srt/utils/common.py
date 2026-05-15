@@ -87,7 +87,7 @@ from starlette.routing import Mount
 from torch import nn
 from torch.library import Library
 from torch.utils._contextlib import _DecoratorContextManager
-from torchvision.io import ImageReadMode, decode_image, read_image, decode_jpeg
+from torchvision.io import ImageReadMode, decode_image, decode_jpeg, read_image
 from torchvision.transforms.v2 import functional as F
 from typing_extensions import Literal
 
@@ -113,6 +113,7 @@ COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
 
 _BACKEND = "decord"
+
 
 # https://pytorch.org/docs/stable/notes/hip.html#checking-for-hip
 @lru_cache(maxsize=1)
@@ -2443,6 +2444,8 @@ class SafeUnpickler(pickle.Unpickler):
         "sglang.srt.model_executor.model_runner.",
         "sglang.srt.layers.",
         "sglang.srt.utils.",
+        "sglang.srt.disaggregation.",
+        "sglang.srt.managers.",
         "torch_npu.",
     }
 
@@ -2481,6 +2484,16 @@ class SafeUnpickler(pickle.Unpickler):
 def safe_pickle_load(fp):
     """Drop-in replacement for pickle.load() that blocks unsafe class loading."""
     return SafeUnpickler(fp).load()
+
+
+def safe_pickle_loads(data):
+    """Drop-in replacement for pickle.loads() that blocks unsafe class loading."""
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        buf = bytes(data)
+    else:
+        # zmq.Frame and other buffer-protocol objects
+        buf = bytes(memoryview(data))
+    return SafeUnpickler(io.BytesIO(buf)).load()
 
 
 def debug_timing(func):
