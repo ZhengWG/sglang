@@ -254,6 +254,18 @@ def _slice_streaming_output_meta_info(
         meta_info[key] = meta_info[key][last_output_offset:]
 
 
+def _append_stream_trace_text(
+    state: ReqState,
+    delta_text: str,
+    delta_output_ids: List[int],
+) -> None:
+    if not delta_output_ids:
+        return
+
+    state.text_in_list.append(delta_text)
+    state.text_in_list.extend([""] * (len(delta_output_ids) - 1))
+
+
 class InputFormat(Enum):
     """Input format types for tokenization handling."""
 
@@ -1895,6 +1907,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         "cached_tokens": recv_obj.cached_tokens[i],
                     }
                 )
+                state.prompt_tokens = recv_obj.prompt_tokens[i]
+                state.completion_tokens = recv_obj.completion_tokens[i]
                 state.cached_tokens = recv_obj.cached_tokens[i]
                 # Add detailed cache breakdown if available
                 if (
@@ -1939,6 +1953,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 output_offset = state.last_output_offset
                 state.append_text(delta_text)
                 state.output_ids.extend(delta_output_ids)
+                if is_stream and self.enable_trace:
+                    _append_stream_trace_text(state, delta_text, delta_output_ids)
 
                 if is_stream:
                     if incremental:
@@ -1950,21 +1966,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                             "output_ids": output_token_ids,
                             "meta_info": meta_info,
                         }
-                        # req trace metric stats
-                        if self.enable_trace:
-                            if len(delta_output_ids) >= 1:
-                                state.text_in_list.append(delta_text)
-                                for _ in range(len(delta_output_ids) - 1):
-                                    state.text_in_list.append("")
                     elif state.finished:
                         out_dict = {
                             "text": state.get_text(),
                             "output_ids": state.output_ids.copy(),
                             "meta_info": meta_info,
                         }
-                        # req trace metric stats
-                        if self.enable_trace:
-                            state.text_in_list.extend(self.tokenizer.batch_decode(delta_output_ids))
                     else:
                         # Non-incremental intermediate: pass reference (no
                         # copy) and defer text to _wait_one_response to avoid

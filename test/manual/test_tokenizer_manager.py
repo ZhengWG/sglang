@@ -22,6 +22,7 @@ from sglang.srt.managers.tokenizer_manager import (
     InputFormat,
     ReqState,
     TokenizerManager,
+    _append_stream_trace_text,
 )
 from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -478,6 +479,17 @@ class TestReqStateCrashDump(unittest.TestCase):
             state.get_crash_dump_output(),
             {"text": "hello", "output_ids": [10, 20]},
         )
+
+
+class TestReqStateTraceText(unittest.TestCase):
+    """Test per-token decoded text accumulation for tracing."""
+
+    def test_append_stream_trace_text_aligns_with_token_ids(self):
+        state = _make_state()
+        _append_stream_trace_text(state, "hello", [10])
+        _append_stream_trace_text(state, " world", [20, 21])
+
+        self.assertEqual(state.text_in_list, ["hello", " world", ""])
 
 
 if __name__ == "__main__":
