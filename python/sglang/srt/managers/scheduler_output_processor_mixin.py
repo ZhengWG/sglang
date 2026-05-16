@@ -76,7 +76,7 @@ class SchedulerOutputProcessorMixin:
                 "host": req.cached_tokens_host,
             }
             # Only include storage fields if L3 storage is enabled
-            if getattr(self, "enable_hicache_storage", False):
+            if self.enable_hicache_storage:
                 details["storage"] = req.cached_tokens_storage
                 details["storage_backend"] = self._get_storage_backend_type()
             return details
@@ -1270,7 +1270,7 @@ class SchedulerOutputProcessorMixin:
 
             if (
                 req.finished()
-                and self.attn_tp_rank == 0
+                and self.ps.attn_tp_rank == 0
                 and self.server_args.enable_request_time_stats_logging
             ):
                 req.log_time_stats()
@@ -1304,7 +1304,7 @@ class SchedulerOutputProcessorMixin:
             if req.finished():
                 req.release_mm_resources()
 
-        dp_ranks = [self.dp_rank] * len(rids) if rids else None
+        dp_ranks = [self.ps.dp_rank] * len(rids) if rids else None
 
         # Send to detokenizer
         if reqs or is_idle_batch:

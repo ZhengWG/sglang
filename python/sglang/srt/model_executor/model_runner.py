@@ -30,7 +30,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -295,6 +295,8 @@ POST_LOAD_MODEL_WEIGHT = get_bool_env_var("SGLANG_POST_LOAD_MODEL_WEIGHT")
 
 logger = logging.getLogger(__name__)
 
+_UNSET: Any = object()
+
 
 def resolve_language_model(model: nn.Module) -> nn.Module:
     model_cls_name = model.__class__.__name__
@@ -423,7 +425,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.dflash_draft_num_layers = None
         if self.spec_algorithm.is_eagle3() and not self.is_draft_worker:
             # load draft config
-            draft_model_config = self._build_model_config(
+            draft_model_config = ModelConfig.from_server_args(
                 server_args,
                 model_path=(server_args.speculative_draft_model_path),
                 model_revision=server_args.speculative_draft_model_revision,
@@ -455,7 +457,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
             # Select target layers to capture for building DFlash context features.
-            draft_model_config = self._build_model_config(
+            draft_model_config = ModelConfig.from_server_args(
                 server_args,
                 model_path=(server_args.speculative_draft_model_path),
                 model_revision=server_args.speculative_draft_model_revision,
@@ -540,6 +542,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # For hisparse (must be set before initialize() so CUDA graph capture can see it)
         self.hisparse_coordinator = None
 
+        self._linear_attn_registry_cache: Any = _UNSET
+
         # Initialize the model runner
         self.initialize(pre_model_load_memory)
         self.check_quantized_moe_compatibility()
@@ -569,19 +573,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # For weight updates
         self._model_update_group = {}
         self._weights_send_group = {}
-
-        if not hasattr(self, "hisparse_coordinator"):
-            self.hisparse_coordinator = None
-
-    def _build_model_config(
-        self, server_args, model_path=None, model_revision=None, is_draft_model=False
-    ):
-        return ModelConfig.from_server_args(
-            server_args,
-            model_path=model_path,
-            model_revision=model_revision,
-            is_draft_model=is_draft_model,
-        )
 
     def init_msprobe(self):
         # Init the msprobe
@@ -651,11 +642,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         self.expert_location_updater = ExpertLocationUpdater()
 
-        (
+        if self.server_args.elastic_ep_backend:
             ElasticEPStateManager.init(self.server_args)
-            if self.server_args.elastic_ep_backend
-            else None
-        )
 
         # lora mode does not support post loading
         if server_args.enable_lora:
@@ -1366,7 +1354,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 # Single warmup all_reduce to initialize NCCL/RCCL communicator
                 warmup_tensor = torch.zeros(1, device=torch.cuda.current_device())
                 dist.all_reduce(warmup_tensor, group=tp_group_handle)
-                torch.cuda.synchronize()
+                current_platform.synchronize()
 
                 warmup_elapsed = time.perf_counter() - warmup_start
                 logger.info(
@@ -1580,8 +1568,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         # Register model for layerwise NVTX profiling if enabled
         if self.server_args.enable_layerwise_nvtx_marker:
-            self.pyt_hooks = PytHooks()
-            self.pyt_hooks.register_hooks(self.model, module_prefix="model")
+            pyt_hooks = PytHooks()
+            pyt_hooks.register_hooks(self.model, module_prefix="model")
 
         if self.server_args.kv_cache_dtype == "fp8_e4m3":
             if self.server_args.quantization_param_path is not None:
@@ -1932,7 +1920,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             f"group_rank={group_rank}, world_size={world_size}, group_name={group_name}, backend={backend}"
         )
 
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         success = False
         message = ""
         try:
@@ -1952,7 +1940,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             message = f"Failed to init group: {e}."
             logger.error(message)
 
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         return success, message
 
     def send_weights_to_remote_instance(
@@ -1980,7 +1968,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(message)
             return False, message
 
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         success = False
         na = NetworkAddress(master_address, group_port)
         message = ""
@@ -2000,7 +1988,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # destroy the process group after sending weights
         del self._weights_send_group[group_name]
         torch.distributed.distributed_c10d.destroy_process_group(send_group)
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
         return success, message
 
     def init_weights_update_group(
@@ -2165,8 +2153,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
         # We need to get device after patch otherwise the device would be wrong
-        self.device_module = torch.get_device_module(self.device)
-        infered_device = self.device_module.current_device()
+        device_module = torch.get_device_module(self.device)
+        infered_device = device_module.current_device()
 
         named_tensors = [
             (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank, device=infered_device))
@@ -2400,7 +2388,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     def _get_linear_attn_registry_result(self):
-        if not hasattr(self, "_linear_attn_registry_cache"):
+        if self._linear_attn_registry_cache is _UNSET:
             self._linear_attn_registry_cache = get_linear_attn_config(
                 self.model_config.hf_config
             )
