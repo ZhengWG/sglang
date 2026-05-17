@@ -87,15 +87,9 @@ class LoadConfig:
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
     remote_instance_weight_loader_backend: Optional[str] = None
     remote_instance_weight_loader_transfer_engine: Optional[Any] = None
+    remote_instance_weight_loader_transfer_engine_session_id: Optional[str] = None
     modelexpress_url: Optional[str] = None
-    modelexpress_model_name: Optional[str] = None
-    # Fields for building SourceIdentity (needed by both seed and client)
-    modelexpress_tp_size: Optional[int] = None
-    modelexpress_pp_size: Optional[int] = None
-    modelexpress_ep_size: Optional[int] = None
-    modelexpress_dtype: Optional[str] = None
-    modelexpress_quantization: Optional[str] = None
-    modelexpress_transport: str = "transfer_engine"
+    modelexpress_transport: str = "nixl"
 
     rfork_worker: Optional[RForkWorker] = None
     rfork_fallback_load_format: Optional[Union[str, LoadFormat]] = None
