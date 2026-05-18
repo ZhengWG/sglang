@@ -926,6 +926,12 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     if mm_inputs is None:
                         if self.enable_metrics:
                             preprocessing_start_time = time.perf_counter()
+
+                        if self.server_args.language_only:
+                            logger.warning(
+                                "Encoder embedding not available, "
+                                "falling back to local mm processing"
+                            )
                         mm_inputs = await self.mm_processor.process_mm_data_async(
                             image_data=obj.image_data,
                             audio_data=obj.audio_data,
