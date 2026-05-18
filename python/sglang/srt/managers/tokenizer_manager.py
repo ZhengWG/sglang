@@ -1958,8 +1958,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 output_offset = state.last_output_offset
                 state.append_text(delta_text)
                 state.output_ids.extend(delta_output_ids)
-                if is_stream and self.enable_trace:
-                    _append_stream_trace_text(state, delta_text, delta_output_ids)
 
                 if self.enable_trace and delta_output_ids:
                     if is_stream:
