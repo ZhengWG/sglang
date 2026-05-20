@@ -25,6 +25,7 @@ dependencies = [
   "cuda-python>=13.0",
   "decord2",
   "datasets",
+  "distro",
   "einops",
   "fastapi",
   "flashinfer_python[cu13]==0.6.11.post1", # keep it aligned with jit-cache version in Dockerfile
