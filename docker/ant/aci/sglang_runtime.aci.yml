@@ -1,0 +1,362 @@
+# 这个文件用来备份记录打包制作sglang runtime镜像的流水线
+# 参考社区 .github/workflows/release-pypi.yml 和 .github/workflows/release-whl-kernel.yaml,
+# 以及 .github/workflows/release-docker-runtime.yml
+
+version: "2.0"
+stages:
+  - Verify-Parameters
+  - Build-Wheels
+  - Build-Image
+  - STC-Scan
+  - Image-Scan
+  - Push-Image
+
+triggers:
+  git:
+    push:
+      branches:
+        - ^master$
+    tagPush:
+      tags:
+        - ".*"
+    pullRequest:
+      targetBranches:
+        - "^master$"
+
+parameters:
+  build_whl_only: "false"
+  build_sglang_whl_only: "false"
+  skip_build_stage: "false"
+  cuda_version_full: "13.0.1" # 12.9.1 or 13.0.1
+  torch_version: "2.11.0" # 改成2.9.1之外的版本时，需要同时配置 cu_tag
+  python_version: "3.12" # 3.12默认安装了torch,uv 等组件，构建比较快, 而且社区runtime里用的也是python3.12
+  max_jobs: 24 # ninja编译并发度, 一般不用修改
+  nvcc_threads: 4 # nvcc编译并发度, 一般不用修改
+  sglang_kernel_whl_url: ""
+  sglang_whl_url: ""
+  deepgemm_whl_url: "" # deepgemm已经编译到sglang-kernel包,不需要安装了，如果安装老版本的sglang，需要安装这个包
+  flashmla_whl_url: "" # 同上，可选项
+  deepep_whl_url: "" # 同上，可选项
+  transfer_engine_whl_url: "" # 如果有开源或者内部预编译的transfer-engine whl包，可以通过这个参数传递给dockerfile安装，否则会在dockerfile里编译安装, 如果指定安装，需要确认kvpool版本和依赖和sglang一致，在Dockerfile中 pip installl --no-deps 安装，避免破坏sglang依赖的包版本
+  kvpool_whl_url: "" # 蚂蚁内部的kvpool whl包，默认不安装，同上，--no-deps模式，避免破坏sglang依赖的包版本
+  runtime_base_image:  "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc" # runtime基础镜像，社区是ubuntu，蚂蚁内部有更适合的基础镜像，使用这个文档里的ngc镜像：https://yuque.antfin.com/antos/linux/fcia0gilxedyiuy9#s0g2S "registry.cn-hangzhou.aliyuncs.com/augusto/cuda" "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc"
+  runtime_base_image_version: "25.08" # 蚂蚁内部镜像 25.06是cuda 12.9.1.010， 25.08是cuda 13.0.0.044， cuda镜像12.9.1 tag为12.9.1-cudnn-devel-ubuntu24.04， 13.0.1的tag为13.0.1-cudnn-devel-ubuntu24.04
+  ubuntu_mirror: "https://mirrors.aliyun.com" # 构建过程中使用的ubuntu镜像源，默认使用阿里云镜像源，其他可选项还有：mirrors.tuna.tsinghua.edu.cn、mirrors.ustc.edu.cn、mirrors.cloud.tencent.com等
+  pip_default_index: "https://pypi.antfin-inc.com/simple" # 构建过程中使用的pip安装源，默认使用蚂蚁内部镜像源，其他可选项还有：https://pypi.tuna.tsinghua.edu.cn/simple、https://mirrors.aliyun.com/pypi/simple等
+  github_artifactory: "github.ednovas.xyz/https://github.com" # 由于github在国内访问不稳定，构建过程中访问github的地址可以替换成这个镜像地址，默认不替换，如果需要替换，在dockerfile里访问github的地方需要替换成这个地址
+  install_flashinfer_jit_cache: "1"
+  runtime_version: "1.1.15"
+  runtime_llm_version: "1.1.9"
+  image_build_target: "runtime" # 可选值为runtime(生产镜像) 或者 framework_final(开发调试镜像)
+  enable_below_sm90: ON # 是否支持sm90以下的GPU，默认支持,可选值为[ ON, OFF ]
+
+jobs:
+  verify_parameters:
+    stage: Verify-Parameters
+    id: verify_params
+    component: shell-with-env
+    inputs:
+      script: |
+        python --version
+        export CUDA_VERSION_FULL=${{parameters.cuda_version_full}}
+        export PYTHON_VERSION=${{parameters.python_version}}
+        export CUDA_VERSION=$(echo "$CUDA_VERSION_FULL" | cut -d. -f1-2)
+        export PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
+        case "${CUDA_VERSION}" in
+          13.0) TORCH_VER=2.11.0; CU_TAG=cu130 ;;
+          12.9) TORCH_VER=2.11.0; CU_TAG=cu129 ;;
+          12.8) TORCH_VER=2.11.0; CU_TAG=cu128 ;;
+          *)    TORCH_VER=2.11.0; CU_TAG=cu126 ;;
+        esac
+        export CU_TAG=${CU_TAG}
+        cat <<EOF > format_output.py
+        import json
+        import os
+        result = {}
+        for key in [ "CU_TAG", "CUDA_VERSION", "PY_TAG" ]:
+          result[key.lower()] = os.getenv(key)
+        print(json.dumps(result, separators=(",", ":")))
+        EOF
+        add_output output "$(python format_output.py)"
+  sglang_cpu_build_torch291:
+    id: sglang_cpu_build_torch291
+    stage: Build-Wheels
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.skip_build_stage}}
+    component: ant-cxx-build
+    inputs:
+      environmentLabel: ant-cxx-build
+      gitDepth: 1000
+      framework: custom
+      image: reg.docker.alibaba-inc.com/sglang/theta_sglang_build:${{jobs.verify_params.outputs.output.py_tag}}-cuda${{jobs.verify_params.outputs.output.cuda_version}}
+      workspaceCachePath: /.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}
+      timeout: 28800
+      script: |
+        set -eux
+        export ACI_VAR_OSS_URL="${{secrets.OSS_URL}}"
+        export ACI_VAR_OSS_AI="${{secrets.OSS_AI}}"
+        export ACI_VAR_OSS_AK="${{secrets.OSS_AK}}"
+        export ACI_COMMIT_SHA="${{parameters.ACI_COMMIT_SHA}}"
+        export CCACHE_DIR="/.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}"
+        export CCACHE_BACKEND=""
+        export CCACHE_KEEP_LOCAL_STORAGE="TRUE"
+        unset CCACHE_READONLY
+
+        # 参考sglang/sgl-kernel/build.sh中构建部分
+        export USE_CCACHE=1
+        export CCACHE_MAXSIZE=10G
+        export CCACHE_COMPILERCHECK=content
+        export CCACHE_COMPRESS=true
+        export CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime
+        export CMAKE_C_COMPILER_LAUNCHER=ccache
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+        export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+        echo "=== ccache stats (before) ==="
+        ccache -sV
+        export PYTHON_VERSION=${{parameters.python_version}}
+        export PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
+        export CMAKE_BUILD_PARALLEL_LEVEL=${{parameters.max_jobs}}
+        export NVCC_THREADS=${{parameters.nvcc_threads}}
+        export CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}}
+        export PRE_DEFINED_TORCH_VER="${{parameters.torch_version}}"
+        export PRE_DEFINED_CU_TAG="${{jobs.verify_params.outputs.output.cu_tag}}"
+        export BUILD_SGLANG_WHL_ONLY="${{parameters.build_sglang_whl_only}}"
+
+        # 检查是否需要安装torch, uv等编译组件
+        torch_version=$(/opt/python/${PY_TAG}/bin/python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+        if [ "$torch_version" != "${PRE_DEFINED_TORCH_VER}+${PRE_DEFINED_CU_TAG}" ]; then
+          /opt/python/${PY_TAG}/bin/pip install torch==${PRE_DEFINED_TORCH_VER} --index-url https://download.pytorch.org/whl/${PRE_DEFINED_CU_TAG}
+        fi
+        if [ "/opt/python/${PY_TAG}" != "${PYTHON_ROOT_PATH}" ]; then
+          export PYTHON_ROOT_PATH=/opt/python/${PY_TAG}
+          ${PYTHON_ROOT_PATH}/bin/pip install ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url https://pypi.antfin-inc.com/simple
+        fi
+
+        export ENABLE_BELOW_SM90=${{parameters.enable_below_sm90}}
+        export CMAKE_ARGS="${CMAKE_ARGS:-} -DENABLE_BELOW_SM90=${ENABLE_BELOW_SM90} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS}"
+        echo "Build parallelism: CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}, NVCC_THREADS=${NVCC_THREADS}"
+
+
+        # 蚂蚁内部构建使用的镜像等
+        pip install mitmproxy -i https://pypi.antfin-inc.com/simple
+        echo '203.209.245.43  github.com' >> /etc/hosts
+        export CMAKE_TLS_VERIFY=0
+        echo "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz http://cmps-model.cn-hangzhou.alipay.aliyun-inc.com/deze/sglang/proxy/nlohmann/json/releases/download/v3.11.3/json.tar.xz" > map_url
+        curl http://cmps-model.cn-hangzhou.alipay.aliyun-inc.com/deze%2Fsglang%2Fproxy%2Fproxy.py > proxy.py
+        mitmdump -s proxy.py --listen-port 8192 2>&1 &
+
+        # 注意，下面这些地址已经替换了github的原地址，如果出现分支或者commit id不存在的情况，请更新对应的antcode仓库
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        ssh-keyscan code.alipay.com >> ~/.ssh/known_hosts
+        curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "git remote add origin_ssh git@code.alipay.com:Theta/SGLang.git && git fetch origin_ssh --tag"
+
+        #git config --global url."https://github.ednovas.xyz/https://github.com".insteadOf "https://github.com"
+        git config --global url."https://gitee.com/mirrors/mkl-dnn.git".insteadOf "https://github.com/intel/mkl-dnn.git"
+        git config --global url."https://gitee.com/mirrors/gflags.git".insteadOf "https://github.com/gflags/gflags.git"
+        git config --global url."https://gitee.com/staugust/pfs.git".insteadOf "https://github.com/dtrugman/pfs.git"
+        git config --global url."https://gitee.com/mirrors/nccl".insteadOf "https://github.com/NVIDIA/nccl"
+        git config --global url."https://gitee.com/mirrors/fmt.git".insteadOf "https://github.com/fmtlib/fmt.git"
+        git config --global url."https://gitee.com/mirrors/fmt".insteadOf "https://github.com/fmtlib/fmt"
+        git config --global url."https://gitee.com/staugust/cutlass.git".insteadOf "https://github.com/NVIDIA/cutlass.git"
+        git config --global url."https://gitee.com/staugust/cutlass".insteadOf "https://github.com/NVIDIA/cutlass"
+
+        # 蚂蚁内部的镜像仓库
+        git config --global url."git@code.alipay.com:Theta/cuLA.git".insteadOf "https://code.alipay.com/Theta/cuLA.git"
+        git config --global url."git@code.alipay.com:inference/DeepGEMM.git".insteadOf https://github.com/deepseek-ai/DeepGEMM.git
+        git config --global url."git@code.alipay.com:inference/DeepGEMM".insteadOf https://github.com/deepseek-ai/DeepGEMM
+        git config --global url."git@code.alipay.com:inference_thirdparty/dlpack.git".insteadOf https://github.com/dmlc/dlpack.git
+        git config --global url."git@code.alipay.com:Theta/flash-linear-attention.git".insteadOf "https://github.com/fla-org/flash-linear-attention.git"
+        git config --global url."git@code.alipay.com:inference_thirdparty/spdlog.git".insteadOf https://github.com/gabime/spdlog.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/turbomind".insteadOf https://github.com/InternLM/turbomind
+        git config --global url."git@code.alipay.com:inference_thirdparty/cccl.git".insteadOf https://github.com/NVIDIA/cccl.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/nvbench.git".insteadOf https://github.com/NVIDIA/nvbench.git
+        git config --global url."git@code.alipay.com:inference/composable_kernel.git".insteadOf https://github.com/ROCm/composable_kernel.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/fast-hadamard-transform.git".insteadOf https://github.com/sgl-project/fast-hadamard-transform.git
+        git config --global url."git@code.alipay.com:inference/flashinfer.git".insteadOf https://github.com/sgl-project/flashinfer.git
+        git config --global url."git@code.alipay.com:inference/flashinfer".insteadOf https://github.com/sgl-project/flashinfer
+        git config --global url."git@code.alipay.com:inference_thirdparty/FlashMLA".insteadOf https://github.com/sgl-project/FlashMLA
+        git config --global url."git@code.alipay.com:inference/sgl-attn.git".insteadOf https://github.com/sgl-project/sgl-attn.git
+        git config --global url."git@code.alipay.com:inference/sgl-attn".insteadOf https://github.com/sgl-project/sgl-attn
+        git config --global url."git@code.alipay.com:inference_thirdparty/triton.git".insteadOf "https://github.com/triton-lang/triton.git"
+        git config --global url."git@code.alipay.com:inference_thirdparty/triton".insteadOf "https://github.com/triton-lang/triton"
+        git config --global url."git@code.alipay.com:inference/flashinfer.git".insteadOf "https://github.com/flashinfer-ai/flashinfer.git"
+        git config --global url."git@code.alipay.com:inference/flashinfer".insteadOf "https://github.com/flashinfer-ai/flashinfer"
+        git config --global url."git@code.alipay.com:inference/DeepGEMM.git".insteadOf "https://github.com/sgl-project/DeepGEMM.git"
+        git config --global url."git@code.alipay.com:inference/DeepGEMM".insteadOf "https://github.com/sgl-project/DeepGEMM"
+        git config --global url."git@code.alipay.com:inference_thirdparty/flash-attention.git".insteadOf "https://github.com/Dao-AILab/flash-attention.git"
+        git config --global url."git@code.alipay.com:inference_thirdparty/flash-attention".insteadOf "https://github.com/Dao-AILab/flash-attention"
+        git config --global url."git@code.alipay.com:inference_thirdparty/googletest.git".insteadOf https://github.com/google/googletest.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/googletest".insteadOf https://github.com/google/googletest
+        git config --global url."git@code.alipay.com:inference_thirdparty/mscclpp.git".insteadOf https://github.com/microsoft/mscclpp.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/mscclpp".insteadOf https://github.com/microsoft/mscclpp
+        git config --global url."git@code.alipay.com:inference_thirdparty/robin-map.git".insteadOf https://github.com/Tessil/robin-map.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/robin-map".insteadOf https://github.com/Tessil/robin-map
+        git config --global url."git@code.alipay.com:inference_thirdparty/nanobind.git".insteadOf https://github.com/wjakob/nanobind.git
+        git config --global url."git@code.alipay.com:inference_thirdparty/nanobind".insteadOf https://github.com/wjakob/nanobind
+
+        cat ~/.gitconfig
+
+
+        export CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}}
+        export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX"
+        # support blackwell
+        #if [ "${CUDA_VERSION}" == "13.0" ]; then
+        #  export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX 10.0 10.0a 10.0+PTX"
+        #elif [ "${CUDA_VERSION}" == "12.9" ]; then
+        #  export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX"
+        #fi
+
+        cd ./sgl-kernel
+        git diff
+        for i in {1..100}
+        do
+          curl --silent --max-time 1 http://127.0.0.1:8192/ > /dev/null 2>&1 && stat ~/.mitmproxy/mitmproxy-ca-cert.pem && break
+          sleep 1
+        done
+        export http_proxy=http://127.0.0.1:8192
+        export https_proxy=http://127.0.0.1:8192
+        cp ~/.mitmproxy/mitmproxy-ca-cert.pem /etc/pki/ca-trust/source/anchors/ && update-ca-trust
+        cat /root/.mitmproxy/mitmproxy-ca-cert.pem >> /opt/conda/ssl/cacert.pem
+        cat /root/.mitmproxy/mitmproxy-ca-cert.pem >> ${SSL_CERT_FILE}
+        if [ "${BUILD_SGLANG_WHL_ONLY}" == "true" ]; then
+          mkdir dist
+          touch dist/sglang_kernel-0.0.0.dev-py3-none-any.whl
+        else
+          curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation"
+          PYTHON=${PYTHON_ROOT_PATH}/bin/python ./rename_wheels.sh
+        fi
+
+        # 构建完成之后，输出ccache stats
+        if [ "${USE_CCACHE}" = "1" ]; then
+          echo "=== ccache stats (after) ==="
+          ccache -s
+        fi
+        pwd
+        ls -lh dist/
+        wheel_file=$(ls -1 "dist/" | head -n 1)
+        echo "ACB_BUILD_DIR=${ACB_BUILD_DIR}"
+        mkdir -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sgl_kernel
+        cp dist/${wheel_file} -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sgl_kernel/
+
+        # 构建sglang whl
+        # 参考 .github/workflows/release-pypi.yml
+        cd ../python
+        cp ../README.md ../LICENSE .
+        ${PYTHON_ROOT_PATH}/bin/pip install build wheel "setuptools-scm>=8.0" "setuptools-rust>=1.10" -i https://pypi.antfin-inc.com/simple
+        ${PYTHON_ROOT_PATH}/bin/python -m build --wheel --no-isolation
+        pwd
+        ls -lh dist/
+        wheel_file=$(ls -1 "dist/" | head -n 1)
+        echo "ACB_BUILD_DIR=${ACB_BUILD_DIR}"
+        mkdir -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sglang
+        cp dist/${wheel_file} -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sglang/
+
+      artifacts:
+        - name: sglang_kernel
+          type: file
+          path: ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sgl_kernel/sgl*_kernel*.whl
+        - name: sglang
+          type: file
+          path: ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sglang/sglang*.whl
+
+  构建sglang镜像:
+    stage: Build-Image
+    component: docker-image-build
+    id: build-image
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+    inputs:
+      imageName: reg.docker.alibaba-inc.com/sglang/deepep-base # 构建产物镜像名称(不含tag), 如: reg.docker.alibaba-inc.com/antcodebuild/test-image-build
+      imageTag: ${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}} # 构建产物镜像 tag
+      dockerfile: ./docker/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
+      contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
+      buildArgs: SGLANG_BUILD_COMMIT=${{vcs.commitShortSha}},SGLANG_BUILD_URL=${{pipeline.url}},RUNTIME_BASE_IMAGE=${{parameters.runtime_base_image}}:${{parameters.runtime_base_image_version}},CUDA_VERSION=${{parameters.cuda_version_full}},SGLANG_KERNEL_WHL_URL=${{parameters.sglang_kernel_whl_url}},SGLANG_WHL_URL=${{parameters.sglang_whl_url}},SGLANG_KERNEL_CURRENT_WHL=${{jobs.sglang_cpu_build_torch291.outputs.artifacts.sglang_kernel.url}},SGLANG_CURRENT_WHL=${{jobs.sglang_cpu_build_torch291.outputs.artifacts.sglang.url}},DEEPGEMM_WHL_URL=${{parameters.deepgemm_whl_url}},FLASHMLA_WHL_URL=${{parameters.flashmla_whl_url}},DEEPEP_WHL_URL=${{parameters.deepep_whl_url}},TRANSFER_ENGINE_WHL_URL=${{parameters.transfer_engine_whl_url}},KVPOOL_WHL_URL=${{parameters.kvpool_whl_url}},UBUNTU_MIRROR=${{parameters.ubuntu_mirror}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},INSTALL_FLASHINFER_JIT_CACHE=${{parameters.install_flashinfer_jit_cache}},RUNTIME_VERSION=${{parameters.runtime_version}},RUNTIME_LLM_VERSION=${{parameters.runtime_llm_version}} # docker build 的 args 参数，格式为 key1=value1,key2=value2，注意key/value的格式，不能有空格、双引号等特殊字符
+      compression: uncompressed # 为新创建和缓存的镜像层选择压缩类型，默认值为未压缩uncompressed
+      forceCompression: false # 对所有镜像层强制应用压缩类型compression(包括已经存在的层)
+      registryUsername: null # 镜像 registry 用户名，建议使用 aci secrets 方式传递，避免泄露 (reg.docker.alibaba-inc.com、acs-reg.alipay.com 不传时默认使用平台公共账号 admin.for.antb)
+      registryPassword: null # 镜像 registry 密码，建议使用 aci secrets 方式传递，避免泄露 (不传使用平台公共账号)
+      skipWhenImageExists: null # true | false, 如果镜像已存在，是否跳过镜像构建，默认 false
+      errWhenImageExists: null # true | false, 如果镜像已存在，是否直接失败，默认 true
+      beforeScript: null # 前置脚本，按需传递 (在 ${ACB_BUILD_DIR}/code-repo 下执行)
+      beforeScriptImage: null  # 指定前置脚本运行环境镜像，beforeScript 不为空时需要传值(不传使用默认基础alios镜像)
+      afterScript: null # 后置脚本，按需传递 (在 ${ACB_BUILD_DIR}/code-repo 下执行)
+      afterScriptImage: null  # 指定后置脚本运行环境镜像，afterScript 不为空时需要传值(不传使用默认基础alios镜像)
+      nydusSwitch: true # 是否一并构建 nydus 加速镜像，true | false，默认为 true。详细信息：https://yuque.antfin-inc.com/tuna/nydus/pmlc56l8svt95ilh#i7Q1f
+      nydusPreheat: "" # 在哪些集群预热 nydus 加速镜像，通常只有国际集群才需要预热，默认不设置。详细信息：https://yuque.antfin-inc.com/tuna/nydus/ud4aiwfegqpu9qbd#SutsQ
+      cacheStrategy: always # 镜像构建是否使用缓存，默认 always
+      target: "${{parameters.image_build_target}}" # Set the target build stage to build，extraTags中同样可以设置target，优先级参考下方文档描述
+      extraTags: null # 可指定多个 (当前最多支持5个) 额外的构建镜像Tag, 格式参考下方文档描述 (如需推送到其他镜像中心，还需要配置对应的账密)
+      scriptCaches: null # 自定义缓存
+      timeoutInSec: 14400 # 构建任务执行超时时间，单位(秒)， 4 hours
+      strictLabel: largeResource # 使用性能更好的机器
+  STC:
+    stage: STC-Scan
+    id: sct-scan
+    component: stc
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+    inputs:
+      appName: sglang
+      image: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      projectType: AIDC
+  镜像扫描:
+    stage: Image-Scan
+    id: image-scan-core
+    component: image-scan
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+    inputs:
+      appName: sglang
+      image: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像同步组件的租户一致
+
+  推送sglang镜像[S集群]:
+    stage: Push-Image
+    component: image-sync-from-alipay-to-ats
+    id: push-image
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+        confirm:
+          buttonName: 确认推送
+    inputs:
+      checkImageAndStc: false
+      sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      targetImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      appName: sglang
+      tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
+      retry: 10
+      imageType: oci
+
+  推送sglang镜像[北京B1]:
+    stage: Push-Image
+    component: image-sync-from-alipay-to-ats
+    id: push-image
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+        confirm:
+          buttonName: 确认推送
+    inputs:
+      checkImageAndStc: false
+      sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      targetImage: acr-bj-ant-registry-vpc.cn-beijing.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      appName: sglang
+      tenant: AIDC # 或者其他，比如 AIDC，这个必须要和镜像扫描组件的租户一致
+      retry: 10
+      imageType: oci
+
+  推送镜像信息至keeper:
+    stage: Push-Image
+    component: push-image-to-keeper
+    id: push-image-to-keeper
+    config:
+      beforeExecute:
+        isAutoSkip: ${{parameters.build_whl_only}}
+    inputs:
+      mainSiteImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
+      aidcSiteImage: acr-sh-ant-registry-vpc.cn-shanghai.cr.aliyuncs.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}

@@ -1,36 +1,29 @@
-# 参考社区docker/Dockerfile
-# sglang、sglang_kernel安装使用前一阶段构建出来的whl包
-# transfer-engine选择使用开源或者蚂蚁内部
-# deepep 使用开源或者蚂蚁内部预编译whl包，安装时直接安装whl包，不需要在镜像内编译安装
-# 这是蚂蚁内部构建sglang引擎镜像的Dockerfile, 社区的Dockerfile更名为Dockerfile.community
-# 如果cherry-pick社区commits发生冲突无法解决, 请联系 @霜林 
-
-ARG RUNTIME_BASE_IMAGE
-FROM ${RUNTIME_BASE_IMAGE} AS base
+ARG CUDA_VERSION=13.0.1
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
 ARG BUILD_TYPE=all
-ARG BRANCH_TYPE=local
+ARG BRANCH_TYPE=remote
 ARG GRACE_BLACKWELL=0
 ARG HOPPER_SBO=0
 
+ARG GRACE_BLACKWELL_DEEPEP_BRANCH=gb200_blog_part_2
 ARG HOPPER_SBO_DEEPEP_COMMIT=9f2fc4b3182a51044ae7ecb6610f7c9c3258c4d6
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG BUILD_AND_DOWNLOAD_PARALLEL=8
-ARG SGL_KERNEL_VERSION=0.4.2.post2
+ARG SGL_KERNEL_VERSION=0.4.2.post1
 ARG SGL_VERSION
-ARG SGL_DEEP_GEMM_VERSION=0.1.0
+ARG SGL_DEEP_GEMM_VERSION=0.0.1
 ARG USE_LATEST_SGLANG=0
 ARG GDRCOPY_VERSION=2.5.1
 ARG PIP_DEFAULT_INDEX
 ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
-ARG FLASHINFER_VERSION=0.6.11.post1
+ARG FLASHINFER_VERSION=0.6.8.post1
 ARG MOONCAKE_VERSION=0.3.10.post2
 #if need other arg please add in MOONCAKE_COMPILE_ARG
 ARG MOONCAKE_COMPILE_ARG="-DUSE_HTTP=ON -DUSE_MNNVL=ON -DUSE_CUDA=ON -DWITH_EP=ON"
-ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -43,29 +36,19 @@ ENV PATH="${PATH}:/usr/local/nvidia/bin" \
 
 # Replace Ubuntu sources if specified
 RUN if [ -n "$UBUNTU_MIRROR" ]; then \
-    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list.d/ubuntu.sources; \
+    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list && \
+    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list; \
 fi
 
 # Python setup (combined with apt update to reduce layers)
 # Ubuntu 24.04 ships Python 3.12 in main, so we no longer need the deadsnakes
 # PPA. Dropping it avoids transient Launchpad 504s in `add-apt-repository`.
 RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
-    # ngc images have already set constraint.txt, we need to disable it
-    if [ -f /etc/pip/constraint.txt ]; then \
-        mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
-        # touch an empty constraint.txt to avoid pip error about missing constraint file, since some pip install commands in later stages rely on this file existing
-        touch /etc/pip/constraint.txt; \
-        if [ -d /usr/local/lib/python3.12/dist-packages ]; then \
-            rm -rf /usr/local/lib/python3.12/dist-packages ; \
-        fi \
-    fi && \
     apt update && apt install -y --no-install-recommends wget software-properties-common \
     && apt install -y --no-install-recommends python3.12-full python3.12-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
     && update-alternatives --set python3 /usr/bin/python3.12 \
-    && wget -q ${BOOTSTRAP_PIP_ARTIFACTORY_URL}/get-pip.py \
-    # 这里会重新创建 /usr/lib/python3/dist-packages目录
+    && wget -q https://bootstrap.pypa.io/get-pip.py \
     && python3 get-pip.py --break-system-packages \
     && rm get-pip.py \
     # Allow pip to install packages globally (PEP 668 workaround for Ubuntu 24.04)
@@ -141,8 +124,6 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
     check \
     libsubunit0 \
     libsubunit-dev \
-    # have to remove python3-jwt to avoid conflicts with python3.12 as when installing sglang package, python3-jwt can not be removed by pip
-    && (apt remove -y python3-jwt || true)\
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
@@ -198,30 +179,15 @@ ARG CUDA_VERSION
 ARG BUILD_TYPE
 ARG SGL_KERNEL_VERSION
 ARG GITHUB_ARTIFACTORY
-ARG SGLANG_KERNEL_WHL_URL
-ARG SGLANG_WHL_URL
-ARG SGLANG_KERNEL_CURRENT_WHL
-ARG SGLANG_CURRENT_WHL
 
 WORKDIR /sgl-workspace
 
 # Rust toolchain for setuptools-rust extensions (e.g. sglang-grpc).
 # Requires >= 1.85 (edition 2024). Inherited by framework via FROM torch_deps.
 ENV PATH="/root/.cargo/bin:${PATH}"
-ENV RUSTUP_UPDATE_ROOT="https://mirrors.ustc.edu.cn/rust-static/rustup"
-ENV RUSTUP_DIST_SERVER="https://mirrors.ustc.edu.cn/rust-static"
-
-RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal \
     && rustc --version && cargo --version
-
-# 配置rust crates.io
-COPY <<EOF /root/.cargo/config.toml
-[source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-EOF
 
 # Install sgl-kernel (from pre-built wheel)
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -233,17 +199,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         13.0.1) CUINDEX=130 ;; \
         *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
     esac \
-    && if [ -n "$SGLANG_KERNEL_WHL_URL" ]; then \
-        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_WHL_URL}" \
-    ; \
-    elif [ -n "$SGLANG_KERNEL_CURRENT_WHL" ]; then \
-        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_CURRENT_WHL}" \
-    ; \
-    elif [ "$CUDA_VERSION" = "12.6.1" ]; then \
+    && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
         python3 -m pip install https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu124-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     elif [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
-        python3 -m pip install https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu129-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
+        python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu129-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     elif [ "$CUDA_VERSION" = "13.0.1" ]; then \
         # --no-deps prevents pip from pulling torch from default PyPI
@@ -279,26 +239,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && echo '__version__ = "0.0.0"' > sglang/version.py \
     && touch README.md \
     && touch LICENSE \
-    && if [ -n "$SGLANG_WHL_URL" ]; then \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}" \
-    ; \
-    elif [ -n "$SGLANG_CURRENT_WHL" ]; then \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}" \
-    ; \
-    else \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
-    ; \
-    fi \
+    && python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
     && if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
            pip list --format=freeze | awk -F'==' '/-cu13(==|$)/ {print $1}' \
                | xargs -r python3 -m pip uninstall -y && \
            python3 -m pip install --index-url https://download.pytorch.org/whl/cu${CUINDEX} \
                torch torchvision torchaudio --force-reinstall; \
-           python3 -m pip install https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_DEEP_GEMM_VERSION}/sgl_deep_gemm-${SGL_DEEP_GEMM_VERSION}+cu129-py3-none-manylinux2014_$(uname -m).whl --force-reinstall; \
+           python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_DEEP_GEMM_VERSION}/sgl_deep_gemm-${SGL_DEEP_GEMM_VERSION}+cu129-py3-none-manylinux2014_$(uname -m).whl --force-reinstall; \
        fi \
     && cd /sgl-workspace \
     && rm -rf /tmp/sglang_deps \
-    && pip freeze --exclude sglang| grep -v "^sglang==" > /sgl-workspace/constraints.txt
+    && pip freeze | grep -v "^sglang==" > /sgl-workspace/constraints.txt
 
 ########################################################
 # PARALLEL STAGE 2: DeepEP Builder (needs torch_deps)
@@ -308,6 +259,7 @@ FROM torch_deps AS deepep_builder
 ARG CUDA_VERSION
 ARG BUILD_AND_DOWNLOAD_PARALLEL
 ARG GRACE_BLACKWELL
+ARG GRACE_BLACKWELL_DEEPEP_BRANCH
 ARG HOPPER_SBO
 ARG HOPPER_SBO_DEEPEP_COMMIT
 ARG DEEPEP_COMMIT
@@ -318,23 +270,14 @@ WORKDIR /build
 # Clone DeepEP
 RUN set -eux; \
     if [ "$GRACE_BLACKWELL" = "1" ]; then \
-      if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
-        git clone https://github.com/fzyzcjy/DeepEP.git && \
-        cd DeepEP && \
-        git checkout gb200_blog_part_2 && \
-        sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-        sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-        cd .. ; \
-      else \
-        git clone https://github.com/deepseek-ai/DeepEP.git -b hybrid-ep && \
-        cd DeepEP && \
-        git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6 && \
-        sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-        sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-        cd .. ; \
-      fi; \
+      git clone https://github.com/fzyzcjy/DeepEP.git && \
+      cd DeepEP && \
+      git checkout ${GRACE_BLACKWELL_DEEPEP_BRANCH} && \
+      sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
+      sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
+      cd .. ; \
     elif [ "$HOPPER_SBO" = "1" ]; then \
-      git clone https://${GITHUB_ARTIFACTORY}/deepseek-ai/DeepEP.git -b antgroup-opt && \
+      git clone https://github.com/deepseek-ai/DeepEP.git -b antgroup-opt && \
       cd DeepEP && \
       git checkout ${HOPPER_SBO_DEEPEP_COMMIT} && \
       sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
@@ -392,9 +335,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     esac \
     && mkdir -p /flashinfer_jit_output \
     && if [ "$INSTALL_FLASHINFER_JIT_CACHE" = "1" ]; then \
-        python3 -m pip install mitmproxy -I && \
-        curl -L https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools/mitm_runner.py -o /tmp/mitm_runner.py && \
-        python3 /tmp/mitm_runner.py --cmd \
         python3 -m pip install flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu${CUINDEX} \
         && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_jit_cache /flashinfer_jit_output/ \
         && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_jit_cache-*.dist-info /flashinfer_jit_output/ ; \
@@ -446,9 +386,9 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://just.
     bash -s -- --tag 1.42.4 --to /tools
 
 # Install oh-my-zsh and plugins
-RUN sh -c "export REMOTE=https://${GITHUB_ARTIFACTORY}/ohmyzsh/ohmyzsh.git; $(curl --retry 3 --retry-delay 2 -fsSL https://${GITHUB_ARTIFACTORY/github.com/}raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
-    && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
-    && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+RUN sh -c "$(curl --retry 3 --retry-delay 2 -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
+    && git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
+    && git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
 ########################################################
 # PARALLEL STAGE 5: Gateway Builder (starts from base)
@@ -467,33 +407,15 @@ WORKDIR /build
 # Copy ONLY the gateway source (not the full repo)
 COPY sgl-model-gateway /build/sgl-model-gateway
 
-ENV PATH="/root/.cargo/bin:${PATH}"
 # Install Rust, build gateway binary and Python bindings, then clean up Rust toolchain
-ENV RUSTUP_UPDATE_ROOT="https://mirrors.ustc.edu.cn/rust-static/rustup"
-ENV RUSTUP_DIST_SERVER="https://mirrors.ustc.edu.cn/rust-static"
-
-RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
-        | sh -s -- -y \
-    && rustc --version && cargo --version
-
-# 配置rust crates.io
-COPY <<EOF /root/.cargo/config.toml
-[source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-[net]
-git-fetch-with-cli = true
-EOF
-
-RUN git config --global url."https://gitee.com/staugust/harmony.git".insteadOf "https://github.com/openai/harmony.git" && \
-    git config --global url."https://gitee.com/staugust/harmony".insteadOf "https://github.com/openai/harmony"
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install maturin \
+    curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && export PATH="/root/.cargo/bin:${PATH}" \
+    && python3 -m pip install maturin \
     && cd /build/sgl-model-gateway/bindings/python \
-    && ulimit -n 65536 && maturin build --release --features vendored-openssl --out /build/gateway_wheels -j 4\
+    && ulimit -n 65536 && maturin build --release --features vendored-openssl --out /build/gateway_wheels \
     && cd /build/sgl-model-gateway \
-    && cargo build --release --bin sgl-model-gateway --features vendored-openssl -j 4 \
+    && cargo build --release --bin sgl-model-gateway --features vendored-openssl \
     && cp target/release/sgl-model-gateway /build/sgl-model-gateway-bin \
     && rm -rf /root/.cargo /root/.rustup /build/sgl-model-gateway/target /build/sgl-model-gateway/bindings/python/target
 
@@ -596,9 +518,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Install essential Python packages (use constraints to prevent conflicts)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    cat /sgl-workspace/constraints.txt  && \
-    env |grep -i pip && \
-    python3 -m pip config list && \
     python3 -m pip install -c /sgl-workspace/constraints.txt \
     datamodel_code_generator \
     pre-commit \
@@ -626,22 +545,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
     python3 -m pip install nixl nixl-cu12 --no-deps ; \
     python3 -m pip install cuda-python==12.9 ; \
-    cd /sgl-workspace && git clone https://${GITHUB_ARTIFACTORY}/deepseek-ai/FlashMLA.git flash-mla \
-    && git config --global url."https://gitee.com/staugust/cutlass".insteadOf "https://github.com/NVIDIA/cutlass.git" \
+    cd /sgl-workspace && git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla \
     && cd flash-mla && git submodule update --init --recursive \
-    && export CMAKE_BUILD_PARALLEL_LEVEL=2 \
-    && export MAX_JOBS=4 \
-    && export NVCC_THREADS=4 \
     && pip install --no-build-isolation -v . ; \
 elif [ "${CUDA_VERSION%%.*}" = "13" ]; then \
     python3 -m pip install nixl nixl-cu13 --no-deps ; \
     python3 -m pip install cuda-python==13.2.0 ; \
-    cd /sgl-workspace && git clone https://${GITHUB_ARTIFACTORY}/deepseek-ai/FlashMLA.git flash-mla \
+    cd /sgl-workspace && git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla \
     && ln -s /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda \
     && cd flash-mla && git submodule update --init --recursive \
-    && export CMAKE_BUILD_PARALLEL_LEVEL=2 \
-    && export MAX_JOBS=4 \
-    && export NVCC_THREADS=4 \
     && pip install --no-build-isolation -v . ; \
 fi
 
@@ -680,8 +592,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
 # =============================================================================
 
 # Copy local source if building from local
-# use base instead of scratch since we have no access to dockerhub
-FROM base AS local_src
+FROM scratch AS local_src
 COPY . /src
 
 FROM framework AS framework_final
@@ -691,23 +602,21 @@ ARG BUILD_TYPE
 ARG CUDA_VERSION
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
-ARG GITHUB_ARTIFACTORY
-ARG PIP_DEFAULT_INDEX
+
 WORKDIR /sgl-workspace
 
 COPY --from=local_src /src /tmp/local_src
 RUN if [ "$BRANCH_TYPE" = "local" ]; then \
         cp -r /tmp/local_src /sgl-workspace/sglang; \
     elif [ "$USE_LATEST_SGLANG" = "1" ]; then \
-        git clone --depth=1 https://${GITHUB_ARTIFACTORY}/sgl-project/sglang.git /sgl-workspace/sglang; \
+        git clone --depth=1 https://github.com/sgl-project/sglang.git /sgl-workspace/sglang; \
     elif [ -z "$SGL_VERSION" ]; then \
         echo "ERROR: SGL_VERSION must be set when USE_LATEST_SGLANG=0 and BRANCH_TYPE!=local" && exit 1; \
     else \
-        git clone --depth=1 --branch v${SGL_VERSION} https://${GITHUB_ARTIFACTORY}/sgl-project/sglang.git /sgl-workspace/sglang; \
+        git clone --depth=1 --branch v${SGL_VERSION} https://github.com/sgl-project/sglang.git /sgl-workspace/sglang; \
     fi \
     && rm -rf /tmp/local_src
 
-ENV HF_ENDPOINT="https://hf-mirror.com"
 # Editable install (fast - dependencies already installed via constraints)
 # Clean up __pycache__/tests/pyc in same RUN to avoid writing ~28k files to layer
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -721,17 +630,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
              echo "Skipping kernels-community/sgl-flash-attn3 cubin download on aarch64 (no variants published upstream); kernels will be JIT-compiled at runtime"; \
              success=1; \
          else \
-            # before kernels download, let's download from ant
-            wget https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools/prepare_sgl_flash_attn3_kernels.py -O /tmp/prepare_sgl_flash_attn3_kernels.py && \
-            for i in 1 2 3; do \
-                echo "Attempt $i/3: download sgl-flash-attn3 from antcode ..." && \
-                python3 /tmp/prepare_sgl_flash_attn3_kernels.py --lock-file python/kernels.lock && break; \
-                python3 /tmp/prepare_sgl_flash_attn3_kernels.py --lock-file python/kernels.lock --clean ; \
-                echo "download sgl-flash-attn3 kernels from ant failed, retrying in 10s..." && sleep 10; \
-            done; \
-            rm -f /tmp/prepare_sgl_flash_attn3_kernels.py && \
-             for i in 1 2 3 4 5; do \
-                 echo "Attempt $i/5: downloading sgl-kernel cubins..." && \
+             for i in 1 2 3; do \
+                 echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
                  kernels download python && \
                  success=1 && break; \
                  echo "sgl-kernel cubin download failed, retrying in 30s..." && sleep 30; \
@@ -786,17 +686,11 @@ LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
 # - Ready-to-run inference server environment
 #
 # Note: Uses devel base for complete NVCC toolchain required by DeepGEMM JIT
-FROM ${RUNTIME_BASE_IMAGE} AS runtime
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
 
 ARG CUDA_VERSION
 ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
-ARG SGLANG_WHL_URL
-ARG SGLANG_CURRENT_WHL
-ARG BUILD_TYPE
-ARG UBUNTU_MIRROR
-ARG PIP_DEFAULT_INDEX
-ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -806,22 +700,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ENV PATH="${PATH}:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin" \
     LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
 
-# Replace Ubuntu sources if specified
-RUN if [ -n "$UBUNTU_MIRROR" ]; then \
-    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list.d/ubuntu.sources; \
-fi
 # Install runtime dependencies (devel base provides gcc/g++/build tools)
 # Python 3.12 ships in Ubuntu 24.04 main, so no deadsnakes PPA needed.
 RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
-    # ngc images have already set constraint.txt, we need to disable it
-    if [ -f /etc/pip/constraint.txt ]; then \
-        mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
-        # touch an empty constraint.txt to avoid pip error about missing constraint file, since some pip install commands in later stages rely on this file existing
-        touch /etc/pip/constraint.txt; \
-        # rm -rf /usr/local/lib/python3.12/dist-packages to make it clean
-        rm -rf /usr/local/lib/python3.12/dist-packages; \
-    fi && \
     apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
     # Python runtime
     python3.12-full \
@@ -865,12 +746,10 @@ RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
     # GPG key verification
     gnupg2 \
     linux-libc-dev \
-    # have to remove python3-jwt to avoid conflicts with python3.12 as when installing sglang package, python3-jwt can not be removed by pip
-    && (apt remove -y python3-jwt || true)\
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
     && update-alternatives --set python3 /usr/bin/python3.12 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && wget -q ${BOOTSTRAP_PIP_ARTIFACTORY_URL}/get-pip.py \
+    && wget -q https://bootstrap.pypa.io/get-pip.py \
     && python3 get-pip.py --break-system-packages \
     && rm get-pip.py \
     # Allow pip to install packages globally (PEP 668 workaround for Ubuntu 24.04)
@@ -922,96 +801,7 @@ COPY --from=framework_final /usr/src/gdrdrv-2.5.1 /usr/src/gdrdrv-2.5.1
 # Fix DeepEP IBGDA symlink in runtime
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
-# Replace pip global cache if specified
-RUN if [ -n "${PIP_DEFAULT_INDEX}" ]; then \
-    python3 -m pip config set global.index-url ${PIP_DEFAULT_INDEX}; \
-fi
-
-RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
-        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}"; \
-    elif [ -n "$SGLANG_WHL_URL" ]; then \
-        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}"; \
-    fi
 WORKDIR /sgl-workspace/sglang
-
-# Runtime logging and internal launch scripts expect these paths to exist.
-RUN mkdir -p /home/admin/logs /opt/conda/bin \
-    && ln -sf /usr/bin/python /opt/conda/bin/python \
-    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
-    && ln -sf /home/admin/logs /logs
-
-# install cuda-compat
-RUN ln -s /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda; \
-    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        CUDA_COMPAT_PKG_NAME="cuda-compat-"$(echo "$CUDA_VERSION" | awk -F. '{print $1 "-" $2}'); \
-        apt update && apt install -y --no-install-recommends "$CUDA_COMPAT_PKG_NAME" \
-        && ldconfig \
-        && rm -rf /var/lib/apt/lists/* \
-        && apt-get clean ; \
-    fi
-ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH} \
-    CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}} \
-    C_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}
-
-# 安装x-runtime
-ARG RUNTIME_VERSION
-ARG RUNTIME_LLM_VERSION
-RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
-    cd /home/admin/runtime/ && \
-    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime/${RUNTIME_VERSION}/serving_runtime-${RUNTIME_VERSION}.tar -O serving_runtime-${RUNTIME_VERSION}.tar && \
-    tar xf serving_runtime-${RUNTIME_VERSION}.tar && \
-    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime_llm/${RUNTIME_LLM_VERSION}/serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar -O serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar && \
-    tar xf serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar
-
-RUN apt-get update && apt-get install -y gdb && \
-    pip3 install pystack-debugger py-spy concurrent_log_handler
-
-# support async model mount, refer: https://yuque.antfin.com/deepxpu/uiwv6l/ri1gufqzy4g8fdob
-ARG MODEL_MANAGER_VERSION="0.0.2"
-RUN pip3 install --no-cache-dir https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/model-manager/model-manager-${MODEL_MANAGER_VERSION}.tar.gz
-
-# 安装modctl和aistudio-modelhub
-RUN wget https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/ant-common/antregistry/modctl/0.1.2/modctl-0.1.2-linux-amd64.deb && dpkg -i modctl-0.1.2-linux-amd64.deb && rm modctl-0.1.2-linux-amd64.deb
-RUN pip3 install --no-cache-dir aistudio-modelhub==0.0.0.6
-
-# 安装sglang-router
-RUN pip3 install https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/simple-dev/sglang-router/sglang_router-0.1.9-py3-none-any.whl
-
-# install ossutil
-RUN wget "https://gosspublic.alicdn.com/ossutil/v2/2.1.1/ossutil-2.1.1-linux-amd64.zip" && \
-    unzip -o ossutil-2.1.1-linux-amd64.zip -d /usr/local/ && \
-    chmod +x /usr/local/ossutil-2.1.1-linux-amd64/ossutil && \
-    ln -sf /usr/local/ossutil-2.1.1-linux-amd64/ossutil /usr/local/bin/ossutil && \
-    rm -vf ossutil-2.1.1-linux-amd64.zip
-
-# 安装蚂蚁内部的decord2, 社区的解码会夯死
-ARG DECORD2_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/decord2_fix/decord2-2.1.0-cp312-cp312-manylinux_2_28_x86_64.whl'
-RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${DECORD2_WHL_URL}
-RUN pip3 install --force-reinstall --no-cache-dir numpy==1.26.4
-
-# 安装jq和ffmpeg
-RUN apt-get update && apt-get install -y jq ffmpeg && rm -rf /var/lib/apt/lists/* && apt-get clean
-RUN pip3 install scipy==1.15.3 distro cryptography modelscope aistudio-modelhub pillow-heif --no-cache-dir
-
-# Install DeepGEMM JIT cache for DeepSeek V4.
-RUN echo "DEEP_GEMM_CACHE_BUST=${DEEP_GEMM_CACHE_BUST}" && \
-    wget -O deep_gemm_cache_for_v4.tar "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yudian.zy/deep_gemm_cache_for_v4.tar" && \
-    tar -xPf deep_gemm_cache_for_v4.tar && \
-    rm -rf deep_gemm_cache_for_v4.tar
-
-# Merge Ubuntu public CAs with the base image bundle, which may contain internal CAs.
-RUN if [ -f /etc/ssl/certs/ca-bundle.crt ]; then \
-        cp /etc/ssl/certs/ca-bundle.crt /tmp/ca-bundle.crt; \
-        cat /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.crt > /etc/ssl/certs/ca-bundle.crt; \
-        rm /tmp/ca-bundle.crt; \
-    else \
-        cp /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-bundle.crt; \
-    fi && \
-    ls -lh /etc/ssl/certs/ca-bundle.crt
-
-ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
-    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
-    ENGINE_TYPE=sglang
 
 # Keep build provenance at the end so metadata changes do not invalidate build layers.
 ARG SGLANG_BUILD_COMMIT=unknown
