@@ -548,13 +548,18 @@ class BaseMultimodalProcessor(ABC):
                     img, _ = load_image_tensor(data, discard_alpha_channel)
                 else:
                     img, _ = load_image(data, cls.gpu_image_decode)
-                    if (
-                        discard_alpha_channel
-                        and not isinstance(img, torch.Tensor)
-                        and img.mode != "RGB"
-                    ):
-                        # Needed only when `img` is a PIL image
-                        img = img.convert("RGB")
+                    if discard_alpha_channel:
+                        if isinstance(img, torch.Tensor):
+                            # nvJPEG / torchvision decode can return [1,H,W]
+                            # (grayscale) or [4,H,W] (with alpha); HF image
+                            # processors won't broadcast channels for tensor
+                            # inputs, so normalize to 3 channels here.
+                            if img.dim() == 3 and img.shape[0] == 1:
+                                img = img.expand(3, -1, -1).contiguous()
+                            elif img.dim() == 3 and img.shape[0] == 4:
+                                img = img[:3].contiguous()
+                        elif img.mode != "RGB":
+                            img = img.convert("RGB")
                 return img
             elif modality == Modality.VIDEO:
                 return load_video(data, frame_count_limit)

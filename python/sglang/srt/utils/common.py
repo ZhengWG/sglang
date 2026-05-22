@@ -888,7 +888,12 @@ def _load_image(
     if is_jpeg_with_cuda(image_bytes, gpu_image_decode):
         try:
             encoded_image = torch.frombuffer(image_bytes, dtype=torch.uint8)
-            image_tensor = decode_jpeg(encoded_image, device="cuda")
+            # Force RGB so grayscale JPEGs decode to [3, H, W] instead of
+            # [1, H, W]; downstream HF image processors patchify channels-last
+            # and won't expand a 1-channel tensor to 3.
+            image_tensor = decode_jpeg(
+                encoded_image, device="cuda", mode=ImageReadMode.RGB
+            )
             return image_tensor
         except Exception as e:
             logger.warning(
