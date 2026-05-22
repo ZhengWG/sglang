@@ -2805,6 +2805,33 @@ class TestGlm4MoeDetector(unittest.TestCase):
             tool_calls[0]["parameters"], '{"city": "Beijing", "date": "2024-06-27"}'
         )
 
+    def test_streaming_tool_call_without_arguments(self):
+        """Test streaming incremental parsing of a tool call with no arguments."""
+        chunks = [
+            "<tool_call>get_weather\n",
+            "</tool_call>",
+        ]
+        tool_calls = []
+        for chunk in chunks:
+            result = self.detector.parse_streaming_increment(chunk, self.tools)
+            for tool_call_chunk in result.calls:
+                if (
+                    hasattr(tool_call_chunk, "tool_index")
+                    and tool_call_chunk.tool_index is not None
+                ):
+                    while len(tool_calls) <= tool_call_chunk.tool_index:
+                        tool_calls.append({"name": "", "parameters": ""})
+                    tc = tool_calls[tool_call_chunk.tool_index]
+                    if tool_call_chunk.name:
+                        tc["name"] = tool_call_chunk.name
+                    if tool_call_chunk.parameters:
+                        tc["parameters"] += tool_call_chunk.parameters
+
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0]["name"], "get_weather")
+        self.assertEqual(tool_calls[0]["parameters"], "{}")
+        self.assertEqual(self.detector.streamed_args_for_tool[0], "{}")
+
     def test_streaming_multiple_tool_calls(self):
         """Test streaming incremental parsing of multiple tool calls."""
         chunks = [
