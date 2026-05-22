@@ -429,7 +429,7 @@ class InternVLProcessor(BaseMultimodalProcessor):
             prompt.count(self.VIDEO_PLACEHOLDER_TOKEN),
         )
 
-        base_output = await self.load_mm_data_async(
+        base_output = await self.load_mm_data(
             prompt=prompt,
             image_data=image_data,
             video_data=video_data,

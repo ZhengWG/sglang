@@ -674,7 +674,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_metric = MMProcessMetrics()
         mm_metric.mm_entry_time = time.perf_counter()
         mm_metric.mm_entry_time_ts = time.time()
-        base_output = await self.load_mm_data_async(
+        base_output = await self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
             video_data=request_obj.video_data,

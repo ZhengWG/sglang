@@ -1034,35 +1034,6 @@ class BaseMultimodalProcessor(ABC):
             input_text="".join(new_text_parts),
         )
 
-    async def load_mm_data_async(
-        self,
-        prompt: str,
-        multimodal_tokens: MultimodalSpecialTokens,
-        image_data: Optional[list] = None,
-        video_data: Optional[list] = None,
-        audio_data: Optional[list] = None,
-        return_text: Optional[bool] = True,
-        discard_alpha_channel: bool = True,
-        audio_sample_rate: Optional[int] = None,
-    ) -> BaseMultiModalProcessorOutput:
-        """
-        Async wrapper to offload sync load_mm_data into the IO executor, so the
-        event loop thread is not blocked while waiting for network/file IO.
-        """
-        func = functools.partial(
-            self.load_mm_data,
-            prompt=prompt,
-            multimodal_tokens=multimodal_tokens,
-            image_data=image_data,
-            video_data=video_data,
-            audio_data=audio_data,
-            return_text=return_text,
-            discard_alpha_channel=discard_alpha_channel,
-            audio_sample_rate=audio_sample_rate,
-        )
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.load_mm_data_executor, func)
-
     @staticmethod
     def get_mm_items_offset(
         input_ids: torch.Tensor, mm_token_id: int
