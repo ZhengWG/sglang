@@ -701,15 +701,21 @@ async def server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
+    server_args = _global_state.tokenizer_manager.server_args
+
     # server_args.model_config is not serializable but should be excluded by asdict.
     return {
         **dataclasses.asdict(
-            _global_state.tokenizer_manager.server_args,
+            server_args,
             dict_factory=_custom_dict_factory
         ),
         **_global_state.scheduler_info,
         "internal_states": internal_states,
         "version": __version__,
+        # Structured KV-event publisher descriptor for KV-aware routers.
+        # `None` when publishing is disabled or misconfigured; see
+        # `ServerArgs.describe_kv_events_publisher` for the precise contract.
+        "kv_events": server_args.describe_kv_events_publisher(),
     }
 
 
