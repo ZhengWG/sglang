@@ -6,7 +6,6 @@ import logging
 import time
 import uuid
 from enum import Enum
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Union
 
 
@@ -986,14 +985,12 @@ class OpenAIServingChat(OpenAIServingBase):
                     # /abort_request or session lifecycle cleanup) falls through
                     # to the normal chunk path, matching the non-stream behavior
                     # in tokenizer_manager._handle_abort_finish_reason.
-                    if finish_reason_type == "abort" and isinstance(
-                        finish_reason.get("status_code"), HTTPStatus
-                    ):
-                        code = finish_reason["status_code"]
+                    abort_status_code = self._normalize_abort_status_code(finish_reason)
+                    if abort_status_code is not None:
                         error = self.create_streaming_error_response(
                             finish_reason.get("message", "Generation aborted."),
-                            code.name,
-                            code.value,
+                            abort_status_code.name,
+                            abort_status_code.value,
                         )
                         yield f"data: {error}\n\n"
                         break

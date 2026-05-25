@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import orjson
@@ -239,6 +240,25 @@ class OpenAIServingBase(ABC):
             code=status_code,
         )
         return json.dumps({"error": error.model_dump()})
+
+    @staticmethod
+    def _normalize_abort_status_code(
+        finish_reason: Optional[dict[str, Any]],
+    ) -> Optional[HTTPStatus]:
+        if not finish_reason or finish_reason.get("type") != "abort":
+            return None
+
+        status_code = finish_reason.get("status_code")
+        if status_code is None:
+            return None
+        if isinstance(status_code, HTTPStatus):
+            return status_code
+        if isinstance(status_code, int):
+            try:
+                return HTTPStatus(status_code)
+            except ValueError:
+                return None
+        return None
 
     def extract_custom_labels(self, raw_request):
         if (

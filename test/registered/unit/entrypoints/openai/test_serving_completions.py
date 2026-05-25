@@ -4,7 +4,7 @@ Run with:
     python -m unittest tests.test_serving_completions_unit -v
 """
 
-from sglang.test.test_utils import maybe_stub_sgl_kernel
+from sglang.test.test_utils import CustomTestCase, maybe_stub_sgl_kernel
 
 maybe_stub_sgl_kernel()  # must precede any import that pulls in sgl_kernel
 
@@ -36,7 +36,7 @@ class _MockTemplateManager:
         )
 
 
-class ServingCompletionTestCase(unittest.TestCase):
+class ServingCompletionTestCase(CustomTestCase):
     """Bundle all prompt/echo tests in one TestCase."""
 
     # ---------- shared test fixtures ----------
@@ -255,6 +255,60 @@ class ServingCompletionTestCase(unittest.TestCase):
         # Check that there is an error chunk and a DONE chunk, and possibly a role chunk
         self.assertGreaterEqual(len(chunks), 2)
         self.assertIn("error", chunks[0])
+
+    def test_streaming_abort_without_status_code_yields_abort_finish(self):
+        """A graceful streaming abort should not be converted into an SSE error."""
+
+        async def _mock_generate_abort_without_status(*args, **kwargs):
+            yield {
+                "text": "Partial ",
+                "meta_info": {
+                    "id": "cmpl-test",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cached_tokens": 0,
+                    "finish_reason": {
+                        "type": "abort",
+                        "status_code": None,
+                        "message": "Abort request sent",
+                    },
+                },
+                "index": 0,
+            }
+
+        self.sc.tokenizer_manager.generate_request = _mock_generate_abort_without_status
+
+        req = CompletionRequest(
+            model="x",
+            prompt="Hello world",
+            max_tokens=100,
+            stream=True,
+        )
+        adapted_request, _ = self.sc._convert_to_internal_request(req)
+
+        async def run_stream():
+            chunks = []
+            async for chunk in self.sc._generate_completion_stream(
+                adapted_request, req, self.fastapi_request
+            ):
+                chunks.append(chunk)
+            return chunks
+
+        loop = get_or_create_event_loop()
+        chunks = loop.run_until_complete(run_stream())
+
+        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
+        self.assertFalse(any("error" in chunk for chunk in chunks))
+
+        response_chunks = [
+            json.loads(chunk[len("data: ") :])
+            for chunk in chunks
+            if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+        ]
+        self.assertEqual(len(response_chunks), 1)
+        choice = response_chunks[0]["choices"][0]
+        self.assertEqual(choice["text"], "Partial ")
+        self.assertEqual(choice["finish_reason"], "abort")
 
     def test_non_streaming_cached_tokens_details_emits_sglext(self):
         """Test that non-streaming completion responses emit cached token details in sglext."""

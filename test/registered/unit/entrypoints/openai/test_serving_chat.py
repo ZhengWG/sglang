@@ -6,7 +6,7 @@ or
     python -m unittest discover -s tests -p "test_*unit.py" -v
 """
 
-from sglang.test.test_utils import maybe_stub_sgl_kernel
+from sglang.test.test_utils import CustomTestCase, maybe_stub_sgl_kernel
 
 maybe_stub_sgl_kernel()  # must precede any import that pulls in sgl_kernel
 
@@ -91,7 +91,7 @@ class _MockTemplateManager:
         self.force_reasoning = False
 
 
-class ServingChatTestCase(unittest.TestCase):
+class ServingChatTestCase(CustomTestCase):
     # ------------- common fixtures -------------
     def setUp(self):
         self.tm = _MockTokenizerManager()
@@ -963,6 +963,74 @@ class ServingChatTestCase(unittest.TestCase):
         # Check that there is an error chunk and a DONE chunk
         self.assertEqual(len(chunks), 2)
         self.assertIn("error", chunks[0])
+
+    def test_streaming_abort_without_status_code_yields_abort_finish(self):
+        """A graceful streaming abort should not be converted into an SSE error."""
+
+        async def _mock_generate_abort_without_status():
+            yield {
+                "text": "Partial ",
+                "meta_info": {
+                    "id": "chatcmpl-test",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cached_tokens": 0,
+                    "finish_reason": {
+                        "type": "abort",
+                        "status_code": None,
+                        "message": "Abort request sent",
+                    },
+                    "output_token_logprobs": None,
+                    "output_top_logprobs": None,
+                },
+                "index": 0,
+            }
+
+        self.tm.generate_request.return_value = _mock_generate_abort_without_status()
+
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            temperature=0.7,
+            max_tokens=100,
+            stream=True,
+        )
+
+        with patch(
+            "sglang.srt.entrypoints.openai.serving_chat.generate_chat_conv"
+        ) as conv_mock:
+            conv_ins = Mock()
+            conv_ins.get_prompt.return_value = "Test prompt"
+            conv_mock.return_value = conv_ins
+            adapted_request, _ = self.chat._convert_to_internal_request(
+                req, self.fastapi_request
+            )
+
+        async def run_stream():
+            chunks = []
+            async for chunk in self.chat._generate_chat_stream(
+                adapted_request, req, self.fastapi_request
+            ):
+                chunks.append(chunk)
+            return chunks
+
+        loop = get_or_create_event_loop()
+        chunks = loop.run_until_complete(run_stream())
+
+        self.assertEqual(chunks[-1], "data: [DONE]\n\n")
+        self.assertFalse(any("error" in chunk for chunk in chunks))
+
+        response_chunks = [
+            json.loads(chunk[len("data: ") :])
+            for chunk in chunks
+            if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"
+        ]
+        finish_reasons = [
+            choice.get("finish_reason")
+            for response_chunk in response_chunks
+            for choice in response_chunk.get("choices", [])
+        ]
+        self.assertIn("abort", finish_reasons)
 
     def test_non_streaming_cached_tokens_details_emits_sglext(self):
         """Test that non-streaming chat responses emit cached token details in sglext."""
