@@ -256,6 +256,63 @@ class ServingCompletionTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2)
         self.assertIn("error", chunks[0])
 
+    def test_streaming_abort_with_int_status_code_yields_error(self):
+        """Integer abort status codes should still produce a streaming error chunk."""
+        err_msg = "Aborted with integer code"
+        err_code = HTTPStatus.REQUEST_TIMEOUT.value
+
+        async def _mock_generate_abort(*args, **kwargs):
+            yield {
+                "text": "Partial ",
+                "meta_info": {
+                    "id": "cmpl-test",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cached_tokens": 0,
+                    "finish_reason": {
+                        "type": "abort",
+                        "status_code": err_code,
+                        "message": err_msg,
+                    },
+                    "output_token_logprobs": None,
+                    "output_top_logprobs": None,
+                },
+                "index": 0,
+            }
+
+        self.sc.tokenizer_manager.generate_request = _mock_generate_abort
+
+        req = CompletionRequest(
+            model="x",
+            prompt="Hello world",
+            max_tokens=100,
+            stream=True,
+        )
+        adapted_request, _ = self.sc._convert_to_internal_request(req)
+
+        async def run_stream():
+            chunks = []
+            async for chunk in self.sc._generate_completion_stream(
+                adapted_request, req, self.fastapi_request
+            ):
+                chunks.append(chunk)
+            return chunks
+
+        loop = get_or_create_event_loop()
+        chunks = loop.run_until_complete(run_stream())
+
+        error_chunk_data = None
+        for c in chunks:
+            if "error" in c:
+                error_chunk_data = json.loads(c[len("data: ") :])
+                break
+        self.assertIsNotNone(error_chunk_data, "Error chunk not found in stream")
+        self.assertEqual(error_chunk_data["error"]["message"], err_msg)
+        self.assertEqual(error_chunk_data["error"]["code"], err_code)
+        self.assertEqual(
+            error_chunk_data["error"]["type"], HTTPStatus(err_code).name
+        )
+
     def test_non_streaming_cached_tokens_details_emits_sglext(self):
         """Test that non-streaming completion responses emit cached token details in sglext."""
 

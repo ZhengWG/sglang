@@ -964,6 +964,74 @@ class ServingChatTestCase(unittest.TestCase):
         self.assertEqual(len(chunks), 2)
         self.assertIn("error", chunks[0])
 
+    def test_streaming_abort_with_int_status_code_yields_error(self):
+        """Integer abort status codes should still produce a streaming error chunk."""
+        err_msg = "Aborted with integer code"
+        err_code = HTTPStatus.REQUEST_TIMEOUT.value
+
+        async def _mock_generate_abort():
+            yield {
+                "text": "Partial ",
+                "meta_info": {
+                    "id": "chatcmpl-test",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cached_tokens": 0,
+                    "finish_reason": {
+                        "type": "abort",
+                        "status_code": err_code,
+                        "message": err_msg,
+                    },
+                    "output_token_logprobs": None,
+                    "output_top_logprobs": None,
+                },
+                "index": 0,
+            }
+
+        self.tm.generate_request.return_value = _mock_generate_abort()
+
+        req = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            temperature=0.7,
+            max_tokens=100,
+            stream=True,
+        )
+
+        with patch(
+            "sglang.srt.entrypoints.openai.serving_chat.generate_chat_conv"
+        ) as conv_mock:
+            conv_ins = Mock()
+            conv_ins.get_prompt.return_value = "Test prompt"
+            conv_mock.return_value = conv_ins
+
+            adapted_request, _ = self.chat._convert_to_internal_request(
+                req, self.fastapi_request
+            )
+
+            async def run_stream():
+                chunks = []
+                async for chunk in self.chat._generate_chat_stream(
+                    adapted_request, req, self.fastapi_request
+                ):
+                    chunks.append(chunk)
+                return chunks
+
+        loop = get_or_create_event_loop()
+        chunks = loop.run_until_complete(run_stream())
+
+        error_chunk_data = None
+        for c in chunks:
+            if "error" in c:
+                error_chunk_data = json.loads(c[len("data: ") :])
+                break
+        self.assertIsNotNone(error_chunk_data, "Error chunk not found in stream")
+        self.assertEqual(error_chunk_data["error"]["message"], err_msg)
+        self.assertEqual(error_chunk_data["error"]["code"], err_code)
+        self.assertEqual(
+            error_chunk_data["error"]["type"], HTTPStatus(err_code).name
+        )
+
     def test_non_streaming_cached_tokens_details_emits_sglext(self):
         """Test that non-streaming chat responses emit cached token details in sglext."""
 

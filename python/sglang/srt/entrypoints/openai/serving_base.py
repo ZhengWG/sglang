@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import orjson
@@ -239,6 +240,43 @@ class OpenAIServingBase(ABC):
             code=status_code,
         )
         return json.dumps({"error": error.model_dump()})
+
+    def normalize_streaming_abort_status(
+        self, status_code: Any
+    ) -> Optional[Tuple[str, int]]:
+        """Normalize abort status values into (error_type, status_code).
+
+        Returns None when no explicit status code is provided, which is treated
+        as a graceful abort in streaming responses.
+        """
+        if status_code is None:
+            return None
+
+        if isinstance(status_code, HTTPStatus):
+            return status_code.name, status_code.value
+
+        if isinstance(status_code, int):
+            normalized_code = status_code
+        elif isinstance(status_code, str):
+            status_code = status_code.strip()
+            if not status_code:
+                return None
+            try:
+                normalized_code = int(status_code)
+            except ValueError:
+                return "InternalServerError", 500
+        else:
+            return "InternalServerError", 500
+
+        if not 100 <= normalized_code <= 599:
+            return "InternalServerError", 500
+
+        try:
+            return HTTPStatus(normalized_code).name, normalized_code
+        except ValueError:
+            # Preserve valid HTTP code while using a generic error type
+            # for non-standard status values.
+            return "InternalServerError", normalized_code
 
     def extract_custom_labels(self, raw_request):
         if (

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Union
 
 from fastapi import Request
@@ -319,14 +318,15 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 # /abort_request or session lifecycle cleanup) falls through
                 # to the normal chunk path, matching the non-stream behavior
                 # in tokenizer_manager._handle_abort_finish_reason.
-                if finish_reason_type == "abort" and isinstance(
-                    finish_reason.get("status_code"), HTTPStatus
-                ):
-                    code = finish_reason["status_code"]
+                status_info = self.normalize_streaming_abort_status(
+                    finish_reason.get("status_code") if finish_reason else None
+                )
+                if finish_reason_type == "abort" and status_info is not None:
+                    err_type, status_code = status_info
                     error = self.create_streaming_error_response(
                         finish_reason.get("message", "Generation aborted."),
-                        code.name,
-                        code.value,
+                        err_type,
+                        status_code,
                     )
                     yield f"data: {error}\n\n"
                     break
