@@ -27,7 +27,7 @@ ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
 ARG FLASHINFER_VERSION=0.6.11.post1
-ARG MOONCAKE_VERSION=0.3.10.post2
+ARG MOONCAKE_VERSION=0.3.11.post1
 #if need other arg please add in MOONCAKE_COMPILE_ARG
 ARG MOONCAKE_COMPILE_ARG="-DUSE_HTTP=ON -DUSE_MNNVL=ON -DUSE_CUDA=ON -DWITH_EP=ON"
 ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
