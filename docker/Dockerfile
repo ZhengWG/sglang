@@ -940,17 +940,12 @@ RUN mkdir -p /home/admin/logs /opt/conda/bin \
     && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
     && ln -sf /home/admin/logs /logs
 
-# install cuda-compat
-RUN ln -s /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda; \
-    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        CUDA_COMPAT_PKG_NAME="cuda-compat-"$(echo "$CUDA_VERSION" | awk -F. '{print $1 "-" $2}'); \
-        apt update && apt install -y --no-install-recommends "$CUDA_COMPAT_PKG_NAME" \
-        && ldconfig \
-        && rm -rf /var/lib/apt/lists/* \
-        && apt-get clean ; \
-    fi
-ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH} \
-    CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}} \
+# install cuda-compat scripts, make sure cuda-compat package has been installed
+COPY ./docker/ant/update_cuda_compat.sh /root/.update_cuda_compat.sh
+
+RUN echo -e '\nsource /root/.update_cuda_compat.sh' >> /root/.bashrc
+
+ENV CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}} \
     C_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}
 
 # 安装x-runtime
