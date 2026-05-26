@@ -1,24 +1,18 @@
 #!/bin/sh
 
 NV_DRIVER_VERS=$(sed -n 's/^NVRM.*Kernel Module\( for [a-z0-9_]*\| \) *\([^() ]*\).*$/\2/p' /proc/driver/nvidia/version 2>/dev/null | sed 's/^$/unknown/')
-_CUDA_COMPAT_CHECKFILE="${HOME}/.${NV_DRIVER_VERS}.$(hostname).checked"
-
-if [ -f "${_CUDA_COMPAT_CHECKFILE}" ]; then
-  . "${_CUDA_COMPAT_CHECKFILE}"
-  return 0 2>/dev/null || exit 0
-fi
+_CUDA_COMPAT_CHECKFILE="/tmp/.${NV_DRIVER_VERS}.$(hostname).checked"
 
 _RUNNING_CUDA_VERSION="$(nvidia-smi -q -d COMPUTE 2>/dev/null | grep "^CUDA Version" | sed 's/^.*: //')"
 _CONTAINER_CUDA_VERSION="$(echo "${CUDA_VERSION}" | cut -d . -f 1-2)"
 
-if [ -e /dev/nvgpu ] && [ "${_RUNNING_CUDA_VERSION:-}" = "${_CONTAINER_CUDA_VERSION:-}" ]; then
+if [ "${_RUNNING_CUDA_VERSION:-}" = "${_CONTAINER_CUDA_VERSION:-}" ]; then
   # skip compat check to WAR http://nvbugs/4472547
-  touch "${_CUDA_COMPAT_CHECKFILE}" 2>/dev/null
+  return 0 2>/dev/null || exit 0
 fi
 
 # If the CUDA driver was detected and the compat check hasn't been flagged as done yet, proceed
-if { { [ -n "${NV_DRIVER_VERS}" ] && [ -e /dev/nvidiactl ] } || [ -e /dev/nvgpu ] } && [ ! -e "${_CUDA_COMPAT_CHECKFILE}" ]; then
-
+if [ \( \( -n "${NV_DRIVER_VERS}" -a -e /dev/nvidiactl \) -o -e /dev/nvgpu \) -a ! -e "${_CUDA_COMPAT_CHECKFILE}" ]; then
   # find cuda_compat with highest version or with CUDA_VERSION
   if [ -z "${_CUDA_COMPAT_PATH:-}" ]; then
     _CUDA_HOMES=$(find /usr/local/ -maxdepth 1 -type d -name "cuda-${_CONTAINER_CUDA_VERSION}*" | sort -r)
