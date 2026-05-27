@@ -512,6 +512,17 @@ class SchedulerDisaggregationPrefillMixin:
                 logits_output.input_token_logprobs = tuple(
                     logits_output.input_token_logprobs.tolist()
                 )
+            if logits_output.next_token_top_logprobs_val:
+                logits_output.next_token_top_logprobs_val = [
+                    v.tolist() for v in logits_output.next_token_top_logprobs_val
+                ]
+                logits_output.next_token_top_logprobs_idx = [
+                    x.tolist() for x in logits_output.next_token_top_logprobs_idx
+                ]
+            if logits_output.next_token_token_ids_logprobs_val:
+                logits_output.next_token_token_ids_logprobs_val = [
+                    v.tolist() for v in logits_output.next_token_token_ids_logprobs_val
+                ]
 
         # req trace metric stats
         total_tokens = sum(r.seqlen for r in batch.reqs) if batch.reqs else 0
