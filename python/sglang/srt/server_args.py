@@ -2363,11 +2363,7 @@ class ServerArgs:
                 support_mamba_cache=False,
             )
         elif model_arch in ["BailingMoeV2_5ForCausalLM"]:
-            if not self.mamba_extra_buffer_no_aligned:
-                logger.warning(
-                    f"Model {model_arch} can only use --mamba-extra-buffer-no-aligned"
-                )
-                self.mamba_extra_buffer_no_aligned = True
+            self.mamba_extra_buffer_no_aligned = True
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,
                 support_mamba_cache=True,
@@ -5972,12 +5968,6 @@ class ServerArgs:
             choices=MAMBA_SCHEDULER_STRATEGY_CHOICES,
             default=ServerArgs.mamba_scheduler_strategy,
             help="The strategy to use for mamba radix cache.",
-        )
-        parser.add_argument(
-            "--mamba-extra-buffer-no-aligned",
-            action="store_true",
-            default=ServerArgs.mamba_extra_buffer_no_aligned,
-            help="Whether disable alignment with radix cache when --mamba-scheduler-strategy is extra_buffer.",
         )
         parser.add_argument(
             "--mamba-track-interval",

@@ -1040,7 +1040,10 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
 
         # Calculate the branching point. It is defined as the last aligned position that
         # does not have a mamba value.
-        if len(value) > best_value_len:
+        if (
+            len(value) > best_value_len
+            and not get_global_server_args().mamba_extra_buffer_no_aligned
+        ):
             chunk_aligned_seqlen = (
                 sum(len(v) for v in value) // self.mamba_cache_chunk_size
             ) * self.mamba_cache_chunk_size
