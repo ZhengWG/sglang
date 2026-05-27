@@ -321,8 +321,6 @@ jobs:
     config:
       beforeExecute:
         isAutoSkip: ${{parameters.build_whl_only}}
-        confirm:
-          buttonName: 确认推送
     inputs:
       checkImageAndStc: false
       sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
@@ -339,8 +337,6 @@ jobs:
     config:
       beforeExecute:
         isAutoSkip: ${{parameters.build_whl_only}}
-        confirm:
-          buttonName: 确认推送
     inputs:
       checkImageAndStc: false
       sourceImage: reg.docker.alibaba-inc.com/sglang/deepep-base:${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}}
