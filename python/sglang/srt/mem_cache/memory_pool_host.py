@@ -2460,6 +2460,9 @@ class PoolEntry:
     device_pool: Any
     layer_mapper: Callable[[int], Optional[int]]
     is_primary_index_anchor: bool = False
+    # When True, the pool data is redundant across TP ranks and only TP0 needs
+    # to write it to storage.
+    tp_redundant: bool = False
     # Optional eviction callbacks for auto-alloc in HybridCacheController.
     # host_evict_fn(n): evict n slots from the host pool (used by write()).
     # device_evict_fn(n): evict n slots from the device pool (used by load()).

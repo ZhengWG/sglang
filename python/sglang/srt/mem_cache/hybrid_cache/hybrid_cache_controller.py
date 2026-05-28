@@ -631,11 +631,40 @@ class HybridCacheController(BaseHiCacheController):
         # Backup extra pools
         if operation.pool_transfers:
             self._resolve_sidecar_derived_pool_transfers(operation)
-            results = self.storage_backend.batch_set_v2(operation.pool_transfers)
+            results = self._extra_pool_backup(operation.pool_transfers)
             operation.pool_storage_result.update_extra_pool_hit_pages(results)
 
         # Backup kv pools
         super()._page_backup(operation)
+
+    def _extra_pool_backup(
+        self, pool_transfers: list[PoolTransfer]
+    ) -> dict[str, list[bool]]:
+        """Write non-redundant sidecar pools on every TP rank.
+
+        Pools marked as TP-redundant share the MLA KV storage semantics: only
+        TP0 writes them, while other TP ranks report success for bookkeeping.
+        """
+        backup_pools: list[PoolTransfer] = []
+        skip_pools: list[PoolTransfer] = []
+        for transfer in pool_transfers:
+            entry = self.mem_pool_host.entry_map.get(transfer.name)
+            if (
+                entry is not None
+                and entry.tp_redundant
+                and self.storage_config.tp_rank != 0
+            ):
+                skip_pools.append(transfer)
+            else:
+                backup_pools.append(transfer)
+
+        results: dict[str, list[bool]] = {}
+        if backup_pools:
+            results.update(self.storage_backend.batch_set_v2(backup_pools))
+        for transfer in skip_pools:
+            keys = transfer.keys or []
+            results[transfer.name] = [True] * len(keys)
+        return results
 
     def _resolve_sidecar_derived_pool_transfers(self, operation):
         for transfer in operation.pool_transfers:

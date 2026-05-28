@@ -1118,6 +1118,9 @@ class HiCacheController:
 
     # Backup batch by batch
     def _page_backup(self, operation):
+        if self.backup_skip:
+            return
+
         # Backup batch by batch
         prefix_keys = operation.prefix_keys
         for i in range(0, len(operation.hash_value), self.storage_batch_size):
@@ -1153,8 +1156,7 @@ class HiCacheController:
                 if operation is None:
                     continue
 
-                if not self.backup_skip:
-                    self._page_backup(operation)
+                self._page_backup(operation)
                 self.ack_backup_queue.put(operation)
 
             except Empty:
