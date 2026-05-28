@@ -24,6 +24,7 @@ dependencies = [
   "compressed-tensors",
   "decord2",
   "datasets",
+  "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
   "einops",
   "fastapi",
   "easydict",
