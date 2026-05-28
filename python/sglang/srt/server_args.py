@@ -2367,8 +2367,12 @@ class ServerArgs:
                 model_arch=model_arch,
                 support_mamba_cache=False,
             )
-        elif model_arch in ["BailingMoeV2_5ForCausalLM"]:
-            self.mamba_extra_buffer_no_aligned = True
+        elif model_arch in [
+            "BailingMoeV2_5ForCausalLM",
+            "BailingMoeV3ForCausalLM",
+        ]:
+            if model_arch == "BailingMoeV2_5ForCausalLM":
+                self.mamba_extra_buffer_no_aligned = True
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,
                 support_mamba_cache=True,
