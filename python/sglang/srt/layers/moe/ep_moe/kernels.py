@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 import triton
@@ -303,9 +304,11 @@ def _silu_and_mul_post_quant_kernel(
     size_n,
     fp8_max,
     fp8_min,
+    gemm1_clamp_limit,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    HAS_GEMM1_CLAMP_LIMIT: tl.constexpr,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -343,6 +346,9 @@ def _silu_and_mul_post_quant_kernel(
             other=0.0,
         )
         gate = gate / (1 + tl.exp(-gate))
+        if HAS_GEMM1_CLAMP_LIMIT:
+            gate = tl.minimum(gate, gemm1_clamp_limit)
+            up = tl.maximum(tl.minimum(up, gemm1_clamp_limit), -gemm1_clamp_limit)
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
@@ -370,6 +376,7 @@ def silu_and_mul_masked_post_quant_fwd(
     quant_group_size: int,
     masked_m: torch.Tensor,
     scale_ue8m0: bool = False,
+    gemm1_clamp_limit: Optional[float] = None,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -423,10 +430,12 @@ def silu_and_mul_masked_post_quant_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        -1.0 if gemm1_clamp_limit is None else gemm1_clamp_limit,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
         SCALE_UE8M0=scale_ue8m0,
+        HAS_GEMM1_CLAMP_LIMIT=gemm1_clamp_limit is not None,
     )
     return
 

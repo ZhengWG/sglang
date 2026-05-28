@@ -39,8 +39,13 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.bailing_moe import BailingMoEBlock, BailingMoEForCausalLM
 from sglang.srt.models.bailing_moe_linear import (
-    BailingMoELinearDecoderLayer,
+    BailingMoELinearDecoderLayer as BailingMoeV2_5DecoderLayer,
+)
+from sglang.srt.models.bailing_moe_linear import (
     BailingMoeV2_5ForCausalLM,
+)
+from sglang.srt.models.bailing_moe_v3 import (
+    BailingMoELinearDecoderLayer as BailingMoeV3DecoderLayer,
 )
 from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.server_args import get_global_server_args
@@ -83,11 +88,17 @@ class BailingMoEModelNextN(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        # currently eh_proj is not quant for blockwise fp8 quant, but quant for compressed-tensor
+        eh_quant = (
+            None
+            if quant_config is None or quant_config.get_name() == "fp8"
+            else quant_config
+        )
         self.eh_proj = ReplicatedLinear(
             2 * config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=eh_quant,
             prefix=add_prefix(f"layers.{config.num_hidden_layers}.eh_proj", prefix),
         )
 
@@ -96,7 +107,10 @@ class BailingMoEModelNextN(nn.Module):
         )
         if self.is_hybrid:
             config.attention_type = 1
-            self.decoder = BailingMoELinearDecoderLayer(
+            decoder_layer_cls = BailingMoeV2_5DecoderLayer
+            if hasattr(config, "gated_attention_proj_granularity_type"):
+                decoder_layer_cls = BailingMoeV3DecoderLayer
+            self.decoder = decoder_layer_cls(
                 config,
                 quant_config=quant_config,
                 layer_id=0,

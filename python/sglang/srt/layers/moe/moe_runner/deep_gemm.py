@@ -61,6 +61,16 @@ _MASKED_GEMM_FAST_ACT = get_bool_env_var("SGLANG_MASKED_GEMM_FAST_ACT")
 _DEEPGEMM_ON_H20 = get_bool_env_var("SGLANG_DEEPGEMM_ON_H20")
 
 
+def _silu_and_mul_clamp(
+    input: torch.Tensor, out: torch.Tensor, gemm1_clamp_limit: float
+) -> torch.Tensor:
+    gate, up = input.chunk(2, dim=-1)
+    gate = torch.nn.functional.silu(gate).clamp(max=gemm1_clamp_limit)
+    up = up.clamp(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+    torch.mul(gate, up, out=out)
+    return out
+
+
 # TODO(kaixih@nvidia): ideally we should merge this logic into
 # `fill_gateup_input_triton_kernel` to directly generate e8m0 scale.
 @torch.compile(disable=_is_hip or _is_npu)
@@ -126,6 +136,10 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         super().__init__(config)
         assert self.config.activation == "silu"
         assert self.config.is_gated
+        assert not (
+            self.config.gemm1_clamp_limit is not None
+            and self.config.swiglu_limit is not None
+        ), "gemm1_clamp_limit and swiglu_limit use different SwiGLU clamp semantics"
         self.swiglu_limit = self.config.swiglu_limit
         self.use_swizzle = False
         if envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get():
@@ -215,7 +229,35 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         dispose_tensor(hidden_states)
         dispose_tensor(hidden_states_scale)
 
-        if envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get():
+        if self.config.gemm1_clamp_limit is not None:
+            from sglang.srt.layers.quantization.fp8_kernel import (
+                sglang_per_token_group_quant_fp8,
+            )
+
+            down_input = torch.empty(
+                (
+                    all_tokens,
+                    N // 2,
+                ),
+                device=gateup_output.device,
+                dtype=torch.bfloat16,
+            )
+            _silu_and_mul_clamp(
+                gateup_output.view(-1, N),
+                down_input,
+                self.config.gemm1_clamp_limit,
+            )
+
+            down_input_fp8, down_input_scale = sglang_per_token_group_quant_fp8(
+                down_input,
+                scale_block_size,
+                column_major_scales=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                scale_tma_aligned=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+            )
+            del gateup_output
+            del down_input
+        elif envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.get():
             swiglu_limit_arg: Optional[float] = self.swiglu_limit
 
             down_input_fp8 = torch.empty(
@@ -445,8 +487,9 @@ class DeepGemmRunnerCore(MoeRunnerCore):
             masked_m,
             group_size=128,
             topk=self.config.top_k,
+            gemm1_clamp_limit=self.config.gemm1_clamp_limit,
             swiglu_limit=swiglu_limit_arg,
-            swizzle=self.use_swizzle,
+            swizzle=self.use_swizzle and self.config.gemm1_clamp_limit is None,
         )
         del gateup_output
 
@@ -823,6 +866,7 @@ def _varlen_deep_gemm_silu_mul_quant(
     masked_m: Optional[torch.Tensor],
     group_size: int,
     topk: int,
+    gemm1_clamp_limit: Optional[float] = None,
     swiglu_limit: Optional[float] = None,
     swizzle: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -831,7 +875,7 @@ def _varlen_deep_gemm_silu_mul_quant(
         sglang_per_token_group_quant_8bit,
     )
 
-    if _MASKED_GEMM_FAST_ACT:
+    if _MASKED_GEMM_FAST_ACT and gemm1_clamp_limit is None:
         assert not swizzle, (
             "SGLANG_OPT_FIX_MEGA_MOE_MEMORY is incompatible with "
             "SGLANG_MASKED_GEMM_FAST_ACT (swizzled layout only supported by JIT act)"
@@ -863,11 +907,35 @@ def _varlen_deep_gemm_silu_mul_quant(
         dtype=torch.float8_e4m3fn,
     )
 
+    if gemm1_clamp_limit is not None:
+        assert (
+            swiglu_limit is None
+        ), "gemm1_clamp_limit and swiglu_limit use different SwiGLU clamp semantics"
+        assert (
+            not swizzle
+        ), "SGLANG_OPT_FIX_MEGA_MOE_MEMORY does not support gemm1_clamp_limit"
+        down_input_scale = torch.empty(
+            (E, N, G),
+            device=hidden_states_device,
+            dtype=torch.float32,
+        )
+        silu_and_mul_masked_post_quant_fwd(
+            gateup_output,
+            down_input,
+            down_input_scale,
+            group_size,
+            masked_m,
+            scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+        )
+        return down_input, down_input_scale
+
     use_jit_ep_activation = envs.SGLANG_OPT_USE_JIT_EP_ACTIVATION.get()
     if N % 4 != 0 or G % 4 != 0:
         use_jit_ep_activation = False
 
     if use_jit_ep_activation:
+        assert N % 4 == 0 and G % 4 == 0
         packed_ue8m0 = deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
         down_input_scale = torch.empty(
             (E, G // 4, N) if packed_ue8m0 else (E, N, G),

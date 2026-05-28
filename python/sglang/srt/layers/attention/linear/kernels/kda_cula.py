@@ -83,7 +83,7 @@ class CulaKDAKernel(LinearAttnKernelBase):
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Guard: sequences shorter than cuLA chunk size fall back to Triton.
         seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         min_seq_len = seq_lens.min().item()
@@ -114,7 +114,7 @@ class CulaKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from sgl_kernel import kda_fwd_prefill
 
         from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
@@ -180,7 +180,7 @@ class CulaKDAKernel(LinearAttnKernelBase):
         # 11. Reshape output: [packed_seq, H, D] -> [1, packed_seq, H, D]
         output = output.reshape(batch_size, packed_seq, num_heads, head_dim)
 
-        return output
+        return output, None
 
     def target_verify(
         self,

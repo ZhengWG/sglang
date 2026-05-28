@@ -652,6 +652,8 @@ class MambaAttnBackendBase(AttentionBackend):
         using indices computed by `_init_track_conv_indices`.
         """
         if forward_metadata.has_mamba_track_mask:
+            if h is None:
+                return
             h = h.squeeze(0)
 
             if forward_metadata.track_ssm_h_src.numel() > 0:

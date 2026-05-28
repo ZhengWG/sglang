@@ -13,12 +13,16 @@ from transformers import PretrainedConfig
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
     get_moe_expert_parallel_world_size,
+    get_moe_tensor_parallel_rank,
+    get_moe_tensor_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
+    moe_expert_parallel_all_reduce,
+    moe_tensor_model_parallel_all_reduce,
 )
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.communicator import (
@@ -39,8 +43,11 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
-from sglang.srt.layers.moe import get_moe_a2a_backend
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
+from sglang.srt.layers.moe import (
+    get_moe_a2a_backend,
+    should_skip_post_experts_all_reduce,
+)
+from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -168,6 +175,7 @@ class DsV3MLA(DeepseekV2AttentionMLA):
                 self.num_heads,
                 bias=False,
                 prefix=f"{prefix}.output_gate",
+                quant_config=None,
                 tp_rank=attn_tp_rank,
                 tp_size=attn_tp_size,
             )
@@ -337,6 +345,7 @@ class BailingMLP(nn.Module):
         x,
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
+        forward_batch: Optional[ForwardBatch] = None,
     ):
         x, _ = self.gate_up_proj(x)
 
@@ -443,6 +452,8 @@ class BailingMoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.moe_ep_size = get_moe_expert_parallel_world_size()
+        self.moe_tp_size = get_moe_tensor_parallel_world_size()
+        self.moe_tp_rank = get_moe_tensor_parallel_rank()
 
         self.top_k = config.num_experts_per_tok
         self.norm_expert_prob = getattr(config, "norm_topk_prob", False)
@@ -520,18 +531,7 @@ class BailingMoE(nn.Module):
         if self.moe_ep_size > 1 and self.num_fused_shared_experts > 0:
             fused_shared_experts_scaling_factor = 1.0 / float(self.moe_ep_size)
 
-        self.topk = TopK(
-            top_k=self.top_k + self.num_fused_shared_experts,
-            use_grouped_topk=self.use_grouped_topk,
-            renormalize=self.norm_expert_prob,
-            num_expert_group=self.num_expert_group,
-            topk_group=self.topk_group,
-            correction_bias=self.correction_bias,
-            routed_scaling_factor=self.routed_scaling_factor,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
-        )
-        self.experts = FusedMoE(
+        self.experts = get_moe_impl_class(quant_config)(
             num_experts=self.num_experts + self.num_fused_shared_experts,
             top_k=self.top_k + self.num_fused_shared_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
@@ -543,13 +543,26 @@ class BailingMoE(nn.Module):
             prefix=f"{prefix}.experts",
             gemm1_clamp_limit=self.expert_swiglu_limit,
         )
+        self.topk = TopK(
+            top_k=self.top_k + self.num_fused_shared_experts,
+            layer_id=self.layer_id,
+            use_grouped_topk=self.use_grouped_topk,
+            renormalize=self.norm_expert_prob,
+            num_expert_group=self.num_expert_group,
+            topk_group=self.topk_group,
+            correction_bias=self.correction_bias,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scaling_factor_on_output=(
+                self.experts.should_fuse_routed_scaling_factor_in_topk
+            ),
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
+        )
 
         # Whether to apply routed_scaling_factor at model layer.
         # For A2A MoE paths (e.g., DeepEP), the runner/post_permute does not apply it,
-        # so we need to apply it here. For non-A2A paths (standard), the runner handles it.
-        # Note: When DeepEP is enabled, fused shared experts is auto-disabled in
-        # determine_num_fused_shared_experts(), so num_fused_shared_experts is always 0
-        # in A2A mode — we can safely scale the entire output.
+        # so apply it here unless the selected runner fuses it into TopK weights.
+        # This scales only routed expert output; shared experts are added unscaled.
         self._apply_routed_scaling_factor_on_output = (
             self._enable_a2a_moe
             and not self.experts.should_fuse_routed_scaling_factor_in_topk
@@ -564,17 +577,20 @@ class BailingMoE(nn.Module):
                 "moe_shared_expert_intermediate_size",
                 self.intermediate_size * self.num_shared_experts,
             )
-            # Compute padded intermediate size for FP8 quantization
-            padded_intermediate_size = self._compute_padded_intermediate_size(
-                intermediate_size, quant_config
-            )
             # When DeepEP is enabled, shared experts should not be TP-sharded
             # because MoE output is already complete after EP combine.
             # Using tp_size=1 ensures shared output is also complete,
             # so no all-reduce is needed at the MoE level.
             shared_tp_kwargs = {}
+            shared_tp_size = self.tp_size
             if self._enable_a2a_moe:
                 shared_tp_kwargs = dict(tp_rank=0, tp_size=1)
+                shared_tp_size = 1
+            # Compute padded intermediate size for FP8 quantization using the
+            # actual TP degree used by shared_experts.
+            padded_intermediate_size = self._compute_padded_intermediate_size(
+                intermediate_size, quant_config, shared_tp_size
+            )
             self.shared_experts = BailingMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
@@ -593,6 +609,7 @@ class BailingMoE(nn.Module):
         self,
         intermediate_size: int,
         quant_config: Optional[QuantizationConfig],
+        tp_size: int,
     ) -> Optional[int]:
         """Compute padded intermediate size to satisfy FP8 blockwise quantization alignment.
 
@@ -606,6 +623,7 @@ class BailingMoE(nn.Module):
         Args:
             intermediate_size: Original intermediate size
             quant_config: Quantization configuration
+            tp_size: TP degree used by the MLP being padded
 
         Returns:
             Padded intermediate size if padding is needed, None otherwise
@@ -628,7 +646,7 @@ class BailingMoE(nn.Module):
         block_size = max(block_n, block_k)
 
         # Check if padding is needed
-        intermediate_size_per_partition = intermediate_size // self.tp_size
+        intermediate_size_per_partition = intermediate_size // tp_size
 
         # Check if already aligned
         if (
@@ -638,7 +656,7 @@ class BailingMoE(nn.Module):
             return None
 
         # Compute padded size: align to block_size * tp_size
-        alignment = block_size * self.tp_size
+        alignment = block_size * tp_size
         padded_intermediate_size = (
             (intermediate_size + alignment - 1) // alignment
         ) * alignment
@@ -646,7 +664,7 @@ class BailingMoE(nn.Module):
         log_info_on_rank0(
             logger,
             f"Padding shared_experts intermediate_size from {intermediate_size} to {padded_intermediate_size} "
-            f"to satisfy FP8 blockwise quantization alignment (block_size={block_size}, tp_size={self.tp_size}).",
+            f"to satisfy FP8 blockwise quantization alignment (block_size={block_size}, tp_size={tp_size}).",
         )
 
         return padded_intermediate_size
@@ -656,9 +674,10 @@ class BailingMoE(nn.Module):
         hidden_states: torch.Tensor,
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
+        forward_batch: Optional[ForwardBatch] = None,
     ) -> torch.Tensor:
         if self._enable_a2a_moe:
-            return self.forward_deepep(hidden_states)
+            return self.forward_deepep(hidden_states, forward_batch)
         return self.forward_normal(
             hidden_states, should_allreduce_fusion, use_reduce_scatter
         )
@@ -672,38 +691,68 @@ class BailingMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
 
-        # Only compute shared_output when not using fused shared experts
-        if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
-            shared_output = self.shared_experts(hidden_states)
-        else:
+        if num_tokens == 0:
             shared_output = None
+            topk_output = self.topk.empty_topk_output(hidden_states.device)
+        else:
+            # Only compute shared_output when not using fused shared experts
+            if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
+                shared_output = self.shared_experts(hidden_states)
+            else:
+                shared_output = None
 
-        router_logits = self.gate(hidden_states)
-        topk_output = self.topk(hidden_states, router_logits)
+            router_logits = self.gate(hidden_states)
+            topk_output = self.topk(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
 
-        if self.tp_size > 1 and not use_reduce_scatter and not should_allreduce_fusion:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        if self.moe_ep_size > 1 and not should_skip_post_experts_all_reduce(
+            is_tp_path=False,
+            use_reduce_scatter=use_reduce_scatter,
+            should_allreduce_fusion=should_allreduce_fusion,
+        ):
+            final_hidden_states = moe_expert_parallel_all_reduce(final_hidden_states)
+
+        if self.moe_tp_size > 1 and not should_skip_post_experts_all_reduce(
+            is_tp_path=True,
+            use_reduce_scatter=use_reduce_scatter,
+            should_allreduce_fusion=should_allreduce_fusion,
+        ):
+            final_hidden_states = moe_tensor_model_parallel_all_reduce(
+                final_hidden_states
+            )
         return final_hidden_states
 
     def forward_deepep(
         self,
         hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        assert forward_batch is not None, "forward_batch is required for DeepEP MoE"
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
 
-        # Only compute shared_output when not using fused shared experts
-        if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
-            shared_output = self.shared_experts(hidden_states)
-        else:
+        if num_tokens == 0:
             shared_output = None
+            topk_output = self.topk.empty_topk_output(hidden_states.device)
+        else:
+            # Only compute shared_output when not using fused shared experts
+            if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
+                shared_output = self.shared_experts(hidden_states)
+            else:
+                shared_output = None
 
-        router_logits = self.gate(hidden_states)
-        topk_output = self.topk(hidden_states, router_logits)
+            router_logits = self.gate(hidden_states)
+            topk_output = self.topk(
+                hidden_states,
+                router_logits,
+                num_token_non_padded=forward_batch.num_token_non_padded,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
+            )
         final_hidden_states = self.experts(hidden_states, topk_output)
 
         # In DeepEP mode, MoE output is already complete after EP combine.
@@ -878,6 +927,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
         layer_id: int = 0,
         prefix: str = "layer",
         num_fused_shared_experts: int = 0,
+        is_nextn: bool = False,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -937,8 +987,9 @@ class BailingMoELinearDecoderLayer(nn.Module):
 
         self.expert_num = config.num_experts
         self.hidden_size = config.hidden_size
-        is_moe_layer = not (self.expert_num == 1) and (
-            self.layer_id >= config.first_k_dense_replace
+        is_moe_layer = is_nextn or (
+            not (self.expert_num == 1)
+            and (self.layer_id >= config.first_k_dense_replace)
         )
         self.is_layer_sparse = is_moe_layer
         is_previous_moe_layer = not (self.expert_num == 1) and (
@@ -963,7 +1014,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 tp_size=mlp_tp_size,
             )
         else:
-            if self.layer_id >= config.first_k_dense_replace:
+            if is_nextn or self.layer_id >= config.first_k_dense_replace:
                 # MoE layer
                 self.mlp = BailingMoE(
                     config,
@@ -1000,7 +1051,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
             allow_reduce_scatter=True,
-            is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            is_last_layer=(is_nextn or layer_id == config.num_hidden_layers - 1),
             qkv_latent_func=(
                 self.attention.prepare_qkv_latent
                 if self.attention_type == 1 and self.use_mla
@@ -1073,6 +1124,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                 hidden_states,
                 should_allreduce_fusion=should_allreduce_fusion,
                 use_reduce_scatter=use_reduce_scatter,
+                forward_batch=forward_batch,
             )
 
         # Step 5: postprocess_layer (dp_scatter for next layer)

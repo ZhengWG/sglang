@@ -117,7 +117,7 @@ class KDAKernelDispatcher:
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.extend_kernel.extend(
             q,
             k,
@@ -166,13 +166,32 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
+        self.conv_states_shape = (
+            model_runner.req_to_token_pool.mamba_pool.mamba_cache.conv[0]
+            .transpose(-1, -2)
+            .shape
+        )
         decode_backend = get_linear_attn_decode_backend()
         prefill_backend = get_linear_attn_prefill_backend()
         self.kernel_dispatcher = KDAKernelDispatcher(decode_backend, prefill_backend)
 
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        super().init_forward_metadata(forward_batch)
+        if self.forward_metadata.has_mamba_track_mask:
+            self.forward_metadata.mamba_track_mask_indices = (
+                forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
+            )
+            if not forward_batch.forward_mode.is_target_verify():
+                self.forward_metadata.conv_states_mask_indices = (
+                    forward_batch.mamba_track_indices[
+                        self.forward_metadata.mamba_track_mask_indices
+                    ]
+                )
+
     def forward_decode(
         self,
         layer: RadixLinearAttention,
+        forward_batch: ForwardBatch,
         mixed_qkv: Union[torch.Tensor, Tuple[torch.Tensor, ...]],
         a: torch.Tensor,
         b: torch.Tensor,
@@ -197,7 +216,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
-        return self.kernel_dispatcher.decode(
+        lower_bound = kwargs.get("lower_bound", getattr(layer, "lower_bound", None))
+
+        result = self.kernel_dispatcher.decode(
             q=q,
             k=k,
             v=v,
@@ -208,8 +229,18 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
-            lower_bound=getattr(layer, "lower_bound", None),
+            lower_bound=lower_bound,
         )
+
+        # Track SSM/conv states for prefix caching during decode.
+        # The kernel updates ssm_states in-place; copy the updated states to
+        # persistent track slots so the radix cache can store them.
+        if not forward_batch.forward_mode.is_target_verify():
+            self._track_mamba_state_decode(
+                forward_batch, conv_states, ssm_states, cache_indices
+            )
+
+        return result
 
     def forward_extend(
         self,
@@ -303,7 +334,16 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
             q, k, v = mixed_qkv.split(splits, dim=-1)
         else:
-            q, k, v = mixed_qkv.transpose(0, 1).split(splits, dim=0)
+            mixed_qkv_t = mixed_qkv.transpose(0, 1)
+            if self.forward_metadata.has_mamba_track_mask:
+                mixed_qkv_to_track = mixed_qkv_t[
+                    :, self.forward_metadata.track_conv_indices
+                ].transpose(0, 1)
+                conv_states[self.forward_metadata.conv_states_mask_indices] = (
+                    mixed_qkv_to_track
+                )
+
+            q, k, v = mixed_qkv_t.split(splits, dim=0)
             q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights.split(
                 splits, dim=0
             )
@@ -351,6 +391,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
+        h = None
         if is_target_verify:
             core_attn_out = self.kernel_dispatcher.target_verify(
                 A_log=layer.A_log,
@@ -370,7 +411,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 lower_bound=getattr(layer, "lower_bound", None),
             )
         else:
-            core_attn_out = self.kernel_dispatcher.extend(
+            core_attn_out, h = self.kernel_dispatcher.extend(
                 q=q,
                 k=k,
                 v=v,
@@ -382,6 +423,13 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
                 lower_bound=getattr(layer, "lower_bound", None),
+            )
+
+        # Track SSM states at chunk boundaries for prefix caching.
+        # The h tensor from the FLA kernel contains per-chunk boundary states.
+        if h is not None and not forward_batch.forward_mode.is_target_verify():
+            self._track_mamba_state_extend(
+                forward_batch, h, ssm_states, self.forward_metadata
             )
 
         return core_attn_out
