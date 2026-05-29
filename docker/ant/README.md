@@ -5,7 +5,7 @@
 1. 通过`sglang_runtime.aci.yml` 完整编译构建出可供线上使用的生产镜像，保证镜像中安装`sglang` 和`sglang-kernel` 依赖的必要包。由于是从编译sglang，sglang-kernel，然后编译安装deepep，flash-mla等sglang依赖的组件，此流水线构建时间比较费时，一般要两个小时。
 
 2. 在有了完整构建的镜像之后，如果仅仅是修改`sglang`或者`sglang-kernel`代码，可以通过触发`sglang_runtime.aci.yml`只构建`sglang`， `sglang-kernel`两个包，然后触发`sglang_fast`流水线，基于第一步构建的镜像，覆盖安装新制作的`sglang`和`sglang-kernel`包。
-**注意：** `sglang_fast.aci.yml`中默认使用的基础镜像基于commit [922bba8a](https://code.alipay.com/Theta/SGLang/tree/922bba8a-20260528182048), 如果使用此版本镜像作为基础镜像，请确保提交流水线时设置的`sglang`和`sglang-kernel`的依赖和此commit中声明的一致，比如 [pyproject.toml](https://code.alipay.com/Theta/SGLang/blob/922bba8a-20260528182048/python/pyproject.toml)。
+**注意：** `sglang_fast.aci.yml`中默认使用的基础镜像基于commit [1ef14f05](https://code.alipay.com/Theta/SGLang/commit/1ef14f05291acb0b187bf98db6c3d52c6f917a86), 如果使用此版本镜像作为基础镜像，请确保提交流水线时设置的`sglang`和`sglang-kernel`的依赖和此commit中声明的一致，比如 [pyproject.toml](https://code.alipay.com/Theta/SGLang/blob/1ef14f05291acb0b187bf98db6c3d52c6f917a86/python/pyproject.toml)。
 
 
 ## 常见构建场景
