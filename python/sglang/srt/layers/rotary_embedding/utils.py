@@ -7,10 +7,17 @@ from typing import Tuple
 
 import torch
 
-from sglang.srt.utils import cpu_has_amx_support, get_compiler_backend, is_cpu, is_npu
+from sglang.srt.utils import (
+    cpu_has_amx_support,
+    get_compiler_backend,
+    is_cpu,
+    is_cuda,
+    is_npu,
+)
 
 _is_npu = is_npu()
 _is_cpu = is_cpu()
+_is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
 
 if _is_npu:
@@ -128,9 +135,68 @@ def apply_rotary_pos_emb_npu(
     return q_embed, k_embed
 
 
+def apply_rotary_pos_emb_cuda_triton(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """CUDA-graph-safe ViT/LM RoPE via a Triton kernel (no torch.compile).
+
+    Semantics match :func:`apply_rotary_pos_emb_native` for the common ViT
+    layout where ``q`` is ``[num_tokens, num_heads, head_size]`` and ``cos``,
+    ``sin`` are ``[num_tokens, head_size]``. Falls back to the native
+    implementation for less common layouts (e.g. ``unsqueeze_dim != 1``,
+    4D ``q``/``k`` with a leading batch axis, mismatched dtypes that the
+    kernel does not own).
+
+    The kernel writes ``q`` and ``k`` in-place when their dtype is already
+    compatible; this both avoids extra allocations during CUDA-graph capture
+    and prevents the dynamic shape / RNG state that ``torch.compile`` would
+    otherwise inject.
+    """
+    # Lazy import to avoid pulling Triton on CPU/NPU paths at module import.
+    from sglang.srt.layers.rotary_embedding.triton_kernels import (
+        triton_vision_rope_qk_inplace,
+    )
+
+    # Only handle the ViT / "flat token" layout in-kernel. Anything else
+    # (e.g., LM-side 4D [B, S, H, D] with unsqueeze_dim=1, broadcasted cos/sin,
+    # or non-2D cos/sin) is safely delegated to the native (torch.compile'd)
+    # implementation which is *not* used inside cuda-graph capture.
+    if (
+        unsqueeze_dim == 1
+        and q.dim() == 3
+        and k.dim() == 3
+        and cos.dim() == 2
+        and sin.dim() == 2
+        and cos.shape[0] == q.shape[0]
+        and cos.shape[-1] == q.shape[-1]
+        and q.dtype == k.dtype
+        and q.is_cuda
+        and q.stride(-1) == 1
+        and q.stride(-2) == q.shape[-1]
+        and k.stride(-1) == 1
+        and k.stride(-2) == k.shape[-1]
+    ):
+        triton_vision_rope_qk_inplace(q, k, cos, sin)
+        return q, k
+
+    return apply_rotary_pos_emb_native(q, k, cos, sin, unsqueeze_dim)
+
+
 if _is_npu:
     apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 elif _is_cpu and _is_cpu_amx_available:
     apply_rotary_pos_emb = torch.ops.sgl_kernel.apply_rotary_pos_emb_cpu
+elif _is_cuda:
+    # CUDA path: prefer the Triton kernel so that the operator is safe to
+    # capture inside torch.cuda.graph (used by ViT CUDA Graph Runner /
+    # encode_server for Qwen3-VL, Qwen3.5, Qwen2.5-VL, etc.). The previous
+    # default `apply_rotary_pos_emb_native` is `torch.compile(dynamic=True)`-
+    # wrapped and conflicts with cuda-graph capture (manifests as random_rng
+    # / dynamic-shape guard failures).
+    apply_rotary_pos_emb = apply_rotary_pos_emb_cuda_triton
 else:
     apply_rotary_pos_emb = apply_rotary_pos_emb_native
