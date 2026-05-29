@@ -66,7 +66,10 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
+from sglang.srt.layers.rotary_embedding import (
+    apply_rotary_pos_emb,
+    apply_rotary_pos_emb_eager,
+)
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, get_bool_env_var
 
@@ -75,6 +78,43 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 ROTARY_EMBED_CLASSES = {
     "normal": apply_rotary_pos_emb,
 }
+
+
+# Cached resolution of the rotary-embedding function used by VisionAttention.
+# When ViT CUDA Graph is enabled (SGLANG_VIT_ENABLE_CUDA_GRAPH=1) on CUDA we
+# must avoid the @torch.compile wrapper on apply_rotary_pos_emb_native, which
+# injects dynamo-guard / dynamic-shape state that is not capturable inside
+# torch.cuda.graph(...) (the well-known "random_rng" capture failure).
+_vision_rope_fn = None
+
+
+def _get_vision_rope_fn():
+    """Return the rotary embedding function used by VisionAttention.
+
+    - SGLANG_VIT_ENABLE_CUDA_GRAPH=0 (default) → original
+      ``apply_rotary_pos_emb`` (unchanged behavior).
+    - SGLANG_VIT_ENABLE_CUDA_GRAPH=1 on CUDA → fused in-place Triton
+      kernel (no torch.compile, CUDA-graph safe). Falls back to
+      ``apply_rotary_pos_emb_eager`` if the Triton import fails.
+
+    The result is cached after the first call to keep per-layer overhead
+    to a single ``is None`` check.
+    """
+    global _vision_rope_fn
+    if _vision_rope_fn is not None:
+        return _vision_rope_fn
+    if _is_cuda and envs.SGLANG_VIT_ENABLE_CUDA_GRAPH.get():
+        try:
+            from sglang.srt.layers.rotary_embedding.triton_kernels import (
+                triton_apply_rotary_pos_emb,
+            )
+
+            _vision_rope_fn = triton_apply_rotary_pos_emb
+        except ImportError:
+            _vision_rope_fn = apply_rotary_pos_emb_eager
+    else:
+        _vision_rope_fn = apply_rotary_pos_emb
+    return _vision_rope_fn
 
 # === Vision Encoder === #
 FLASHINFER_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
@@ -1123,7 +1163,8 @@ class VisionAttention(nn.Module):
                 cos = torch.cat([cos, cos], dim=-1)
                 sin = torch.cat([sin, sin], dim=-1)
 
-            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            rope_fn = _get_vision_rope_fn()
+            q, k = rope_fn(q, k, cos, sin)
             q = q.view(original_q_shape)
             k = k.view(original_k_shape)
 

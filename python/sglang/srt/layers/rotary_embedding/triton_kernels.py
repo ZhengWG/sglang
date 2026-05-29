@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 import triton
@@ -270,3 +270,170 @@ def triton_ernie45_rope_fused_inplace(
         is_neox_style=is_neox_style,
         num_warps=num_warps,
     )
+
+
+# ---------------------------------------------------------------------------
+# Vision RoPE: fused in-place Triton kernel for pre-computed cos/sin
+# ---------------------------------------------------------------------------
+# Vision encoders (e.g. Qwen3-VL / Qwen3.5 ViT) precompute per-token cos/sin
+# via rot_pos_emb() rather than indexing into a cos_sin_cache by position id.
+# Using a Triton kernel here avoids the @torch.compile decorator on
+# apply_rotary_pos_emb_native, which injects dynamo-guard / dynamic-shape
+# state that is not capturable inside torch.cuda.graph(...).
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _triton_vision_rope_fused(
+    q_ptr,
+    k_ptr,
+    cos_ptr,
+    sin_ptr,
+    q_stride_t,
+    q_stride_h,
+    k_stride_t,
+    k_stride_h,
+    cos_stride_t,
+    sin_stride_t,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    rd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd: tl.constexpr,
+):
+    """Per-token vision RoPE kernel (NEOX-style).
+
+    Grid: (num_tokens,). Each program handles all heads for one token.
+    Vectorized over a [heads, half_dim] tile for both q and k. Computes in
+    fp32 internally for parity with apply_rotary_pos_emb_native, then writes
+    back in the original q/k dtype.
+    """
+    pid = tl.program_id(0)
+    half_rd = rd // 2
+
+    cos_base = cos_ptr + pid * cos_stride_t
+    sin_base = sin_ptr + pid * sin_stride_t
+
+    d = tl.arange(0, pad_hd // 2)
+    d_mask = d < half_rd
+    cos_row = tl.load(cos_base + d, mask=d_mask, other=0.0).to(tl.float32)
+    sin_row = tl.load(sin_base + d, mask=d_mask, other=0.0).to(tl.float32)
+
+    q_base = q_ptr + pid * q_stride_t
+    k_base = k_ptr + pid * k_stride_t
+
+    # q: vectorized [pad_n_qh, pad_hd/2]
+    qh_idx = tl.arange(0, pad_n_qh)[:, None]
+    d_idx = tl.arange(0, pad_hd // 2)[None, :]
+    q_mask = (qh_idx < n_qh) & (d_idx < half_rd)
+
+    q_off0 = qh_idx * q_stride_h + d_idx
+    q_off1 = qh_idx * q_stride_h + d_idx + half_rd
+
+    q0 = tl.load(q_base + q_off0, mask=q_mask, other=0.0).to(tl.float32)
+    q1 = tl.load(q_base + q_off1, mask=q_mask, other=0.0).to(tl.float32)
+    q_out0 = q0 * cos_row[None, :] - q1 * sin_row[None, :]
+    q_out1 = q1 * cos_row[None, :] + q0 * sin_row[None, :]
+    tl.store(q_base + q_off0, q_out0, mask=q_mask)
+    tl.store(q_base + q_off1, q_out1, mask=q_mask)
+
+    # k: vectorized [pad_n_kh, pad_hd/2]
+    kh_idx = tl.arange(0, pad_n_kh)[:, None]
+    k_mask = (kh_idx < n_kh) & (d_idx < half_rd)
+
+    k_off0 = kh_idx * k_stride_h + d_idx
+    k_off1 = kh_idx * k_stride_h + d_idx + half_rd
+
+    k0 = tl.load(k_base + k_off0, mask=k_mask, other=0.0).to(tl.float32)
+    k1 = tl.load(k_base + k_off1, mask=k_mask, other=0.0).to(tl.float32)
+    k_out0 = k0 * cos_row[None, :] - k1 * sin_row[None, :]
+    k_out1 = k1 * cos_row[None, :] + k0 * sin_row[None, :]
+    tl.store(k_base + k_off0, k_out0, mask=k_mask)
+    tl.store(k_base + k_off1, k_out1, mask=k_mask)
+
+
+def triton_vision_rope_fused_inplace(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> None:
+    """Apply NEOX-style rotary position embedding in-place (CUDA-graph safe).
+
+    Args:
+        q:   [num_tokens, num_heads,    head_size]   (modified in-place)
+        k:   [num_tokens, num_kv_heads, head_size]   (modified in-place)
+        cos: [num_tokens, head_size]                 (full head dim, not half)
+        sin: [num_tokens, head_size]                 (full head dim, not half)
+    """
+    num_tokens, n_qh, hd = q.shape
+    n_kh = k.shape[1]
+    rd = cos.shape[-1]
+
+    # Degenerate case (e.g. an encoder request with no patches): nothing to
+    # do and a zero-block grid is unsafe to launch under CUDA Graph capture.
+    if num_tokens == 0:
+        return
+
+    if cos.dtype != q.dtype:
+        cos = cos.to(q.dtype)
+    if sin.dtype != q.dtype:
+        sin = sin.to(q.dtype)
+
+    pad_n_qh = triton.next_power_of_2(n_qh)
+    pad_n_kh = triton.next_power_of_2(n_kh)
+    pad_hd = triton.next_power_of_2(hd)
+
+    _triton_vision_rope_fused[(num_tokens,)](
+        q,
+        k,
+        cos,
+        sin,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        cos.stride(0),
+        sin.stride(0),
+        n_qh=n_qh,
+        n_kh=n_kh,
+        hd=hd,
+        rd=rd,
+        pad_n_qh=pad_n_qh,
+        pad_n_kh=pad_n_kh,
+        pad_hd=pad_hd,
+    )
+
+
+def triton_apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Drop-in replacement for ``apply_rotary_pos_emb_native`` using Triton.
+
+    Vision-encoder convention: q/k are 3D ``[N, H, D]`` and cos/sin are 2D,
+    either ``[N, D/2]`` (will be doubled here) or ``[N, D]``.
+
+    Unlike ``apply_rotary_pos_emb_native`` this function is *in-place* on
+    q/k for performance, but still returns ``(q, k)`` to keep the caller
+    contract identical. 4D q/k (LM-side callers like Gemma3) is not
+    supported here — caller must select the native path.
+    """
+    assert q.dim() == 3 and k.dim() == 3, (
+        "triton_apply_rotary_pos_emb expects 3D q/k of shape [N, H, D]; "
+        f"got q.dim()={q.dim()}, k.dim()={k.dim()}"
+    )
+    q = q.contiguous()
+    k = k.contiguous()
+    if cos.dim() == 2 and cos.size(-1) * 2 == q.size(-1):
+        cos = torch.cat([cos, cos], dim=-1)
+        sin = torch.cat([sin, sin], dim=-1)
+    cos = cos.contiguous()
+    sin = sin.contiguous()
+    triton_vision_rope_fused_inplace(q, k, cos, sin)
+    return q, k
