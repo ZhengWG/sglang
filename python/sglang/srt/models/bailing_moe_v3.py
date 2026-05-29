@@ -247,6 +247,39 @@ def is_linear_layer(layer_idx, layer_group_size):
         return False
 
 
+_NEXTN_SPEC_WEIGHT_NAMES = (
+    "final_layernorm",
+    "eh_proj",
+    "enorm",
+    "hnorm",
+)
+
+
+def resolve_nextn_layer_id(config: PretrainedConfig) -> int:
+    """Locate the nextn predict layer index in the HF checkpoint name space."""
+    if not hasattr(config, "num_nextn_predict_layers"):
+        raise ValueError("num nextn_predict_layers is not in the config")
+    assert (
+        config.num_nextn_predict_layers == 1
+    ), "Only 1 nextn layer is supported"
+    return 0 if config.num_hidden_layers == 1 else config.num_hidden_layers
+
+
+def rewrite_nextn_weight_name(name: str, nextn_layer_prefix: str) -> Optional[str]:
+    """Map a HF nextn-layer weight name onto the local NextN module namespace.
+
+    The caller must already have ensured ``name.startswith(nextn_layer_prefix)``.
+    Returns the rewritten name, or None to signal the weight should be skipped
+    (e.g. shared head / embed tokens which are reused from the target model).
+    """
+    if "shared_head.head" in name or "embed_tokens" in name:
+        return None
+    for spec in _NEXTN_SPEC_WEIGHT_NAMES:
+        if spec in name:
+            return name.replace(nextn_layer_prefix, "model")
+    return name.replace(nextn_layer_prefix, "model.decoder")
+
+
 def is_pp_missing_parameter(
     name: str,
     model: torch.nn.Module,
@@ -1753,7 +1786,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             num_groups=None if num_groups == 0 else num_groups,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(
+        self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False
+    ) -> Set[str]:
         def load_linear_attn_weight(
             name: str, loaded_weight: torch.Tensor, self
         ) -> None:
@@ -1804,6 +1839,10 @@ class BailingMoeV3ForCausalLM(nn.Module):
             num_experts=self.config.num_experts + self.num_fused_shared_experts,
         )
 
+        if is_nextn:
+            nextn_layer_id = resolve_nextn_layer_id(self.config)
+            nextn_layer_prefix = f"model.layers.{nextn_layer_id}"
+
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         weight_names = []
@@ -1824,8 +1863,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 layer_idx = None
                 if "model.layers." in name:
                     layer_idx = int(name.split(".")[2])
-                    # todo, check nextn
-                    if layer_idx >= self.config.num_hidden_layers:
+                    if not is_nextn and layer_idx >= self.config.num_hidden_layers:
                         continue
                 if (
                     ("v_head" in name)
@@ -1833,6 +1871,15 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     or (self.config.tie_word_embeddings and "lm_head" in name)
                 ):
                     continue
+
+                if is_nextn:
+                    if not name.startswith(nextn_layer_prefix):
+                        continue
+                    rewritten = rewrite_nextn_weight_name(name, nextn_layer_prefix)
+                    if rewritten is None:
+                        continue
+                    name = rewritten
+                    layer_idx = 0
 
                 # Redirect shared_experts weights to FusedMoE when fusion is enabled
                 if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
@@ -1856,8 +1903,11 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         ".fused_fg_b_proj",
                         ".fused_qkvbfg_proj",
                     }:
-                        layer_id = int(name.split(".")[2])
-                        layer = self.model.layers[layer_id]
+                        layer = (
+                            self.model.decoder
+                            if is_nextn
+                            else self.model.layers[int(name.split(".")[2])]
+                        )
                         if is_pp_missing_parameter(name, layer):
                             continue
                         layer_attn = layer.attention
@@ -1989,7 +2039,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     # print(f"fail load: {name0}")
                     pass
             loaded_params.add(name)
-        self.post_load_weights(is_nextn=False, weight_names=weight_names)
+        self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
 
         return loaded_params
 
