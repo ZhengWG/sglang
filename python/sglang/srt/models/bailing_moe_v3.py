@@ -259,9 +259,7 @@ def resolve_nextn_layer_id(config: PretrainedConfig) -> int:
     """Locate the nextn predict layer index in the HF checkpoint name space."""
     if not hasattr(config, "num_nextn_predict_layers"):
         raise ValueError("num nextn_predict_layers is not in the config")
-    assert (
-        config.num_nextn_predict_layers == 1
-    ), "Only 1 nextn layer is supported"
+    assert config.num_nextn_predict_layers == 1, "Only 1 nextn layer is supported"
     return 0 if config.num_hidden_layers == 1 else config.num_hidden_layers
 
 
@@ -1073,7 +1071,10 @@ class BailingMoELinearDecoderLayer(nn.Module):
 
         self.layer_scatter_modes = LayerScatterModes.init_new(
             layer_id=layer_id,
-            num_layers=config.num_hidden_layers,
+            # NextN wraps a single decoder layer whose checkpoint prefix is the
+            # post-model layer id. Treat it as a one-layer model for scatter-mode
+            # planning so A2A/DeepEP outputs are gathered before logits.
+            num_layers=1 if is_nextn else config.num_hidden_layers,
             is_layer_sparse=is_moe_layer,
             is_previous_layer_sparse=is_previous_moe_layer,
             is_next_layer_sparse=is_next_layer_sparse,
