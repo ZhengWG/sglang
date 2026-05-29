@@ -71,3 +71,4 @@ python3 -m sglang.launch_server \
 ## Known supported models
 - Qwen2.5-VL (https://github.com/sgl-project/sglang/pull/14422)
 - Qwen3-VL (https://github.com/sgl-project/sglang/pull/15320)
+- Qwen3.5 / Qwen3.5-MoE
