@@ -71,6 +71,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
@@ -475,10 +476,12 @@ class BailingMoE(nn.Module):
         layer_id: int = 0,
         prefix: str = "moe",
         num_fused_shared_experts: int = 0,
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ):
         super().__init__()
 
         self.layer_id = layer_id
+        self.alt_stream = alt_stream
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -725,16 +728,19 @@ class BailingMoE(nn.Module):
         if num_tokens == 0:
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
+            final_hidden_states = self.experts(hidden_states, topk_output)
+        elif (
+            self.num_fused_shared_experts == 0
+            and self.shared_experts is not None
+            and self.alt_stream is not None
+            and get_is_capture_mode()
+        ):
+            final_hidden_states, shared_output = self.forward_normal_dual_stream(
+                hidden_states
+            )
         else:
-            # Only compute shared_output when not using fused shared experts
-            if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
-                shared_output = self.shared_experts(hidden_states)
-            else:
-                shared_output = None
-
-            router_logits = self.gate(hidden_states)
-            topk_output = self.topk(hidden_states, router_logits)
-        final_hidden_states = self.experts(hidden_states, topk_output)
+            shared_output = self._forward_shared_experts(hidden_states)
+            final_hidden_states = self._forward_router_experts(hidden_states)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -756,6 +762,33 @@ class BailingMoE(nn.Module):
             )
         return final_hidden_states
 
+    def _forward_shared_experts(
+        self, hidden_states: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        if self.shared_experts is None:
+            return None
+        return self.shared_experts(hidden_states)
+
+    def _forward_router_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        router_logits = self.gate(hidden_states)
+        topk_output = self.topk(hidden_states, router_logits)
+        return self.experts(hidden_states, topk_output)
+
+    def forward_normal_dual_stream(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        current_stream = torch.cuda.current_stream()
+        self.alt_stream.wait_stream(current_stream)
+
+        shared_output = self._forward_shared_experts(hidden_states)
+
+        with torch.cuda.stream(self.alt_stream):
+            final_hidden_states = self._forward_router_experts(hidden_states)
+
+        current_stream.wait_stream(self.alt_stream)
+        return final_hidden_states, shared_output
+
     def forward_deepep(
         self,
         hidden_states: torch.Tensor,
@@ -769,12 +802,7 @@ class BailingMoE(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
         else:
-            # Only compute shared_output when not using fused shared experts
-            if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
-                shared_output = self.shared_experts(hidden_states)
-            else:
-                shared_output = None
-
+            shared_output = self._forward_shared_experts(hidden_states)
             router_logits = self.gate(hidden_states)
             topk_output = self.topk(
                 hidden_states,
@@ -959,11 +987,11 @@ class BailingMoELinearDecoderLayer(nn.Module):
         prefix: str = "layer",
         num_fused_shared_experts: int = 0,
         is_nextn: bool = False,
+        alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
         self.use_mla = getattr(config, "full_attention_type", "mla") == "mla"
-        alt_stream = None  # tptest
         self.attention_type = config.attention_type
         # todo nextn
 
@@ -1053,6 +1081,7 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     layer_id=self.layer_id,
                     prefix=prefix,
                     num_fused_shared_experts=num_fused_shared_experts,
+                    alt_stream=alt_stream,
                 )
             else:
                 # dense layer
@@ -1221,6 +1250,8 @@ class BailingMoELinearModel(nn.Module):
         else:
             self.word_embeddings = PPMissingLayer()
 
+        self.alt_stream = torch.cuda.Stream() if _is_cuda else None
+
         def layer_fn(idx, prefix):
             layer_idx = idx
             layer_config = copy.deepcopy(config)
@@ -1232,7 +1263,10 @@ class BailingMoELinearModel(nn.Module):
                 "num_fused_shared_experts": num_fused_shared_experts,
             }
             return BailingMoELinearDecoderLayer(
-                layer_config, **decoder_kwargs, prefix=prefix
+                layer_config,
+                **decoder_kwargs,
+                prefix=prefix,
+                alt_stream=self.alt_stream,
             )
 
         self.layers, self.start_layer, self.end_layer = make_layers(
