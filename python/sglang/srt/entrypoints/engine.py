@@ -105,6 +105,10 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
+from sglang.srt.utils.omp_num_threads import (
+    compute_default_omp_num_threads,
+    get_available_cpu_count,
+)
 from sglang.srt.utils.network import get_zmq_socket, is_port_available
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.watchdog import SubprocessWatchdog
@@ -1213,6 +1217,8 @@ class Engine(EngineScoreMixin, EngineBase):
 
 
 def _set_envs_and_config(server_args: ServerArgs):
+    _maybe_set_auto_omp_num_threads(server_args)
+
     # Set global environments
     if "NCCL_CUMEM_ENABLE" not in os.environ or server_args.enable_symm_mem:
         os.environ["NCCL_CUMEM_ENABLE"] = str(int(server_args.enable_symm_mem))
@@ -1403,3 +1409,63 @@ def _compute_parallelism_ranks(
         // (server_args.tp_size // server_args.moe_dp_size // server_args.ep_size)
     )
     return attn_cp_rank, moe_dp_rank, moe_ep_rank
+
+
+def _estimate_local_process_count(server_args: ServerArgs) -> int:
+    pp_rank_range, tp_rank_range, _, _ = _calculate_rank_ranges(
+        server_args.nnodes,
+        server_args.pp_size,
+        server_args.tp_size,
+        server_args.node_rank,
+    )
+    local_pp_tp_workers = max(1, len(pp_rank_range) * len(tp_rank_range))
+
+    if server_args.dp_size == 1:
+        local_scheduler_workers = local_pp_tp_workers
+        local_controller_workers = 0
+    else:
+        if server_args.enable_dp_attention:
+            # DP attention reuses TP world for scheduler placement.
+            local_scheduler_workers = local_pp_tp_workers
+        else:
+            local_scheduler_workers = local_pp_tp_workers * server_args.dp_size
+        local_controller_workers = 1
+
+    detokenizer_workers = 1 if server_args.node_rank == 0 else 0
+    main_process = 1
+    return (
+        local_scheduler_workers
+        + local_controller_workers
+        + detokenizer_workers
+        + main_process
+    )
+
+
+def _maybe_set_auto_omp_num_threads(server_args: ServerArgs):
+    if server_args.device == "cpu":
+        return
+    if "OMP_NUM_THREADS" in os.environ:
+        return
+
+    available_cpus = get_available_cpu_count()
+    local_processes = _estimate_local_process_count(server_args)
+    suggested_threads = compute_default_omp_num_threads(
+        available_cpu_count=available_cpus,
+        local_process_count=local_processes,
+    )
+    current_threads = torch.get_num_threads()
+    target_threads = min(current_threads, suggested_threads)
+    if target_threads >= current_threads:
+        return
+
+    logger.warning(
+        "Auto-configuring OMP_NUM_THREADS from %d to %d "
+        "(available_cpus=%d, local_processes=%d). "
+        "Set OMP_NUM_THREADS manually to override.",
+        current_threads,
+        target_threads,
+        available_cpus,
+        local_processes,
+    )
+    os.environ["OMP_NUM_THREADS"] = str(target_threads)
+    torch.set_num_threads(target_threads)
