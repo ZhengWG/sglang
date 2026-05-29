@@ -218,9 +218,14 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirro
 # 配置rust crates.io
 COPY <<EOF /root/.cargo/config.toml
 [source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+replace-with = 'mirror'
+
+[source.mirror]
+registry = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
+
+[registries.mirror]
+index = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
+
 EOF
 
 # Install sgl-kernel (from pre-built wheel)
@@ -479,9 +484,13 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirro
 # 配置rust crates.io
 COPY <<EOF /root/.cargo/config.toml
 [source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+replace-with = 'mirror'
+
+[source.mirror]
+registry = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
+
+[registries.mirror]
+index = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
 [net]
 git-fetch-with-cli = true
 EOF

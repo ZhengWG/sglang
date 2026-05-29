@@ -24,7 +24,7 @@ triggers:
         - "^master$"
 
 parameters:
-  build_whl_only: "false"
+  build_whl_only: "true"
   build_sglang_whl_only: "false"
   skip_build_stage: "false"
   cuda_version_full: "13.0.1" # 12.9.1 or 13.0.1

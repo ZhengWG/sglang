@@ -24,7 +24,7 @@ parameters:
   sglang_kernel_whl_url: ""
   sglang_whl_url: ""
   runtime_base_image:  "reg.docker.alibaba-inc.com/sglang/deepep-base" # 之前已经制作好的sglang runtime镜像，请确保这个镜像中安装的sglang和sglang-kernel版本的依赖，比如cuda，torch等和上面填写的whl包兼容，否则可能会出现运行时不兼容的问题
-  runtime_base_image_tag: "0a2fb2c4-20260513102200" # 这个是已经制作好的runtime镜像，基本修复了所有问题，除了decord2 
+  runtime_base_image_tag: "922bba8a-20260528182048" # 这个是已经制作好的runtime镜像，基于commit 922bba8a518a2802da1d7d326f41a05e4a2d9001
 
 jobs:
   构建sglang镜像:

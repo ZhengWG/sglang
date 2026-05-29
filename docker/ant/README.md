@@ -1,49 +1,58 @@
 # 使用说明
 
 当前目录存放蚂蚁内部的sglang包构建和运行时镜像流水线和Dockerfile，以及构建镜像所需的一些配置文件。
-since Theta/SGLang branch `sglang_public_tracker`: ed80ee79504d06736e2a896c6f7e13c8e716fd96
-since sgl-project/sglang branch `main`: e1bc001872985a23af65c367b802ff8fb44edafc
+常用的制作流程是： 
+1. 通过`sglang_runtime.aci.yml` 完整编译构建出可供线上使用的生产镜像，保证镜像中安装`sglang` 和`sglang-kernel` 依赖的必要包。由于是从编译sglang，sglang-kernel，然后编译安装deepep，flash-mla等sglang依赖的组件，此流水线构建时间比较费时，一般要两个小时。
+
+2. 在有了完整构建的镜像之后，如果仅仅是修改`sglang`或者`sglang-kernel`代码，可以通过触发`sglang_runtime.aci.yml`只构建`sglang`， `sglang-kernel`两个包，然后触发`sglang_fast`流水线，基于第一步构建的镜像，覆盖安装新制作的`sglang`和`sglang-kernel`包。
+**注意：** `sglang_fast.aci.yml`中默认使用的基础镜像基于commit [922bba8a](https://code.alipay.com/Theta/SGLang/tree/922bba8a-20260528182048), 如果使用此版本镜像作为基础镜像，请确保提交流水线时设置的`sglang`和`sglang-kernel`的依赖和此commit中声明的一致，比如 [pyproject.toml](https://code.alipay.com/Theta/SGLang/blob/922bba8a-20260528182048/python/pyproject.toml)。
 
 
-# aci目录介绍
+## 常见构建场景
 
-此目录下有两条流水线：
+### 1. pre-compile 流水线
+用来构建编译`sglang` 和 `sglang-kernel`使用的镜像的流水线，参见 `sglang_prepare_compile_image.aci.yml`介绍。
+
+### 2. 从源码完整构建线上使用的sglang引擎镜像
+配置参数 `build_whl_only`: "false", 流水线会在编译`sglang`和`sglang-kernel`包之后，继续构建镜像。
+注意：这种情况下，不能配置`build_sglang_whl_only` == `true`, 否则构建出来的`sglang-kernel`whl包是个空文件。
+
+### 3. 使用预编译 wheel 包构建镜像
+也是执行流水线，选择`docker/ant/aci/sglang_runtime.aci.yml`，然后配置如下三个流水线变量：
+```yaml
+skip_build_stage: "true"
+build_whl_only: "false"
+sglang_kernel_whl_url: "https://xxx/sglang_kernel-xxx.whl"
+sglang_whl_url: "https://xxx/sglang-xxx.whl"
+```
+跳过编译阶段，直接使用指定 URL 的 wheel 包构建运行时镜像。
+
+### 4. 只编译 `sglang_kernel`, `sglang` wheel 包（调试使用, 或者配合3快速做镜像）
+https://code.alipay.com/Theta/SGLang/pipelines页面选择执行流水线，从仓库yml中选择代码分支，配置使用`docker/ant/aci/sglang_runtime.aci.yml`, 这条流水线默认仅执行编译阶段，输出 `sglang_kernel` 和 `sglang` wheel 包，不构建镜像.
+
+### 5. 只编译 sglang wheel 包（快速编译）
+同上，需要在流水线选项里添加如下变量：
+```yaml
+build_sglang_whl_only: "true"
+```
+跳过 sglang_kernel 编译（mock 空包），只编译 sglang wheel 包。
+
+
+# 流水线详细介绍
+
+此目录下有三条流水线：
 1. `sglang_prepare_compile_image.aci.yml`: 用于创建蚂蚁内部编译`sglang`和`sglang_kernel` wheel包的docker镜像。
 2. `sglang_runtime.aci.yml`: 用于创建线上生产使用或者集成开发、测试使用的sglang运行时镜像。
+3. `sglang_fast.aci.yml`: 用于快速替换镜像中sglang-kernel 和 sglang包，制作生产使用的镜像。
 
-除此之外，在`Theta/SGLang`仓库还有一个模版流水线 [sglang_fast_image](https://linkex.alipay.com/project/161500101/template?templateId=174800029&tenant_path=alipay), 这条流水线用于快速更新已经制作好的镜像中的sglang和sglang_kernel包，减少镜像构建时间。
-
-## `sglang_fast_image`
-这个流水线模版是用来快速覆盖已经编译好的镜像中的`sglang` 和 `sglang_kernel`包，减少镜像构建时间的，注意预编译好的`sglang` 和 `sglang_kernel`包和base镜像中`sglang` 和 `sglang_kernel`版本一致。 
+## `sglang_fast`
+这个流水线模版是用来快速覆盖已经编译好的镜像中的`sglang` 和 `sglang_kernel`包，减少镜像构建时间的，注意预编译好的`sglang` 和 `sglang_kernel`包和base镜像中`sglang` 和 `sglang_kernel`版本一致, 依赖组件版本也必须一致。
 
 | 参数名 | 默认值 | 说明 
 |--------|--------|------|
 | `sglang_whl_url` | `` | sglang wheel 包地址 |
 | `sglang_kernel_whl_url` | `` | sglang_kernel wheel 包地址 |
-| `runtime_base_image_tag` | `d834d95c-20260511192941` | 运行时镜像 tag, 这个tag对应的是基于publictracker制作的cuda13.0的镜像 |
-
-## `sglang_prepare_compile_image.aci.yml`
-
-此流水线用于创建编译镜像，基于 `Dockerfile.compile` 构建，输出镜像用于后续编译 sglang wheel 包。
-
-### 流水线参数
-
-| 参数名 | 默认值 | 说明 | 可选项 |
-|--------|--------|------|--------|
-| `cuindex` | `cu130` | 安装 torch 对应的 CUDA 版本标识，需与 `cuda_version` 匹配 | - |
-| `cuda_version` | `13.0` | CUDA 版本 | `12.9`, `13.0` |
-| `python_tag` | `cp312-cp312` | Python 环境标签，3.12 默认安装了 torch、uv 等组件，构建比较快 | `cp310-cp310`, `cp311-cp311`, `cp312-cp312`, `cp313-cp313`, `cp313-cp313t`, `cp314-cp314`, `cp314-cp314t`, `cp38-cp38`, `cp39-cp39` |
-
-### 输出镜像
-
-- **镜像地址**: `reg.docker.alibaba-inc.com/sglang/theta_sglang_build`
-- **镜像标签**: `${python_tag}-cuda${cuda_version}`
-
-### 流水线阶段
-
-1. **Build-Image**: 构建编译镜像
-2. **STC-Scan**: 安全扫描
-3. **Image-Scan**: 镜像扫描
+| `runtime_base_image_tag` | `d834d95c-20260511192941` | 运行时镜像 tag, 这个tag对应的是之前通过`sglang_runtime.aci.yml`制作好的镜像|
 
 ## `sglang_runtime.aci.yml`
 
@@ -58,40 +67,14 @@ since sgl-project/sglang branch `main`: e1bc001872985a23af65c367b802ff8fb44edafc
 5. **Image-Scan**: 镜像扫描
 6. **Push-Image**: 推送镜像至多集群
 
-### 常见构建场景
-
-#### 1. 只编译 `sglang_kernel`, `sglang` wheel 包（调试使用）
-```yaml
-build_whl_only: "true"
-```
-仅执行编译阶段，输出 sglang_kernel 和 sglang wheel 包，不构建镜像。
-
-#### 2. 只编译 sglang wheel 包（快速编译）
-```yaml
-build_whl_only: "true"
-build_sglang_whl_only: "true"
-```
-跳过 sglang_kernel 编译（mock 空包），只编译 sglang wheel 包。
-
-#### 3. 使用预编译 wheel 包构建镜像
-```yaml
-skip_build_stage: "true"
-sglang_kernel_whl_url: "https://xxx/sglang_kernel-xxx.whl"
-sglang_whl_url: "https://xxx/sglang-xxx.whl"
-```
-跳过编译阶段，直接使用指定 URL 的 wheel 包构建运行时镜像。
-
-#### 4. 从源码完整构建（默认模式）
-无需配置额外参数，流水线默认从源码编译 wheel 包并构建镜像。
-
 ### 完整参数说明
 
 #### 构建控制参数
 
 | 参数名 | 默认值 | 说明 | 可选项 |
 |--------|--------|------|--------|
-| `build_whl_only` | `false` | 仅编译 wheel 包，不构建镜像 | `true`, `false` |
-| `build_sglang_whl_only` | `false` | 仅编译 sglang wheel 包，mock sglang_kernel | `true`, `false` |
+| `build_whl_only` | `true` | 仅编译 wheel 包，不构建镜像 | `true`, `false` |
+| `build_sglang_whl_only` | `false` | 仅编译 `sglang` wheel 包，mock `sglang_kernel`包。 | `true`, `false` |
 | `skip_build_stage` | `false` | 跳过编译阶段，使用预编译 wheel 包 | `true`, `false` |
 
 #### CUDA 和 Python 版本参数
@@ -152,6 +135,30 @@ sglang_whl_url: "https://xxx/sglang-xxx.whl"
 | `runtime_llm_version` | `1.1.9` | xruntime LLM 组件版本，如需自定义请咨询 **天缺** | - |
 
 
+## `sglang_prepare_compile_image.aci.yml`
+
+此流水线用于创建编译镜像，基于 `Dockerfile.compile` 构建，输出镜像用于编译 sglang wheel 包。
+
+### 流水线参数
+
+| 参数名 | 默认值 | 说明 | 可选项 |
+|--------|--------|------|--------|
+| `cuindex` | `cu130` | 安装 torch 对应的 CUDA 版本标识，需与 `cuda_version` 匹配 | - |
+| `cuda_version` | `13.0` | CUDA 版本 | `12.9`, `13.0` |
+| `python_tag` | `cp312-cp312` | Python 环境标签，3.12 默认安装了 torch、uv 等组件，构建比较快 | `cp310-cp310`, `cp311-cp311`, `cp312-cp312`, `cp313-cp313`, `cp313-cp313t`, `cp314-cp314`, `cp314-cp314t`, `cp38-cp38`, `cp39-cp39` |
+
+### 输出镜像
+
+- **镜像地址**: `reg.docker.alibaba-inc.com/sglang/theta_sglang_build`
+- **镜像标签**: `${python_tag}-cuda${cuda_version}`
+
+### 流水线阶段
+
+1. **Build-Image**: 构建编译镜像
+2. **STC-Scan**: 安全扫描
+3. **Image-Scan**: 镜像扫描
+
+
 # Dockerfile介绍
 
 ## Dockerfile.compile
@@ -176,3 +183,12 @@ sglang_whl_url: "https://xxx/sglang-xxx.whl"
 5. `devtools_builder`：开发工具
 6. `gateway_builder`：网关组件
 7. `framework`：整合所有组件的最终镜像
+
+
+---
+
+和社区版本对比记录：
+```版本记录
+since Theta/SGLang branch `sglang_public_tracker`: ed80ee79504d06736e2a896c6f7e13c8e716fd96
+since sgl-project/sglang branch `main`: e1bc001872985a23af65c367b802ff8fb44edafc
+```
