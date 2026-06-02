@@ -84,7 +84,7 @@ dependencies = [
   "watchfiles",
   "xgrammar==0.2.1",
   "smg-grpc-servicer>=0.5.0",
-  "kernels<0.15",
+  "kernels>=0.14.1,<0.15",
   "concurrent-log-handler",
   "datasets",
   "py-spy",
@@ -189,7 +189,8 @@ killall_sglang = "sglang.cli.killall:main"
 [tool.setuptools.package-data]
 "sglang" = [
   "srt/**/*",
-  "jit_kernel/**/*"
+  "jit_kernel/**/*",
+  "multimodal_gen/apps/realtime_webui/**/*"
 ]
 
 [tool.setuptools.packages.find]
