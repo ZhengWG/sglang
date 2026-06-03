@@ -71,9 +71,11 @@ FORWARD_ABSORB_CORE_ATTENTION_BACKENDS = [
 
 
 def zero_attn_tp_scatter_padding(
-    attn_output: torch.Tensor, extend_num_tokens: Optional[int]
+    attn_output: torch.Tensor,
+    extend_num_tokens: Optional[int],
+    num_token_non_padded_cpu: Optional[int] = None,
 ) -> torch.Tensor:
-    """Zero TP-scatter padding rows that attention kernels may leave dirty.
+    """Zero attention padding rows that attention kernels may leave dirty.
 
     When `input_scattered` is enabled, `prepare_attn_tp_scatter_input` pads the
     token count to be divisible by the TP world size. Attention backends only
@@ -82,12 +84,22 @@ def zero_attn_tp_scatter_padding(
     flow into later collectives / projections and corrupt valid tokens. This is
     especially harmful with FP8 KV cache because stale uint8 pool contents can
     be reinterpreted as NaN/Inf.
+
+    With DP attention, `prepare_mlp_sync_batch` may also pad local tensors to the
+    DP-sync length. In that path `extend_num_tokens` has already been updated to
+    the padded length, so callers should pass the DP-local valid-token boundary
+    from `ForwardBatch.get_num_non_padded_tokens()` instead.
     """
-    if not get_attn_tp_context().input_scattered:
+    if get_attn_tp_context().input_scattered:
+        num_valid_tokens = extend_num_tokens
+    else:
+        num_valid_tokens = num_token_non_padded_cpu
+
+    if num_valid_tokens is None:
         return attn_output
 
-    if extend_num_tokens is not None and extend_num_tokens < attn_output.shape[0]:
-        attn_output[extend_num_tokens:] = 0
+    if num_valid_tokens < attn_output.shape[0]:
+        attn_output[num_valid_tokens:] = 0
 
     return attn_output
 

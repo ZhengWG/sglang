@@ -310,7 +310,9 @@ class DeepseekMHAForwardMixin:
     ) -> torch.Tensor:
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
         attn_output = zero_attn_tp_scatter_padding(
-            attn_output, forward_batch.extend_num_tokens
+            attn_output,
+            forward_batch.extend_num_tokens,
+            forward_batch.get_num_non_padded_tokens(),
         )
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         if gate is not None:
@@ -370,7 +372,9 @@ class DeepseekMHAForwardMixin:
             )
 
         attn_output = zero_attn_tp_scatter_padding(
-            attn_output, forward_batch.extend_num_tokens
+            attn_output,
+            forward_batch.extend_num_tokens,
+            forward_batch.get_num_non_padded_tokens(),
         )
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         if gate is not None:
