@@ -71,3 +71,20 @@ python3 -m sglang.launch_server \
 ## Known supported models
 - Qwen2.5-VL (https://github.com/sgl-project/sglang/pull/14422)
 - Qwen3-VL (https://github.com/sgl-project/sglang/pull/15320)
+- Qwen3.5 / Qwen3.5-MoE (uses the Qwen3-VL ViT; vision RoPE is captured
+  via a fused Triton kernel to avoid the `@torch.compile` +
+  `random_rng` capture failure)
+
+## Encoder server example
+
+The same flag enables ViT CUDA Graph in the disaggregated encoder
+server (`python -m sglang.srt.disaggregation.encode_server`). The
+captured region requires an attention backend that supports the
+fixed-shape `output_ws` contract — `triton_attn` or `fa3`:
+
+```
+SGLANG_VIT_ENABLE_CUDA_GRAPH=1 \
+python3 -m sglang.srt.disaggregation.encode_server \
+  --model Qwen/Qwen3.5-... \
+  --mm-attention-backend triton_attn
+```
