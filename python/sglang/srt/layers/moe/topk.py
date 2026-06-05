@@ -999,24 +999,28 @@ def biased_grouped_topk_impl(
     num_token = scores.shape[0]
     num_experts = scores.shape[1]
     scores_for_choice = scores.view(num_token, -1) + correction_bias.unsqueeze(0)
-    group_scores = (
-        scores_for_choice.view(num_token, num_expert_group, -1)
-        .topk(2, dim=-1)[0]
-        .sum(dim=-1)
-    )  # [n, n_group]
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[
-        1
-    ]  # [n, top_k_group]
-    group_mask = torch.zeros_like(group_scores)  # [n, n_group]
-    group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-    score_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(num_token, num_expert_group, scores.shape[-1] // num_expert_group)
-        .reshape(num_token, -1)
-    )  # [n, e]
-    tmp_scores = scores_for_choice.masked_fill(
-        ~score_mask.bool(), float("-inf")
-    )  # [n, e]
+    # Optimized path for num_expert_group=1: skip group masking
+    if num_expert_group == 1:
+        tmp_scores = scores_for_choice
+    else:
+        group_scores = (
+            scores_for_choice.view(num_token, num_expert_group, -1)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )  # [n, n_group]
+        group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[
+            1
+        ]  # [n, top_k_group]
+        group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+        group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(num_token, num_expert_group, scores.shape[-1] // num_expert_group)
+            .reshape(num_token, -1)
+        )  # [n, e]
+        tmp_scores = scores_for_choice.masked_fill(
+            ~score_mask.bool(), float("-inf")
+        )  # [n, e]
     _, topk_ids = torch.topk(
         tmp_scores,
         k=topk,
@@ -1085,6 +1089,56 @@ def _biased_grouped_topk_postprocess(
     topk_ids = topk_ids_logical_to_physical(topk_ids, expert_location_dispatch_info)
     _mask_topk_ids_padded_region(topk_ids, num_token_non_padded)
     return topk_ids
+
+
+def _biased_grouped_topk_ungrouped(
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_fused_shared_experts: int,
+    routed_scaling_factor: Optional[float],
+    apply_routed_scaling_factor_on_output: Optional[bool],
+):
+    num_rows = gating_output.shape[0]
+    num_experts = gating_output.shape[1]
+    routed_topk = topk - num_fused_shared_experts
+
+    output, indices = kimi_k2_moe_fused_gate(
+        gating_output.to(dtype=torch.float32),
+        correction_bias.to(dtype=torch.float32),
+        topk=routed_topk,
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+    )
+
+    # Fill shared expert slots in-place (no cat needed).
+    # Shared expert weight = sum(routed_weights) / routed_scaling_factor.
+    # After kernel renormalization, sum(routed) = 1.0 (or *= rsf when
+    # apply_routed_scaling_factor_on_output is True), so shared weight equals
+    # 1/sf (or rsf/sf = 1.0), matching biased_grouped_topk_impl's semantics.
+    if num_fused_shared_experts > 0:
+        # Pre-allocate full-size tensors (routed + shared expert slots)
+        # Kernel uses output.size(1) as row stride, only fills first routed_topk columns
+        new_output = output.new_empty((num_rows, topk))
+        new_indices = indices.new_empty((num_rows, topk))
+        new_output[:, :routed_topk] = output
+        new_indices[:, :routed_topk] = indices
+        output = new_output
+        indices = new_indices
+
+        sf = routed_scaling_factor if routed_scaling_factor is not None else 1.0
+        output[:, routed_topk:] = output[:, :routed_topk].sum(dim=-1, keepdim=True) / sf
+        indices[:, routed_topk:] = torch.randint(
+            low=num_experts,
+            high=num_experts + num_fused_shared_experts,
+            size=(num_rows, num_fused_shared_experts),
+            dtype=torch.int32,
+            device=gating_output.device,
+        )
+
+    return output, indices
 
 
 def biased_grouped_topk_gpu(
@@ -1224,15 +1278,16 @@ def biased_grouped_topk_gpu(
             _is_cuda
             and num_experts in (256, 384)
             and num_expert_group == 1
-            and topk <= 8
+            and topk_routed <= 8
         ):
-            return kimi_k2_moe_fused_gate(
-                gating_output.to(dtype=torch.float32),
-                correction_bias.to(dtype=torch.float32),
-                topk=topk,
-                renormalize=renormalize,
-                routed_scaling_factor=routed_scaling_factor,
-                apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+            return _biased_grouped_topk_ungrouped(
+                gating_output,
+                correction_bias,
+                topk,
+                renormalize,
+                num_fused_shared_experts,
+                routed_scaling_factor,
+                apply_routed_scaling_factor_on_output,
             )
         elif (
             _is_cuda
