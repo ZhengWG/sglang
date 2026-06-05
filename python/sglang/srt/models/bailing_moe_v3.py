@@ -781,7 +781,7 @@ class BailingMoE(nn.Module):
         current_stream = torch.cuda.current_stream()
         self.alt_stream.wait_stream(current_stream)
 
-        shared_output = self._forward_shared_experts(hidden_states)
+        shared_output = self._forward_shared_experts(hidden_states.clone())
 
         with torch.cuda.stream(self.alt_stream):
             final_hidden_states = self._forward_router_experts(hidden_states)
