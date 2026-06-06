@@ -3040,7 +3040,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if remain_num_req > 0:
                 await asyncio.sleep(5)
             else:
-                self.dump_requests_before_crash()
                 break
 
         kill_process_tree(os.getpid(), include_parent=True)
