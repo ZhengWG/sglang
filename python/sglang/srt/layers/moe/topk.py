@@ -1165,9 +1165,28 @@ def _biased_grouped_topk_ungrouped(
     num_experts = gating_output.shape[1]
     routed_topk = topk - num_fused_shared_experts
 
-    output, indices = kimi_k2_moe_fused_gate(
-        gating_output.to(dtype=torch.float32),
-        correction_bias.to(dtype=torch.float32),
+    gate_kernel = kimi_k2_moe_fused_gate
+    gate_input = gating_output.to(dtype=torch.float32)
+    gate_bias = correction_bias.to(dtype=torch.float32)
+    if _SGLANG_EXPERIMENTAL_LORA_OPTI:
+        from sglang.srt.lora.trtllm_lora_temp.environ import lora_envs
+
+        if (
+            lora_envs.SGLANG_OPT_USE_JIT_KERNEL_KIMI_GATE.get()
+            and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
+        ):
+            from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
+                kimi_k2_moe_fused_gate as _jit_kimi_k2_moe_fused_gate,
+            )
+
+            # The JIT gate widens bf16/fp16 inside the kernel, avoiding host upcasts.
+            gate_kernel = _jit_kimi_k2_moe_fused_gate
+            gate_input = gating_output
+            gate_bias = correction_bias
+
+    output, indices = gate_kernel(
+        gate_input,
+        gate_bias,
         topk=routed_topk,
         renormalize=renormalize,
         routed_scaling_factor=routed_scaling_factor,
