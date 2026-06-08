@@ -319,10 +319,9 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
             full_attn_layers = [0]
         else:
             full_attn_layers = cfg.full_attention_layer_ids
-        backend = HybridLinearAttnBackend(
+        return HybridLinearAttnBackend(
             full_attn_backend, linear_attn_backend, full_attn_layers
         )
-        return backend
 
     return full_attn_backend
 

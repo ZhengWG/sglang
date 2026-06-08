@@ -13,9 +13,6 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from sglang.srt.layers.attention.mamba.mamba_state_scatter_triton import (
-    fused_linear_compact_state_replay_with_mask,
-)
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.mem_cache.memory_pool import MambaPool
 from sglang.srt.utils import is_cpu, is_npu
@@ -229,47 +226,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
                     ]
                 )
 
-    def update_linear_compact_spec_cache_after_verify(
-        self,
-        mamba_caches: MambaPool.LinearCompactSpeculativeState,
-        state_indices_tensor: torch.Tensor,
-        accepted_steps: torch.Tensor,
-        mamba_track_indices: Optional[torch.Tensor],
-        mamba_steps_to_track: Optional[torch.Tensor],
-    ) -> bool:
-        ssm_states = mamba_caches.temporal
-        # KDA writes normalized K and post-beta delta V into the generic compact
-        # K/V replay buffers.
-        k_norm = mamba_caches.intermediate_k
-        delta_v = mamba_caches.intermediate_v
-        decay = mamba_caches.intermediate_decay
-
-        # Track states must be replayed before accepted states overwrite the
-        # request slots, because compact replay starts from the request's
-        # pre-verify recurrent state.
-        if mamba_track_indices is not None:
-            assert mamba_steps_to_track is not None
-            fused_linear_compact_state_replay_with_mask(
-                ssm_states,
-                k_norm,
-                delta_v,
-                decay,
-                state_indices_tensor,
-                mamba_track_indices,
-                mamba_steps_to_track,
-            )
-
-        fused_linear_compact_state_replay_with_mask(
-            ssm_states,
-            k_norm,
-            delta_v,
-            decay,
-            state_indices_tensor,
-            state_indices_tensor,
-            accepted_steps,
-        )
-        return True
-
     def forward_decode(
         self,
         layer: RadixLinearAttention,
@@ -403,12 +359,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             intermediate_conv_window_cache = (
                 mamba_cache_params.intermediate_conv_window[0]
             )
-            use_compact_spec_cache = isinstance(
-                mamba_cache_params, MambaPool.LinearCompactSpeculativeState
-            )
-            intermediate_state_cache = (
-                None if use_compact_spec_cache else mamba_cache_params.intermediate_ssm
-            )
+            intermediate_state_cache = mamba_cache_params.intermediate_ssm
 
             seq_len = mixed_qkv.shape[0]
             batch_size = seq_len // forward_batch.spec_info.draft_token_num
@@ -422,10 +373,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
             retrieve_next_token = self.forward_metadata.retrieve_next_token
             retrieve_next_sibling = self.forward_metadata.retrieve_next_sibling
             retrieve_parent_token = self.forward_metadata.retrieve_parent_token
-            if use_compact_spec_cache and retrieve_parent_token is not None:
-                raise NotImplementedError(
-                    "Compact linear spec cache currently supports linear speculative paths only."
-                )
 
             # Reshape mixed_qkv: (seq_len, dim) -> (batch_size, dim, draft_token_num)
             mixed_qkv_reshaped = mixed_qkv.view(
@@ -525,26 +472,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 cache_indices=cache_indices[:batch_size],
                 query_start_loc=query_start_loc,
                 intermediate_states_buffer=intermediate_state_cache,
-                compact_k_buffer=(
-                    mamba_cache_params.intermediate_k
-                    if use_compact_spec_cache
-                    else None
-                ),
-                compact_v_buffer=(
-                    mamba_cache_params.intermediate_v
-                    if use_compact_spec_cache
-                    else None
-                ),
-                compact_decay_buffer=(
-                    mamba_cache_params.intermediate_decay
-                    if use_compact_spec_cache
-                    else None
-                ),
                 intermediate_state_indices=intermediate_state_indices[:batch_size],
                 cache_steps=draft_token_num,
-                retrieve_parent_token=(
-                    None if use_compact_spec_cache else retrieve_parent_token
-                ),
+                retrieve_parent_token=retrieve_parent_token,
                 lower_bound=getattr(layer, "lower_bound", None),
             )
         else:

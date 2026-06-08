@@ -38,19 +38,6 @@ class TestPrepareServerArgs(CustomTestCase):
             {"rope_scaling": {"factor": 2.0, "rope_type": "linear"}},
         )
 
-    def test_enable_linear_compact_spec_cache_cli(self):
-        default_args = ServerArgs(model_path="dummy")
-        self.assertFalse(default_args.enable_linear_compact_spec_cache)
-
-        server_args = prepare_server_args(
-            [
-                "--model-path",
-                "dummy",
-                "--enable-linear-compact-spec-cache",
-            ]
-        )
-        self.assertTrue(server_args.enable_linear_compact_spec_cache)
-
 
 class TestLoadBalanceMethod(unittest.TestCase):
     def test_non_pd_defaults_to_round_robin(self):
@@ -513,17 +500,6 @@ class TestNgramExternalSamArgs(CustomTestCase):
         for key, value in overrides.items():
             setattr(args, key, value)
         return args
-
-    def test_enable_linear_compact_spec_cache_requires_topk_one(self):
-        with self.assertRaises(ValueError) as context:
-            handle_speculative_decoding(
-                self._make_dummy_ngram_args(
-                    enable_linear_compact_spec_cache=True,
-                    page_size=1,
-                    speculative_ngram_max_bfs_breadth=2,
-                )
-            )
-        self.assertIn("speculative_eagle_topk == 1", str(context.exception))
 
     def test_external_sam_budget_must_fit_draft_budget(self):
         args = self._make_dummy_ngram_args(

@@ -183,7 +183,6 @@ from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.platforms import current_platform
-from sglang.srt.rfork.rfork_worker import RForkWorker
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.server_args import (
     ServerArgs,
@@ -240,6 +239,7 @@ from sglang.srt.utils.patch_torch import (
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.weight_checker import WeightChecker
+from sglang.srt.rfork.rfork_worker import RForkWorker
 from sglang.srt.weight_sync.tensor_bucket import (
     FlattenedTensorBucket,
     FlattenedTensorMetadata,
@@ -575,8 +575,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.hisparse_coordinator = None
 
         self._linear_attn_registry_cache: Any = _UNSET
-        if not self.is_draft_worker:
-            self.use_linear_compact_spec_cache()
 
         # Initialize the model runner
         self.initialize(pre_model_load_memory)
@@ -704,9 +702,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.rfork_fallback_load_format = self.server_args.load_format
             # Update load_format to `rfork`.
             self.server_args.load_format = LoadFormat.RFORK
-        elif envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (
-            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
-        ):
+        elif envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model):
             self.model_config.model_path = get_model_path(with_weights=True)
 
         self.load_model()
