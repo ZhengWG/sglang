@@ -691,6 +691,7 @@ class ServerArgs:
     linear_attn_backend: str = "triton"
     linear_attn_decode_backend: Optional[str] = None
     linear_attn_prefill_backend: Optional[str] = None
+    enable_linear_compact_spec_cache: bool = False
 
     # Hierarchical cache
     enable_hierarchical_cache: bool = False
@@ -6317,6 +6318,13 @@ class ServerArgs:
             default=ServerArgs.linear_attn_prefill_backend,
             help="Override the kernel backend for linear attention prefill/extend. "
             "If not set, uses --linear-attn-backend.",
+        )
+        parser.add_argument(
+            "--enable-linear-compact-spec-cache",
+            action="store_true",
+            default=ServerArgs.enable_linear_compact_spec_cache,
+            help="Enable compact replay cache for linear attention speculative target verification. "
+            "Currently intended for experimental BailingMoeV3 KDA support.",
         )
 
         # Hierarchical cache
