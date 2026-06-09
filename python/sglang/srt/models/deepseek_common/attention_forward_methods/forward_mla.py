@@ -38,6 +38,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_hip,
     _is_musa,
     _use_aiter,
+    _use_aiter_bpreshuffle_gfx95,
     _use_aiter_gfx95,
     zero_attn_tp_scatter_padding,
 )
@@ -198,6 +199,7 @@ class DeepseekMLAForwardMixin:
                                 dtype_quant=torch.float8_e4m3fn,
                                 res1=None,
                                 output_unquantized_inp1=True,
+                                transpose_scale=_use_aiter_bpreshuffle_gfx95,
                             )
                             q = q_quanted
                         else:
@@ -212,6 +214,7 @@ class DeepseekMLAForwardMixin:
                                 dtype_quant=torch.float8_e4m3fn,
                                 res1=None,
                                 output_unquantized_inp1=False,
+                                transpose_scale=_use_aiter_bpreshuffle_gfx95,
                             )
 
                     elif _use_aiter:

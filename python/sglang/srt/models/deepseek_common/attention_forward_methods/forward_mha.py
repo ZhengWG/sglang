@@ -19,6 +19,7 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_hip,
     _is_musa,
     _is_npu,
+    _use_aiter_bpreshuffle_gfx95,
     _use_aiter_gfx95,
     zero_attn_tp_scatter_padding,
 )
@@ -153,6 +154,7 @@ class DeepseekMHAForwardMixin:
                         dtype_quant=torch.float8_e4m3fn,
                         res1=None,
                         output_unquantized_inp1=True,
+                        transpose_scale=_use_aiter_bpreshuffle_gfx95,
                     )
                     q = self.q_b_proj(q_quanted)[0].view(
                         -1, self.num_local_heads, self.qk_head_dim
@@ -194,6 +196,7 @@ class DeepseekMHAForwardMixin:
                     dtype_quant=torch.float8_e4m3fn,
                     res1=None,
                     output_unquantized_inp1=False,
+                    transpose_scale=_use_aiter_bpreshuffle_gfx95,
                 )
                 q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
             else:
@@ -223,6 +226,7 @@ class DeepseekMHAForwardMixin:
                 dtype_quant=torch.float8_e4m3fn,
                 res1=None,
                 output_unquantized_inp1=True,  # return unqaunt kv_a
+                transpose_scale=_use_aiter_bpreshuffle_gfx95,
             )
 
         else:
