@@ -122,6 +122,7 @@ jobs:
         export PRE_DEFINED_TORCH_VER="${{parameters.torch_version}}"
         export PRE_DEFINED_CU_TAG="${{jobs.verify_params.outputs.output.cu_tag}}"
         export BUILD_SGLANG_WHL_ONLY="${{parameters.build_sglang_whl_only}}"
+        export GITHUB_ARTIFACTORY=${{parameters.github_artifactory}}
 
         # 检查是否需要安装torch, uv等编译组件
         torch_version=$(/opt/python/${PY_TAG}/bin/python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
@@ -134,7 +135,7 @@ jobs:
         fi
 
         export ENABLE_BELOW_SM90=${{parameters.enable_below_sm90}}
-        export CMAKE_ARGS="${CMAKE_ARGS:-} -DENABLE_BELOW_SM90=${ENABLE_BELOW_SM90} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS}"
+        export CMAKE_ARGS="${CMAKE_ARGS:-} -DENABLE_BELOW_SM90=${ENABLE_BELOW_SM90} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS} -DGITHUB_ARTIFACTORY=${GITHUB_ARTIFACTORY}"
         echo "Build parallelism: CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}, NVCC_THREADS=${NVCC_THREADS}"
 
 
