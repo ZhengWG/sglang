@@ -1,6 +1,11 @@
 #!/bin/bash
 set -ex
 
+# override docker command to print instead of execute for testing/debugging outside of CI
+function docker(){
+  echo docker $@
+}
+
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <PYTHON_VERSION> <CUDA_VERSION> [ARCH]"
   exit 1
@@ -113,7 +118,8 @@ docker run --rm \
   -w /sgl-kernel \
   -e ARCH="${ARCH}" \
   -e GITHUB_ARTIFACTORY="${GITHUB_ARTIFACTORY_FLAG}" \
-  "${DEPS_TAG}" \
+  "${DEPS_TAG}" 
+  
   bash -c '
 set -eux
 

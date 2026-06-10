@@ -5,6 +5,7 @@
 version: "2.0"
 stages:
   - Verify-Parameters
+  - Build-Sglang-Build-Image
   - Build-Wheels
   - Build-Image
   - STC-Scan
@@ -29,7 +30,7 @@ parameters:
   skip_build_stage: "false"
   cuda_version_full: "13.0.1" # 12.9.1 or 13.0.1
   torch_version: "2.11.0" # 改成2.9.1之外的版本时，需要同时配置 cu_tag
-  python_version: "3.12" # 3.12默认安装了torch,uv 等组件，构建比较快, 而且社区runtime里用的也是python3.12
+  python_version: "3.10" # 3.10默认安装了torch,uv 等组件，构建比较快, 社区的sglang-kernel包也是用python3.10编译的, 和runtime里python版本没关系
   max_jobs: 24 # ninja编译并发度, 一般不用修改
   nvcc_threads: 4 # nvcc编译并发度, 一般不用修改
   sglang_kernel_whl_url: ""
@@ -48,36 +49,78 @@ parameters:
   runtime_version: "1.1.15"
   runtime_llm_version: "1.1.9"
   image_build_target: "runtime" # 可选值为runtime(生产镜像) 或者 framework_final(开发调试镜像)
-  enable_below_sm90: ON # 是否支持sm90以下的GPU，默认支持,可选值为[ ON, OFF ]
-
+  enable_below_sm90: ON # 是否支持sm90以下的GPU，默认支持,可选值为[ ON, OFF ], aarch64 模式下可选OFF用来加速构建
+  arch: "x86_64" # 可选 'x86_64' 'aarch64'
+  yum_mirror: "https://mirrors.aliyun.com"
 jobs:
   verify_parameters:
     stage: Verify-Parameters
     id: verify_params
-    component: shell-with-env
+    component: shell-with-clone-and-output
     inputs:
+      cloneFetchCommitId: false
+      cloneSingleBranch: true
       script: |
+        set -ex
         python --version
+
         export CUDA_VERSION_FULL=${{parameters.cuda_version_full}}
         export PYTHON_VERSION=${{parameters.python_version}}
         export CUDA_VERSION=$(echo "$CUDA_VERSION_FULL" | cut -d. -f1-2)
         export PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
-        case "${CUDA_VERSION}" in
-          13.0) TORCH_VER=2.11.0; CU_TAG=cu130 ;;
-          12.9) TORCH_VER=2.11.0; CU_TAG=cu129 ;;
-          12.8) TORCH_VER=2.11.0; CU_TAG=cu128 ;;
-          *)    TORCH_VER=2.11.0; CU_TAG=cu126 ;;
-        esac
-        export CU_TAG=${CU_TAG}
+        export ARCH=${{parameters.arch}}
+
+        if [ "${ARCH}" = "aarch64" ]; then
+          BASE_IMG="registry.cn-hangzhou.aliyuncs.com/augusto/manylinuxaarch64-builder"
+        else
+          BASE_IMG="registry.cn-hangzhou.aliyuncs.com/augusto/manylinux-builder"
+        fi
+        
+        # check DEPS_TAG with Dockerfile version
+        #DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile  ./sgl-kernel/build.sh)
+        DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile)
+        # ---- Step 1: Build deps image (layer cached, fast on repeat) ----
+        DEPS_TAG="cuda${CUDA_VERSION}-${PY_TAG}-${DEPS_SHORT_COMMIT}-${ARCH}"
+
+        export DEPS_TAG=${DEPS_TAG} BASE_IMG=${BASE_IMG}
+
         cat <<EOF > format_output.py
         import json
         import os
         result = {}
-        for key in [ "CU_TAG", "CUDA_VERSION", "PY_TAG" ]:
+        for key in [ "DEPS_TAG", "CUDA_VERSION", "PY_TAG", "BASE_IMG", "ARCH" ]:
           result[key.lower()] = os.getenv(key)
         print(json.dumps(result, separators=(",", ":")))
         EOF
         add_output output "$(python format_output.py)"
+  build_sglang_kernel_build_image:
+    id: build_sglang_kernel_build_image
+    stage: Build-Sglang-Build-Image
+    component: docker-image-build
+    inputs:
+      imageName: reg.docker.alibaba-inc.com/sglang/theta_sglang_build # 构建产物镜像名称(不含tag), 如: reg.docker.alibaba-inc.com/antcodebuild/test-image-build
+      imageTag: ${{jobs.verify_params.outputs.output.deps_tag}} # 构建产物镜像 tag
+      dockerfile: ./sgl-kernel/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
+      contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
+      buildArgs: BASE_IMG=${{jobs.verify_params.outputs.output.base_img}},CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}},ARCH=${{jobs.verify_params.outputs.output.arch}},PYTHON_VERSION=${{parameters.python_version}},PYTHON_TAG=${{jobs.verify_params.outputs.output.py_tag}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},YUM_MIRROR=${{parameters.yum_mirror}} # 构建参数，格式为 KEY=VALUE, 多个参数用逗号分隔
+      compression: uncompressed # 为新创建和缓存的镜像层选择压缩类型，默认值为未压缩uncompressed
+      forceCompression: false # 对所有镜像层强制应用压缩类型compression(包括已经存在的层)
+      registryUsername: null # 镜像 registry 用户名，建议使用 aci secrets 方式传递，避免泄露 (reg.docker.alibaba-inc.com、acs-reg.alipay.com 不传时默认使用平台公共账号 admin.for.antb)
+      registryPassword: null # 镜像 registry 密码，建议使用 aci secrets 方式传递，避免泄露 (不传使用平台公共账号)
+      skipWhenImageExists: true # true | false, 如果镜像已存在，是否跳过镜像构建，默认 false
+      errWhenImageExists: false # true | false, 如果镜像已存在，是否直接失败，默认 true
+      beforeScript: null # 前置脚本，按需传递 (在 ${ACB_BUILD_DIR}/code-repo 下执行)
+      beforeScriptImage: null  # 指定前置脚本运行环境镜像，beforeScript 不为空时需要传值(不传使用默认基础alios镜像)
+      afterScript: null # 后置脚本，按需传递 (在 ${ACB_BUILD_DIR}/code-repo 下执行)
+      afterScriptImage: null  # 指定后置脚本运行环境镜像，afterScript 不为空时需要传值(不传使用默认基础alios镜像)
+      nydusSwitch: true # 是否一并构建 nydus 加速镜像，true | false，默认为 true。详细信息：https://yuque.antfin-inc.com/tuna/nydus/pmlc56l8svt95ilh#i7Q1f
+      nydusPreheat: "" # 在哪些集群预热 nydus 加速镜像，通常只有国际集群才需要预热，默认不设置。详细信息：https://yuque.antfin-inc.com/tuna/nydus/ud4aiwfegqpu9qbd#SutsQ
+      cacheStrategy: always # 镜像构建是否使用缓存，默认 always
+      target: "deps" # Set the target build stage to build，extraTags中同样可以设置target，优先级参考下方文档描述
+      extraTags: null # 可指定多个 (当前最多支持5个) 额外的构建镜像Tag, 格式参考下方文档描述 (如需推送到其他镜像中心，还需要配置对应的账密)
+      scriptCaches: null # 自定义缓存
+      timeoutInSec: 6000 # 构建任务执行超时时间，单位(秒)
+      strictLabel: largeResource # 使用性能更好的机器
   build_sglang_wheel_packages:
     id: build_sglang_wheel_packages
     stage: Build-Wheels
@@ -89,7 +132,7 @@ jobs:
       environmentLabel: ant-cxx-build
       gitDepth: 1000
       framework: custom
-      image: reg.docker.alibaba-inc.com/sglang/theta_sglang_build:${{jobs.verify_params.outputs.output.py_tag}}-cuda${{jobs.verify_params.outputs.output.cuda_version}}
+      image: reg.docker.alibaba-inc.com/sglang/theta_sglang_build:${{jobs.verify_params.outputs.output.deps_tag}}
       workspaceCachePath: /.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}
       timeout: 28800
       script: |
@@ -98,46 +141,17 @@ jobs:
         export ACI_VAR_OSS_AI="${{secrets.OSS_AI}}"
         export ACI_VAR_OSS_AK="${{secrets.OSS_AK}}"
         export ACI_COMMIT_SHA="${{parameters.ACI_COMMIT_SHA}}"
-        export CCACHE_DIR="/.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}"
+        # create a softlink, 'sgl-kernel/build.sh' exports CCACHE_DIR=/ccache
+        ln -sf "/.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}" /ccache
         export CCACHE_BACKEND=""
         export CCACHE_KEEP_LOCAL_STORAGE="TRUE"
         unset CCACHE_READONLY
-
-        # 参考sglang/sgl-kernel/build.sh中构建部分
-        export USE_CCACHE=1
-        export CCACHE_MAXSIZE=10G
-        export CCACHE_COMPILERCHECK=content
-        export CCACHE_COMPRESS=true
-        export CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime
-        export CMAKE_C_COMPILER_LAUNCHER=ccache
-        export CMAKE_CXX_COMPILER_LAUNCHER=ccache
-        export CMAKE_CUDA_COMPILER_LAUNCHER=ccache
-        echo "=== ccache stats (before) ==="
-        ccache -sV
-        export PYTHON_VERSION=${{parameters.python_version}}
-        export PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
-        export CMAKE_BUILD_PARALLEL_LEVEL=${{parameters.max_jobs}}
-        export NVCC_THREADS=${{parameters.nvcc_threads}}
-        export CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}}
-        export PRE_DEFINED_TORCH_VER="${{parameters.torch_version}}"
-        export PRE_DEFINED_CU_TAG="${{jobs.verify_params.outputs.output.cu_tag}}"
         export BUILD_SGLANG_WHL_ONLY="${{parameters.build_sglang_whl_only}}"
         export GITHUB_ARTIFACTORY=${{parameters.github_artifactory}}
-
-        # 检查是否需要安装torch, uv等编译组件
-        torch_version=$(/opt/python/${PY_TAG}/bin/python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
-        if [ "$torch_version" != "${PRE_DEFINED_TORCH_VER}+${PRE_DEFINED_CU_TAG}" ]; then
-          /opt/python/${PY_TAG}/bin/pip install torch==${PRE_DEFINED_TORCH_VER} --index-url https://download.pytorch.org/whl/${PRE_DEFINED_CU_TAG}
-        fi
-        if [ "/opt/python/${PY_TAG}" != "${PYTHON_ROOT_PATH}" ]; then
-          export PYTHON_ROOT_PATH=/opt/python/${PY_TAG}
-          ${PYTHON_ROOT_PATH}/bin/pip install ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url https://pypi.antfin-inc.com/simple
-        fi
-
-        export ENABLE_BELOW_SM90=${{parameters.enable_below_sm90}}
-        export CMAKE_ARGS="${CMAKE_ARGS:-} -DENABLE_BELOW_SM90=${ENABLE_BELOW_SM90} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS} -DGITHUB_ARTIFACTORY=${GITHUB_ARTIFACTORY}"
-        echo "Build parallelism: CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}, NVCC_THREADS=${NVCC_THREADS}"
-
+        export BUILD_JOBS=${{parameters.max_jobs}}
+        export NVCC_THREADS=${{parameters.nvcc_threads}}
+        export PYTHON_VERSION=${{parameters.python_version}}
+        export CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}}
 
         # 蚂蚁内部构建使用的镜像等
         pip install mitmproxy -i https://pypi.antfin-inc.com/simple
@@ -198,16 +212,6 @@ jobs:
 
         cat ~/.gitconfig
 
-
-        export CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}}
-        export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX"
-        # support blackwell
-        #if [ "${CUDA_VERSION}" == "13.0" ]; then
-        #  export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX 10.0 10.0a 10.0+PTX"
-        #elif [ "${CUDA_VERSION}" == "12.9" ]; then
-        #  export TORCH_CUDA_ARCH_LIST="9.0 9.0a 9.0+PTX"
-        #fi
-
         cd ./sgl-kernel
         git diff
         for i in {1..100}
@@ -224,17 +228,10 @@ jobs:
           mkdir dist
           touch dist/sglang_kernel-0.0.0.dev-py3-none-any.whl
         else
-          curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation"
-          PYTHON=${PYTHON_ROOT_PATH}/bin/python ./rename_wheels.sh
+          # python_version 为固定的3.10， 社区在 .github/workflows/release-whl-kernel.yml 里通过参数传递的就是 3.10, 和安装环境的python版本没关系
+          curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "bash build.sh ${PYTHON_VERSION} ${CUDA_VERSION}"
         fi
 
-        # 构建完成之后，输出ccache stats
-        if [ "${USE_CCACHE}" = "1" ]; then
-          echo "=== ccache stats (after) ==="
-          ccache -s
-        fi
-        pwd
-        ls -lh dist/
         wheel_file=$(ls -1 "dist/" | head -n 1)
         echo "ACB_BUILD_DIR=${ACB_BUILD_DIR}"
         mkdir -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sgl_kernel
