@@ -35,9 +35,16 @@ def layer_norm_gated_fwd_kernel(
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
+    G_OUTER,  # number of outer rows in g
     D: tl.constexpr,  # number of columns in x
     BT: tl.constexpr,
     BD: tl.constexpr,
+    G_NUM_HEADS: tl.constexpr,
+    G_BLOCK_OUTER: tl.constexpr,
+    G_STRIDE_0: tl.constexpr,
+    G_STRIDE_1: tl.constexpr,
+    G_STRIDE_2: tl.constexpr,
+    USE_3D_G_BLOCK: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -89,9 +96,46 @@ def layer_norm_gated_fwd_kernel(
     if HAS_BIAS:
         b_y = b_y + b_b[None, :]
 
-    # swish/sigmoid output gate
-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    # swish/sigmoid output gate. Compact 2D gates keep a 2D block pointer load;
+    # strided 3D gates are loaded as [outer, head, D] blocks and flattened.
+    if G_NUM_HEADS == 1:
+        if G_STRIDE_0 == D and G_STRIDE_2 == 1:
+            p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+        else:
+            p_g = tl.make_block_ptr(
+                g,
+                (T, D),
+                (G_STRIDE_0, G_STRIDE_2),
+                (i_t * BT, 0),
+                (BT, BD),
+                (1, 0),
+            )
+        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    elif USE_3D_G_BLOCK:
+        p_g = tl.make_block_ptr(
+            g,
+            (G_OUTER, G_NUM_HEADS, D),
+            (G_STRIDE_0, G_STRIDE_1, G_STRIDE_2),
+            (i_t * G_BLOCK_OUTER, 0, 0),
+            (G_BLOCK_OUTER, G_NUM_HEADS, BD),
+            (2, 1, 0),
+        )
+        b_g = tl.load(p_g, boundary_check=(0, 1, 2), padding_option="zero").to(
+            tl.float32
+        )
+        b_g = b_g.reshape((BT, BD))
+    else:
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        g_outer = o_t // G_NUM_HEADS
+        g_inner = o_t - g_outer * G_NUM_HEADS
+        p_g = (
+            g
+            + g_outer[:, None] * G_STRIDE_0
+            + g_inner[:, None] * G_STRIDE_1
+            + o_d[None, :] * G_STRIDE_2
+        )
+        b_g = tl.load(p_g, mask=m_t[:, None] & m_d[None, :], other=0.0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
@@ -116,6 +160,10 @@ def layer_norm_gated_fwd_kernel1(
     eps,  # epsilon to avoid division by zero
     D: tl.constexpr,  # number of columns in x
     BD: tl.constexpr,
+    G_NUM_HEADS: tl.constexpr,
+    G_STRIDE_0: tl.constexpr,
+    G_STRIDE_1: tl.constexpr,
+    G_STRIDE_2: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -126,7 +174,6 @@ def layer_norm_gated_fwd_kernel1(
     i_t = tl.program_id(0)
     x += i_t * D
     y += i_t * D
-    g += i_t * D
     if HAS_RESIDUAL:
         residual += i_t * D
     if STORE_RESIDUAL_OUT:
@@ -159,8 +206,18 @@ def layer_norm_gated_fwd_kernel1(
     if HAS_BIAS:
         b_y = b_y + b_b
 
-    # swish/sigmoid output gate
-    b_g = tl.load(g + o_d, mask=m_d, other=0.0).to(tl.float32)
+    # swish/sigmoid output gate. Compact 2D gates keep the original row load;
+    # strided 3D gates use logical [outer, head, D] indexing.
+    if G_NUM_HEADS == 1:
+        if G_STRIDE_0 == D and G_STRIDE_2 == 1:
+            p_g = g + i_t * D + o_d
+        else:
+            p_g = g + i_t * G_STRIDE_0 + o_d * G_STRIDE_2
+    else:
+        g_outer = i_t // G_NUM_HEADS
+        g_inner = i_t - g_outer * G_NUM_HEADS
+        p_g = g + g_outer * G_STRIDE_0 + g_inner * G_STRIDE_1 + o_d * G_STRIDE_2
+    b_g = tl.load(p_g, mask=m_d, other=0.0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
@@ -181,10 +238,21 @@ def layer_norm_gated_fwd(
     out_dtype: torch.dtype = None,
     residual_dtype: torch.dtype = None,
     is_rms_norm: bool = False,
+    g_num_heads: int = 1,
+    g_stride_0: int | None = None,
+    g_stride_1: int | None = None,
+    g_stride_2: int | None = None,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
     T, D = x.shape
+    if g_stride_0 is None:
+        g_stride_0 = g.stride(0)
+    if g_stride_1 is None:
+        g_stride_1 = 0
+    if g_stride_2 is None:
+        g_stride_2 = g.stride(-1)
+    assert T % g_num_heads == 0
     if residual is not None:
         assert residual.shape == (T, D)
     if weight is not None:
@@ -213,7 +281,14 @@ def layer_norm_gated_fwd(
     # heuristics for number of warps
 
     if D <= 512:
-        BT = 32
+        use_3d_g_block = g_num_heads > 1 and g_num_heads == next_power_of_2(g_num_heads)
+        if use_3d_g_block:
+            g_block_outer = max(1, 32 // g_num_heads)
+            BT = g_block_outer * g_num_heads
+        else:
+            BT = 32
+            g_block_outer = 1
+        g_outer = T // g_num_heads
         layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
             x=x,
             g=g,
@@ -226,9 +301,16 @@ def layer_norm_gated_fwd(
             rstd=rstd,
             eps=eps,
             T=T,
+            G_OUTER=g_outer,
             D=D,
             BD=BD,
             BT=BT,
+            G_NUM_HEADS=g_num_heads,
+            G_BLOCK_OUTER=g_block_outer,
+            G_STRIDE_0=g_stride_0,
+            G_STRIDE_1=g_stride_1,
+            G_STRIDE_2=g_stride_2,
+            USE_3D_G_BLOCK=use_3d_g_block,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
             STORE_RESIDUAL_OUT=residual_out is not None,
@@ -251,6 +333,10 @@ def layer_norm_gated_fwd(
             eps=eps,
             D=D,
             BD=BD,
+            G_NUM_HEADS=g_num_heads,
+            G_STRIDE_0=g_stride_0,
+            G_STRIDE_1=g_stride_1,
+            G_STRIDE_2=g_stride_2,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
             STORE_RESIDUAL_OUT=residual_out is not None,
@@ -282,7 +368,34 @@ class LayerNormGatedFunction(torch.autograd.Function):
         g_shape_og = g.shape
         # reshape input data into 2D tensor
         x = x.reshape(-1, x.shape[-1])
-        g = g.reshape(-1, g.shape[-1])
+        if g.ndim == 2:
+            assert g.shape == x.shape
+            g_num_heads = 1
+            g_stride_0 = g.stride(0)
+            g_stride_1 = 0
+            g_stride_2 = g.stride(1)
+        else:
+            assert g.shape[-1] == x.shape[-1]
+            assert g.numel() == x.numel()
+            while g.ndim > 3 and g.shape[0] == 1:
+                g = g.squeeze(0)
+            if g.is_contiguous():
+                g = g.reshape(-1, g.shape[-1])
+                g_num_heads = 1
+                g_stride_0 = g.stride(0)
+                g_stride_1 = 0
+                g_stride_2 = g.stride(1)
+            elif g.ndim == 3:
+                g_num_heads = g.shape[-2]
+                g_stride_0 = g.stride(-3)
+                g_stride_1 = g.stride(-2)
+                g_stride_2 = g.stride(-1)
+            else:
+                g = g.reshape(-1, g.shape[-1])
+                g_num_heads = 1
+                g_stride_0 = g.stride(0)
+                g_stride_1 = 0
+                g_stride_2 = g.stride(1)
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape(-1, residual.shape[-1])
@@ -301,6 +414,10 @@ class LayerNormGatedFunction(torch.autograd.Function):
             residual=residual,
             residual_dtype=residual_dtype,
             is_rms_norm=is_rms_norm,
+            g_num_heads=g_num_heads,
+            g_stride_0=g_stride_0,
+            g_stride_1=g_stride_1,
+            g_stride_2=g_stride_2,
         )
         ctx.save_for_backward(residual_out, g, weight, bias, mean, rstd)
         ctx.x_shape_og = x_shape_og

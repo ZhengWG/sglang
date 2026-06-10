@@ -207,6 +207,7 @@ class KimiDeltaAttention(nn.Module):
 
         # TODO: support fusion with quant
         self.do_fuse_qkvbfg = self.no_kda_lora or quant_config is None
+        self.fuse_no_lora_beta = self.no_kda_lora and quant_config is None
 
         if self.do_fuse_qkvbfg:
             if self.no_kda_lora:
@@ -214,6 +215,7 @@ class KimiDeltaAttention(nn.Module):
                     projection_size,
                     projection_size,
                     projection_size,
+                    *([self.num_heads] if self.fuse_no_lora_beta else []),
                     projection_size,
                     projection_size,
                 ]
@@ -226,19 +228,24 @@ class KimiDeltaAttention(nn.Module):
                     tp_rank=self.attn_tp_rank,
                     tp_size=self.attn_tp_size,
                 )
-                self.split_sizes = [
-                    3 * projection_size // self.attn_tp_size,  # qkv
-                    projection_size // self.attn_tp_size,  # f
-                    projection_size // self.attn_tp_size,  # g
-                ]
-                self.b_proj = ColumnParallelLinear(
-                    self.hidden_size,
-                    self.num_heads,
-                    bias=False,
-                    prefix=f"{prefix}.b_proj",
-                    tp_rank=self.attn_tp_rank,
-                    tp_size=self.attn_tp_size,
+                self.split_sizes = [3 * projection_size // self.attn_tp_size]
+                if self.fuse_no_lora_beta:
+                    self.split_sizes.append(self.num_heads // self.attn_tp_size)
+                self.split_sizes.extend(
+                    [
+                        projection_size // self.attn_tp_size,  # f
+                        projection_size // self.attn_tp_size,  # g
+                    ]
                 )
+                if not self.fuse_no_lora_beta:
+                    self.b_proj = ColumnParallelLinear(
+                        self.hidden_size,
+                        self.num_heads,
+                        bias=False,
+                        prefix=f"{prefix}.b_proj",
+                        tp_rank=self.attn_tp_rank,
+                        tp_size=self.attn_tp_size,
+                    )
             else:
                 self.qkvb_sizes = [
                     projection_size,
@@ -405,13 +412,12 @@ class KimiDeltaAttention(nn.Module):
         # Single fused projection for all: qkv + beta + f_a + g_a
         if self.no_kda_lora:
             fused_states, _ = self.fused_qkvbfg_proj(hidden_states)
-            qkv, forget_gate, g_proj_states = torch.split(
-                fused_states,
-                self.split_sizes,
-                dim=-1,
-            )
-            beta = self.b_proj(hidden_states)[0]
-            forget_gate = forget_gate.contiguous()
+            split_states = torch.split(fused_states, self.split_sizes, dim=-1)
+            if self.fuse_no_lora_beta:
+                qkv, beta, forget_gate, g_proj_states = split_states
+            else:
+                qkv, forget_gate, g_proj_states = split_states
+                beta = self.b_proj(hidden_states)[0]
         else:
             fused_states = self.fused_qkvbfg_a_proj(hidden_states)
             qkv, beta, fg_a_states = torch.split(

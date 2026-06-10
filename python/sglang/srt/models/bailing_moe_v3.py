@@ -1847,6 +1847,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             (".fused_qkvbfg_proj", ".q_proj", 0),
             (".fused_qkvbfg_proj", ".k_proj", 1),
             (".fused_qkvbfg_proj", ".v_proj", 2),
+            (".fused_qkvbfg_proj", ".b_proj", 3),
             (".fused_qkvbfg_proj", ".f_proj", 3),
             (".fused_qkvbfg_proj", ".g_proj", 4),
             # Fused path
@@ -1947,10 +1948,20 @@ class BailingMoeV3ForCausalLM(nn.Module):
                             continue
                         layer_attn = layer.attention
                         # Only load to fused projection if fusion is enabled
-                        if (
-                            not getattr(layer_attn, "do_fuse_qkvbfg", False)
-                            and not self.config.no_kda_lora
-                        ):
+                        if not getattr(layer_attn, "do_fuse_qkvbfg", False):
+                            continue
+                        if param_name == ".fused_qkvbfg_proj":
+                            if not getattr(layer_attn, "no_kda_lora", False):
+                                continue
+                            if weight_name == ".b_proj" and not getattr(
+                                layer_attn, "fuse_no_lora_beta", False
+                            ):
+                                continue
+                            if weight_name in {".f_proj", ".g_proj"} and getattr(
+                                layer_attn, "fuse_no_lora_beta", False
+                            ):
+                                shard_id += 1
+                        elif getattr(layer_attn, "no_kda_lora", False):
                             continue
 
                     new_name = name.replace(weight_name, param_name)

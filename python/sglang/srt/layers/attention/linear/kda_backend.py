@@ -212,6 +212,14 @@ class KDAAttnBackend(MambaAttnBackendBase):
         decode_backend = get_linear_attn_decode_backend()
         prefill_backend = get_linear_attn_prefill_backend()
         self.kernel_dispatcher = KDAKernelDispatcher(decode_backend, prefill_backend)
+        max_verify_batch_size = model_runner.max_running_requests
+        # These target_verify helpers are indexed by batch position, not mamba slot id.
+        self.verify_has_initial_state = torch.ones(
+            max_verify_batch_size, dtype=torch.bool, device=model_runner.device
+        )
+        self.verify_intermediate_state_indices = torch.arange(
+            max_verify_batch_size, dtype=torch.int32, device=model_runner.device
+        )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         super().init_forward_metadata(forward_batch)
@@ -340,9 +348,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ):
                 bs = forward_batch.batch_size
                 draft_token_num = forward_batch.spec_info.draft_token_num
-                has_initial_state = torch.ones(
-                    bs, dtype=torch.bool, device=mixed_qkv.device
-                )
+                has_initial_state = self.verify_has_initial_state[:bs]
                 extend_seq_lens_cpu = [draft_token_num] * bs
             else:
                 raise RuntimeError(
@@ -366,9 +372,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             draft_token_num = forward_batch.spec_info.draft_token_num
 
             conv_state_indices = cache_indices[:batch_size]
-            intermediate_state_indices = torch.arange(
-                cache_indices.shape[0], dtype=torch.int32, device=cache_indices.device
-            )
+            intermediate_state_indices = self.verify_intermediate_state_indices
 
             retrieve_next_token = self.forward_metadata.retrieve_next_token
             retrieve_next_sibling = self.forward_metadata.retrieve_next_sibling
