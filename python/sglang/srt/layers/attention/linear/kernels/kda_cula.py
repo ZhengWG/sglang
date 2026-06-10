@@ -1,5 +1,5 @@
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -15,8 +15,25 @@ from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
 )
 
 
-def _triton_fallback(q, k, v, g, beta, ssm_states, cache_indices, query_start_loc):
-    """Fall back to the Triton chunk_kda kernel (handles all preprocessing)."""
+def _triton_fallback(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    ssm_states,
+    cache_indices,
+    query_start_loc,
+    A_log=None,
+    dt_bias=None,
+    lower_bound=None,
+):
+    """Fall back to the Triton chunk_kda kernel (handles all preprocessing).
+
+    `g` is the RAW gate (PR #730 / #23038 contract); chunk_kda applies the gate
+    activation internally when A_log is provided, so they must be threaded
+    through here too -- otherwise the fallback silently skips activation.
+    """
     from sglang.srt.layers.attention.fla.kda import chunk_kda
 
     return chunk_kda(
@@ -29,6 +46,9 @@ def _triton_fallback(q, k, v, g, beta, ssm_states, cache_indices, query_start_lo
         initial_state_indices=cache_indices,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=query_start_loc,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
     )
 
 
@@ -82,6 +102,9 @@ class CulaKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
+        A_log: Optional[torch.Tensor] = None,
+        dt_bias: Optional[torch.Tensor] = None,
+        lower_bound: Optional[float] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Guard: sequences shorter than cuLA chunk size fall back to Triton.
@@ -89,7 +112,17 @@ class CulaKDAKernel(LinearAttnKernelBase):
         min_seq_len = seq_lens.min().item()
         if min_seq_len < _CULA_CHUNK_SIZE:
             return _triton_fallback(
-                q, k, v, g, beta, ssm_states, cache_indices, query_start_loc
+                q,
+                k,
+                v,
+                g,
+                beta,
+                ssm_states,
+                cache_indices,
+                query_start_loc,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                lower_bound=lower_bound,
             )
 
         return self._cula_extend(
@@ -101,6 +134,9 @@ class CulaKDAKernel(LinearAttnKernelBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
         )
 
     def _cula_extend(
@@ -114,10 +150,14 @@ class CulaKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
+        A_log: Optional[torch.Tensor] = None,
+        dt_bias: Optional[torch.Tensor] = None,
+        lower_bound: Optional[float] = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from sgl_kernel import kda_fwd_prefill
 
         from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
+        from sglang.srt.layers.attention.fla.kda import kda_gate_chunk_cumsum
         from sglang.srt.layers.attention.fla.l2norm import l2norm_fwd
 
         # Input shapes: q, k, v = [1, packed_seq, H, D], g = [1, packed_seq, H, D], beta = [1, packed_seq, H]
@@ -130,15 +170,28 @@ class CulaKDAKernel(LinearAttnKernelBase):
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
 
-        # 2. Clamp gate values to safe range for cuLA's safe_gate=True mode.
-        # This avoids numerical overflow in chunk_local_cumsum when the model
-        # produces extreme negative gate values (e.g. < -5).
-        g = g.clamp(min=-5.0)
-
-        # 3. Gate cumsum preprocessing (scale=RCP_LN2 for cuLA's exp2-based kernel)
-        g = chunk_local_cumsum(
-            g, chunk_size=64, scale=RCP_LN2, cu_seqlens=query_start_loc
-        )
+        # 2. Gate activation + chunk-local cumsum.
+        # PR #730 (#23038) moved KDA gate activation into the kernel, so `g`
+        # arriving here is now the RAW gate. Apply the same activation as the
+        # Triton chunk_kda path -- standard gate -exp(A_log)*softplus(g+dt_bias),
+        # or safe gate lower_bound*sigmoid(exp(A_log)*(g+dt_bias)) when
+        # lower_bound is set -- fused with the chunk-local cumsum. scale=RCP_LN2
+        # puts the cumulative gate in log-base-2 space for cuLA's exp2 kernel.
+        if A_log is not None:
+            g = kda_gate_chunk_cumsum(
+                g,
+                A_log=A_log,
+                chunk_size=64,
+                scale=RCP_LN2,
+                dt_bias=dt_bias,
+                cu_seqlens=query_start_loc,
+                lower_bound=lower_bound,
+            )
+        else:
+            # Legacy contract: `g` is already gate-activated; cumsum only.
+            g = chunk_local_cumsum(
+                g, chunk_size=64, scale=RCP_LN2, cu_seqlens=query_start_loc
+            )
 
         # 4. Reshape [1, packed_seq, H, D] -> [packed_seq, H, D], ensure contiguous
         q = q.reshape(packed_seq, num_heads, head_dim).contiguous()

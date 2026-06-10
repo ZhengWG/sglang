@@ -14,7 +14,13 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <cutlass/arch/arch.h>
-#include <torch/extension.h>
+// Use the op-registration headers (matching every other sgl-kernel extension)
+// instead of <torch/extension.h>. The latter pulls in <torch/python.h> ->
+// pybind11/buffer_info.h, which references Py_buffer; Py_buffer only entered the
+// Stable ABI in 3.11, so under USE_SABI (Py_LIMITED_API=0x030a0000) it fails to
+// compile. This file only registers a TORCH_LIBRARY op, so it needs neither.
+#include <torch/all.h>
+#include <torch/library.h>
 
 #include <cute/numeric/numeric_types.hpp>
 

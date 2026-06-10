@@ -516,7 +516,7 @@ if (SGL_KERNEL_ENABLE_FA3)
         "-Xcudafe=--diag_suppress=2361"
     )
 
-    Python_add_library(cula_kda_ops MODULE WITH_SOABI ${CULA_KDA_SOURCES})
+    Python_add_library(cula_kda_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${CULA_KDA_SOURCES})
     target_compile_options(cula_kda_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CULA_KDA_CUDA_FLAGS}>)
     target_include_directories(cula_kda_ops PRIVATE
         ${repo-cutlass_SOURCE_DIR}/include

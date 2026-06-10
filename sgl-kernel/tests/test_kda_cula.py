@@ -88,6 +88,9 @@ def _run_cula_vs_triton(B, T, H, D, device="cuda"):
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=cu_seqlens.long(),
     )
+    # chunk_kda returns (output, chunk-boundary states); keep only the output.
+    if isinstance(triton_out, tuple):
+        triton_out = triton_out[0]
 
     # --- cuLA kernel ---
     # Preprocess: l2norm Q, K
@@ -248,6 +251,100 @@ def test_cula_no_initial_state():
     assert output.shape == (packed_seq, H, D)
     assert output_state.shape == (B, H, D, D)
     assert not torch.isnan(output).any(), "Output contains NaN"
+
+
+def _try_import_cula_kernel_wrapper():
+    try:
+        from sglang.srt.layers.attention.linear.kernels.kda_cula import CulaKDAKernel
+
+        return CulaKDAKernel
+    except ImportError:
+        pytest.skip("CulaKDAKernel (sglang) not available")
+
+
+def _run_cula_extend_vs_triton_raw_gate(B, T, H, D, use_lower_bound, device="cuda"):
+    """End-to-end gate-contract test for the cuLA prefill path.
+
+    Unlike _run_cula_vs_triton (which feeds an already-activated gate, i.e. the
+    pre-#730 contract), this drives the *raw* gate through the real
+    CulaKDAKernel.extend path -- which must apply the KDA gate activation
+    (-exp(A_log)*softplus(g+dt_bias), or the safe-gate form when lower_bound is
+    set) via kda_gate_chunk_cumsum -- and compares against Triton chunk_kda fed
+    the same raw gate + A_log/dt_bias/lower_bound. Covers the activation that
+    PR #730 (#23038) moved into the kernel, which the kernel-only test skips.
+    """
+    _try_import_cula()  # ensure the cuLA kernel is built/loadable
+    chunk_kda, _, _ = _try_import_triton_ref()
+    CulaKDAKernel = _try_import_cula_kernel_wrapper()
+
+    torch.manual_seed(0)
+    packed_seq = B * T
+
+    q = torch.randn(1, packed_seq, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn(1, packed_seq, H, D, dtype=torch.bfloat16, device=device)
+    v = torch.randn(1, packed_seq, H, D, dtype=torch.bfloat16, device=device)
+    # RAW gate: model projection output BEFORE activation (post-#730 contract).
+    g_raw = torch.randn(1, packed_seq, H, D, dtype=torch.bfloat16, device=device)
+    beta = torch.randn(1, packed_seq, H, dtype=torch.float32, device=device).sigmoid()
+
+    # Per-head gate params (model shapes: A_log [H], dt_bias [H*K]).
+    A_log = torch.randn(H, dtype=torch.float32, device=device) * 0.5
+    dt_bias = torch.randn(H * D, dtype=torch.float32, device=device) * 0.1
+    # Keep |lower_bound| modest. The cuLA chunk kernel evaluates exp2(+/- chunk-
+    # local cumsum) over a 64-token chunk; a per-token log-decay floor as deep as
+    # -8 makes the cumsum ~-512 and overflows fp32 (exp2(738)). Real KDA
+    # safe-gate floors are mild, and the Triton reference (which also does not
+    # clamp) shares this constraint, so an extreme floor is not a meaningful case.
+    lower_bound = -1.0 if use_lower_bound else None
+
+    init_state = torch.randn(B, H, D, D, dtype=torch.float32, device=device) * 0.01
+    cu_seqlens = _make_cu_seqlens(B, T, device)
+    cache_indices = torch.arange(B, dtype=torch.int32, device=device)
+
+    # --- cuLA path under test: raw gate -> CulaKDAKernel.extend ---
+    kernel = CulaKDAKernel()
+    cula_out, _ = kernel.extend(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        g_raw.clone(),
+        beta.clone(),
+        ssm_states=init_state.clone(),
+        cache_indices=cache_indices,
+        query_start_loc=cu_seqlens,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+    )
+    cula_out = cula_out.reshape(1, packed_seq, H, D)
+
+    # --- Triton reference: same raw gate + gate params (ground truth) ---
+    triton_out = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone().contiguous(),
+        g=g_raw.clone(),
+        beta=beta.clone(),
+        initial_state=init_state.clone(),
+        initial_state_indices=cache_indices.long(),
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens.long(),
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+    )
+    if isinstance(triton_out, tuple):
+        triton_out = triton_out[0]
+
+    torch.testing.assert_close(cula_out, triton_out, atol=5e-2, rtol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "use_lower_bound", [False, True], ids=["standard_gate", "safe_gate"]
+)
+@pytest.mark.parametrize("B,T,H,D", [(1, 128, 4, 128), (2, 512, 4, 128)])
+def test_cula_extend_raw_gate_vs_triton(B, T, H, D, use_lower_bound):
+    _run_cula_extend_vs_triton_raw_gate(B, T, H, D, use_lower_bound)
 
 
 if __name__ == "__main__":
