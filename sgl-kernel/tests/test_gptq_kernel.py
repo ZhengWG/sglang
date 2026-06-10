@@ -1,8 +1,10 @@
+import sys
+
 import pytest
 import torch
 from sgl_kernel import gptq_gemm
 
-from sglang.srt.layers.quantization.utils.utils import pack_cols, pack_rows
+from sglang.srt.layers.quantization.utils import pack_cols, pack_rows
 
 
 def torch_dequantize(q_weight, q_zeros, scales, g_idx, use_shuffle, bit, K, N):
@@ -128,4 +130,4 @@ def test_gptq_gemm(M, N, K, bit, group_size, use_shuffle, dtype):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    sys.exit(pytest.main([__file__, "-v"]))

@@ -13,6 +13,9 @@ set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 
+# GitHub Artifactory
+set(GITHUB_ARTIFACTORY "github.com" CACHE STRING "GitHub mirror URL")
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
@@ -46,74 +49,51 @@ clear_cuda_arches(CMAKE_FLAG)
 # cutlass
 FetchContent_Declare(
     repo-cutlass
-    GIT_REPOSITORY https://github.com/NVIDIA/cutlass
-    GIT_TAG        57e3cfb47a2d9e0d46eb6335c3dc411498efa198
-    GIT_SHALLOW    OFF
+    URL      https://${GITHUB_ARTIFACTORY}/NVIDIA/cutlass/archive/57e3cfb47a2d9e0d46eb6335c3dc411498efa198.tar.gz
+    URL_HASH SHA256=09237099a70f80bff1dc8bb80c843a674bb4fdcb46e43cc6993e711c5ca89bb5
 )
 FetchContent_Populate(repo-cutlass)
-
-# DeepGEMM
-FetchContent_Declare(
-    repo-deepgemm
-    GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
-    GIT_TAG        f4adba8a6695e635b0106ce3dae3202016ad0ee5
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-deepgemm)
 
 # fmt
 FetchContent_Declare(
     repo-fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt
-    GIT_TAG        553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28
-    GIT_SHALLOW    OFF
+    URL      https://${GITHUB_ARTIFACTORY}/fmtlib/fmt/archive/553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28.tar.gz
+    URL_HASH SHA256=c314292789d28c3c3b420e75a7b2d1706f685f7fb63289128d46aeaea2c6be71
 )
 FetchContent_Populate(repo-fmt)
 
 # Triton kernel
 FetchContent_Declare(
     repo-triton
-    GIT_REPOSITORY "https://github.com/triton-lang/triton"
-    GIT_TAG        8f9f695ea8fde23a0c7c88e4ab256634ca27789f
-    GIT_SHALLOW    OFF
+    URL      https://${GITHUB_ARTIFACTORY}/triton-lang/triton/archive/v3.6.0.tar.gz
+    URL_HASH SHA256=be270ed11ca5a8fbd9d7941c5bbe9a23a9f6e2ffd372c8398346928bee464774
 )
 FetchContent_Populate(repo-triton)
 
 # flashinfer
 FetchContent_Declare(
     repo-flashinfer
-    GIT_REPOSITORY https://github.com/flashinfer-ai/flashinfer.git
-    GIT_TAG        bc29697ba20b7e6bdb728ded98f04788e16ee021
-    GIT_SHALLOW    OFF
+    URL      https://${GITHUB_ARTIFACTORY}/flashinfer-ai/flashinfer/archive/bc29697ba20b7e6bdb728ded98f04788e16ee021.tar.gz
+    URL_HASH SHA256=931dfd118f4b6de8c7d98702153c7c03840139170af21a07607693bd9749744d
 )
 FetchContent_Populate(repo-flashinfer)
 
 # flash-attention
 FetchContent_Declare(
     repo-flash-attention
-    GIT_REPOSITORY https://github.com/sgl-project/sgl-attn
-    GIT_TAG        f20a52329482ddca4a627b2f028f88c2959ee299
-    GIT_SHALLOW    OFF
+    URL      https://${GITHUB_ARTIFACTORY}/sgl-project/sgl-attn/archive/bcf72ccc6816b36a5fae2c5a3c027604629785e0.tar.gz
+    URL_HASH SHA256=2110d8ca1ed9b330b9f99c1d4088be12a37e44152c39fdf90dfb6526f532ba96
 )
 FetchContent_Populate(repo-flash-attention)
 
-# mscclpp
+# cuLA (CUDA Linear Attention)
 FetchContent_Declare(
-    repo-mscclpp
-    GIT_REPOSITORY https://github.com/microsoft/mscclpp.git
-    GIT_TAG        51eca89d20f0cfb3764ccd764338d7b22cd486a6
+    repo-cula
+    GIT_REPOSITORY https://code.alipay.com/Theta/cuLA.git
+    GIT_TAG        main
     GIT_SHALLOW    OFF
 )
-FetchContent_Populate(repo-mscclpp)
-
-# fast-hadamard-transform
-FetchContent_Declare(
-    repo-fast-hadamard-transform
-    GIT_REPOSITORY https://github.com/sgl-project/fast-hadamard-transform.git
-    GIT_TAG 48f3c13764dc2ec662ade842a4696a90a137f1bc
-    GIT_SHALLOW OFF
-)
-FetchContent_Populate(repo-fast-hadamard-transform)
+FetchContent_Populate(repo-cula)
 
 # ccache option
 option(ENABLE_CCACHE "Whether to use ccache" ON)
@@ -124,13 +104,15 @@ if(CCACHE_FOUND AND ENABLE_CCACHE AND DEFINED ENV{CCACHE_DIR})
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
 endif()
 
-# Enable gencode below SM90
-option(ENABLE_BELOW_SM90 "Enable below SM90" ON)
-
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    set(ENABLE_BELOW_SM90 OFF)
+# Configure gencode below SM90
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    set(DEFAULT_ENABLE_BELOW_SM90 OFF)
     message(STATUS "For aarch64, disable gencode below SM90 by default")
+else()
+    set(DEFAULT_ENABLE_BELOW_SM90 ON)
 endif()
+
+option(ENABLE_BELOW_SM90 "Enable gencode below SM90" ${DEFAULT_ENABLE_BELOW_SM90})
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
@@ -266,20 +248,20 @@ endif()
 # NOTE: Please sort the filenames alphabetically
 set(SOURCES
     "csrc/allreduce/custom_all_reduce.cu"
-    "csrc/allreduce/mscclpp_allreduce.cu"
-    "csrc/attention/cascade.cu"
     "csrc/attention/cutlass_mla_kernel.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/attention/vertical_slash_index.cu"
     "csrc/common_extension.cc"
     "csrc/elementwise/activation.cu"
-    "csrc/elementwise/cast.cu"
     "csrc/elementwise/concat_mla.cu"
     "csrc/elementwise/copy.cu"
+    "csrc/elementwise/dsv4_norm_rope.cu"
     "csrc/elementwise/fused_add_rms_norm_kernel.cu"
-    "csrc/elementwise/rope.cu"
+    "csrc/elementwise/pos_enc.cu"
     "csrc/elementwise/topk.cu"
     "csrc/expert_specialization/es_fp8_blockwise.cu"
+    "csrc/expert_specialization/es_sm100_mxfp8_blockscaled.cu"
+    "csrc/expert_specialization/es_sm100_mxfp8_blockscaled_group_quant.cu"
 
     "csrc/gemm/awq_kernel.cu"
     "csrc/gemm/bmm_fp8.cu"
@@ -290,40 +272,29 @@ set(SOURCES
     "csrc/gemm/fp8_blockwise_gemm_kernel.cu"
     "csrc/gemm/fp8_gemm_kernel.cu"
     "csrc/gemm/int8_gemm_kernel.cu"
-    "csrc/gemm/nvfp4_expert_quant.cu"
-    "csrc/gemm/nvfp4_quant_entry.cu"
-    "csrc/gemm/nvfp4_quant_kernels.cu"
-    "csrc/gemm/nvfp4_scaled_mm_entry.cu"
-    "csrc/gemm/nvfp4_scaled_mm_kernels.cu"
-    "csrc/gemm/per_tensor_quant_fp8.cu"
     "csrc/gemm/per_token_group_quant_8bit.cu"
     "csrc/gemm/per_token_group_quant_8bit_v2.cu"
     "csrc/gemm/per_token_quant_fp8.cu"
     "csrc/gemm/qserve_w4a8_per_chn_gemm.cu"
     "csrc/gemm/qserve_w4a8_per_group_gemm.cu"
-    "csrc/gemm/marlin/gptq_marlin.cu"
-    "csrc/gemm/marlin/gptq_marlin_repack.cu"
-    "csrc/gemm/marlin/awq_marlin_repack.cu"
     "csrc/gemm/gptq/gptq_kernel.cu"
     "csrc/grammar/apply_token_bitmask_inplace_cuda.cu"
 
     "csrc/kvcacheio/transfer.cu"
     "csrc/mamba/causal_conv1d.cu"
-    "csrc/memory/store.cu"
     "csrc/memory/weak_ref_tensor.cpp"
 
     "csrc/moe/cutlass_moe/w4a8/scaled_mm_entry.cu"
     "csrc/moe/cutlass_moe/w4a8/w4a8_moe_data.cu"
     "csrc/moe/cutlass_moe/w4a8/w4a8_grouped_mm_c3x.cu"
-    "csrc/moe/marlin_moe_wna16/ops.cu"
     "csrc/moe/moe_align_kernel.cu"
     "csrc/moe/moe_fused_gate.cu"
+    "csrc/moe/fused_qknorm_rope_kernel.cu"
     "csrc/moe/kimi_k2_moe_fused_gate.cu"
     "csrc/moe/moe_sum.cu"
     "csrc/moe/moe_sum_reduce.cu"
     "csrc/moe/moe_topk_softmax_kernels.cu"
     "csrc/moe/moe_topk_sigmoid_kernels.cu"
-    "csrc/moe/nvfp4_blockwise_moe.cu"
     "csrc/moe/fp8_blockwise_moe_kernel.cu"
     "csrc/moe/prepare_moe_input.cu"
 
@@ -335,10 +306,6 @@ set(SOURCES
 
     "${repo-flashinfer_SOURCE_DIR}/csrc/norm.cu"
     "${repo-flashinfer_SOURCE_DIR}/csrc/renorm.cu"
-    "${repo-flashinfer_SOURCE_DIR}/csrc/sampling.cu"
-
-    "${repo-fast-hadamard-transform_SOURCE_DIR}/csrc/fast_hadamard_transform_cuda.cu"
-    "${repo-fast-hadamard-transform_SOURCE_DIR}/csrc/fast_hadamard_transform.cpp"
 
     "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_causal_sm80.cu"
     "${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src/flash_fwd_sparse_hdim128_bf16_sm80.cu"
@@ -352,7 +319,6 @@ set(INCLUDES
     ${repo-cutlass_SOURCE_DIR}/tools/util/include
     ${repo-flashinfer_SOURCE_DIR}/include
     ${repo-flashinfer_SOURCE_DIR}/csrc
-    ${repo-mscclpp_SOURCE_DIR}/include
     ${repo-cutlass_SOURCE_DIR}/examples/77_blackwell_fmha
     ${repo-cutlass_SOURCE_DIR}/examples/common
     ${repo-flash-attention_SOURCE_DIR}/csrc/flash_attn/src
@@ -402,17 +368,8 @@ else()
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 endif()
 
-# mscclpp option
-set(MSCCLPP_USE_CUDA ON)
-set(MSCCLPP_BYPASS_GPU_CHECK ON)
-set(MSCCLPP_BUILD_TESTS OFF)
-add_subdirectory(
-    ${repo-mscclpp_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}/mscclpp-build
-)
-
-target_link_libraries(common_ops_sm90_build PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt mscclpp_static)
-target_link_libraries(common_ops_sm100_build PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt mscclpp_static)
+target_link_libraries(common_ops_sm90_build PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt)
+target_link_libraries(common_ops_sm100_build PRIVATE ${TORCH_LIBRARIES} c10 cuda cublas cublasLt)
 
 # sparse flash attention
 target_compile_definitions(common_ops_sm90_build PRIVATE
@@ -450,6 +407,8 @@ if (SGL_KERNEL_ENABLE_FA3)
         "-DCUTLASS_TEST_LEVEL=0"
         "-DCUTLASS_TEST_ENABLE_CACHED_RESULTS=1"
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0"
+        "-DCUTLASS_ENABLE_GDC_FOR_SM90"  # For PDL
+        "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED"  # Necessary for the WGMMA shapes that we use
         "--expt-relaxed-constexpr"
         "--expt-extended-lambda"
         "--use_fast_math"
@@ -468,21 +427,21 @@ if (SGL_KERNEL_ENABLE_FA3)
     endif()
 
     file(GLOB FA3_BF16_GEN_SRCS
-        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimall_bf16*_sm90.cu")
+        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdim[0-9]*_bf16*_sm90.cu")
     file(GLOB FA3_BF16_GEN_SRCS_
         "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimdiff_bf16*_sm90.cu")
     list(APPEND FA3_BF16_GEN_SRCS ${FA3_BF16_GEN_SRCS_})
 
-    # FP16 source files
+    # FP16 source files - use individual hdim files instead of hdimall to avoid ptxas crash
     file(GLOB FA3_FP16_GEN_SRCS
-        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimall_fp16*_sm90.cu")
+        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdim[0-9]*_fp16*_sm90.cu")
     file(GLOB FA3_FP16_GEN_SRCS_
         "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimdiff_fp16*_sm90.cu")
     list(APPEND FA3_FP16_GEN_SRCS ${FA3_FP16_GEN_SRCS_})
 
     # FP8 source files
     file(GLOB FA3_FP8_GEN_SRCS
-        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimall_e4m3*_sm90.cu")
+        "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdim[0-9]*_e4m3*_sm90.cu")
     file(GLOB FA3_FP8_GEN_SRCS_
         "${repo-flash-attention_SOURCE_DIR}/hopper/instantiations/flash_fwd_hdimdiff_e4m3*_sm90.cu")
     list(APPEND FA3_FP8_GEN_SRCS ${FA3_FP8_GEN_SRCS_})
@@ -519,6 +478,55 @@ if (SGL_KERNEL_ENABLE_FA3)
         list(APPEND FLASH_OPS_COMPILE_DEFS FLASHATTENTION_DISABLE_SM8x)
     endif()
     target_compile_definitions(flash_ops PRIVATE ${FLASH_OPS_COMPILE_DEFS})
+
+    # ============================ Optional Install: cuLA KDA ============================= #
+    # cuLA KDA prefill kernel for SM90a (Hopper) - requires CUDA >= 12.4 (same as FA3)
+    set(CULA_KDA_SOURCES
+        "csrc/kda/kda_sm90_api.cu"
+        "${repo-cula_SOURCE_DIR}/csrc/kda/sm90/kda_fwd_sm90.cu"
+        "${repo-cula_SOURCE_DIR}/csrc/kda/sm90/kda_fwd_sm90_safe_gate.cu"
+    )
+
+    set(CULA_KDA_CUDA_FLAGS
+        "-DNDEBUG"
+        "-DOPERATOR_NAMESPACE=sgl-kernel"
+        "-O3"
+        "-Xcompiler"
+        "-fPIC"
+        "-gencode=arch=compute_90a,code=sm_90a"
+        "-std=c++20"
+        "-DCUTE_USE_PACKED_TUPLE=1"
+        "-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1"
+        "-DCUTLASS_VERSIONS_GENERATED"
+        "-DCUTLASS_TEST_LEVEL=0"
+        "-DCUTLASS_TEST_ENABLE_CACHED_RESULTS=1"
+        "-DCUTLASS_DEBUG_TRACE_LEVEL=0"
+        "-DCUTLASS_ENABLE_GDC_FOR_SM90"
+        "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED"
+        "-DCULA_SM90A_ENABLED"
+        "--expt-relaxed-constexpr"
+        "--expt-extended-lambda"
+        "--use_fast_math"
+        "--threads=${SGL_KERNEL_COMPILE_THREADS}"
+        "-Xcompiler=-Wno-clang-format-violations"
+        "-Xcompiler=-Wno-conversion"
+        "-Xcompiler=-Wno-deprecated-declarations"
+        "-Xcompiler=-Wno-terminate"
+        "-Xcudafe=--diag_suppress=177"
+        "-Xcudafe=--diag_suppress=2361"
+    )
+
+    Python_add_library(cula_kda_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${CULA_KDA_SOURCES})
+    target_compile_options(cula_kda_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CULA_KDA_CUDA_FLAGS}>)
+    target_include_directories(cula_kda_ops PRIVATE
+        ${repo-cutlass_SOURCE_DIR}/include
+        ${repo-cutlass_SOURCE_DIR}/tools/util/include
+        ${repo-cula_SOURCE_DIR}/csrc/kerutils/include
+        ${repo-cula_SOURCE_DIR}/csrc
+        ${TORCH_INCLUDE_DIRS}
+    )
+    target_link_libraries(cula_kda_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
+    install(TARGETS cula_kda_ops LIBRARY DESTINATION sgl_kernel)
 endif()
 
 # Build spatial_ops as a separate, optional extension for green contexts
@@ -535,63 +543,8 @@ install(TARGETS spatial_ops LIBRARY DESTINATION sgl_kernel)
 # ============================ Extra Install: FLashMLA ============================= #
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/flashmla.cmake)
 
-# ============================ Extra Install: DeepGEMM (JIT) ============================= #
-# Create a separate library for DeepGEMM's Python API.
-# This keeps its compilation isolated from the main common_ops.
-set(DEEPGEMM_SOURCES
-    "${repo-deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
-)
-
-Python_add_library(deep_gemm_cpp MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${DEEPGEMM_SOURCES})
-
-# Link against necessary libraries, including nvrtc for JIT compilation.
-target_link_libraries(deep_gemm_cpp PRIVATE ${TORCH_LIBRARIES} c10 cuda nvrtc mscclpp_static)
-
-# Add include directories needed by DeepGEMM.
-target_include_directories(deep_gemm_cpp PRIVATE
-    ${repo-deepgemm_SOURCE_DIR}/deep_gemm/include
-    ${repo-cutlass_SOURCE_DIR}/include
-    ${repo-fmt_SOURCE_DIR}/include
-)
-
-# Apply the same compile options as common_ops.
-target_compile_options(deep_gemm_cpp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${SGL_KERNEL_CUDA_FLAGS}>)
-
-# Create an empty __init__.py to make `deepgemm` a Python package.
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py "")
-install(
-    FILES ${CMAKE_CURRENT_BINARY_DIR}/deepgemm_pkg_init.py
-    DESTINATION deep_gemm
-    RENAME __init__.py
-)
-
-# Install the compiled DeepGEMM API library.
-install(TARGETS deep_gemm_cpp LIBRARY DESTINATION deep_gemm)
-
-# Install the source files required by DeepGEMM for runtime JIT compilation.
-install(
-    DIRECTORY ${repo-deepgemm_SOURCE_DIR}/deep_gemm/
-    DESTINATION deep_gemm
-)
-
-install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cute/"
-        DESTINATION "deep_gemm/include/cute")
-
-install(DIRECTORY "${repo-cutlass_SOURCE_DIR}/include/cutlass/"
-        DESTINATION "deep_gemm/include/cutlass")
-
 # ============================ Extra Install: triton kernels ============================= #
 install(DIRECTORY "${repo-triton_SOURCE_DIR}/python/triton_kernels/triton_kernels/"
         DESTINATION "triton_kernels"
         PATTERN ".git*" EXCLUDE
         PATTERN "__pycache__" EXCLUDE)
-
-# ============================ Extra Install: FA4 ============================= #
-# TODO: find a better install condition.
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
-    # flash_attn/cute
-    install(DIRECTORY "${repo-flash-attention_SOURCE_DIR}/flash_attn/cute/"
-            DESTINATION "flash_attn/cute"
-            PATTERN ".git*" EXCLUDE
-            PATTERN "__pycache__" EXCLUDE)
-    endif()

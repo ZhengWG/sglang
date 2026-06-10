@@ -1,9 +1,10 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/quantization/compressed_tensors
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import re
 from types import MappingProxyType
-from typing import Iterable, Mapping, Optional
+from typing import Iterable, List, Mapping, Optional
 
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
@@ -14,6 +15,7 @@ def is_activation_quantization_format(format: str) -> bool:
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
         CompressionFormat.float_quantized.value,
+        CompressionFormat.nvfp4_pack_quantized.value,
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
@@ -21,7 +23,7 @@ def is_activation_quantization_format(format: str) -> bool:
 def should_ignore_layer(
     layer_name: Optional[str],
     ignore: Iterable[str] = tuple(),
-    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
 ) -> bool:
     if layer_name is None:
         return False
@@ -79,7 +81,7 @@ def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     if target starts with 're:' to any target in list.
     """
     for target in targets:
-        if _is_equal_or_regex_match(layer_name, target):
+        if _is_equal_or_regex_match(layer_name, target, check_contains=True):
             return True
     return False
 
@@ -88,14 +90,14 @@ def find_matched_target(
     layer_name: Optional[str],
     module: Module,
     targets: Iterable[str],
-    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
 ) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
 
     Recall that a compressed-tensors configs has a concept of
-    config_groups, where each layer can be quantized with a different
+    config_groups, where each layer can be quantized with with a different
     scheme.
 
     targets in each config_group will be a list of either layer names
@@ -176,7 +178,7 @@ def _is_equal_or_regex_match(
 def _match_fused_layer(
     layer_name: str,
     target_layers: Iterable[str],
-    fused_mapping: Mapping[str, list[str]],
+    fused_mapping: Mapping[str, List[str]],
 ) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in
@@ -206,7 +208,7 @@ def _match_fused_layer(
     ]
 
     # for each unfused component, find a match in targets
-    unfused_matches: list[Optional[str]] = []
+    unfused_matches: List[Optional[str]] = []
     for unfused in unfused_paths:
         for target in target_layers:
             if _is_equal_or_regex_match(unfused, target):

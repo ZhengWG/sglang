@@ -18,18 +18,30 @@ COPY ./docker/ant/.xccl_env.sh /root/.xccl_env.sh
 COPY ./docker/ant/.bashrc /root/.bashrc
 #RUN echo -e '\n#初始化XCCL相关网络环境变量\nsource /root/.xccl_env.sh\n' >> /root/.bashrc
 
-RUN curl -o rdma-a100.tgz "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/aistudio%2Fgpu%2Frdma-a100.tgz" && \
-    ls -alh rdma-a100.tgz && \
-    tar --no-same-owner -xvf rdma-a100.tgz && \
-    rpm -Uvh --force rdma-a100/nic-libs-mellanox-rdma-5.2-2.x86_64.rpm && \
-    rm -rf rdma-a100 rdma-a100.tgz
+# 更新rdma-core版本，支持torch2.9.1
+RUN rpm -e nic-libs-mellanox-rdma && \
+    yum install -y pciutils && \
+    wget "https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/ant-deep-ep/rdma-core-2504-mayi.tar.gz" && \
+    tar  --no-same-owner -zxf rdma-core-2504-mayi.tar.gz && \
+    cd rdma-core-2504-mayi && \
+    ls -alh && \
+    bash check-installed.sh && \
+    bash install.sh
+
 # 安装nvshmem3, 不安装，以免deepep出错
 # RUN yum install -y libnvshmem3-cuda-12 libnvshmem3-devel-cuda-12 libnvshmem3-static-cuda-12 && yum clean all
 
 RUN python3 -m pip install --upgrade pip --no-cache-dir && pip install -U setuptools
 
+# 单独处理vllm的依赖包
+RUN pip3 install --no-cache-dir vllm==0.18.0
+
 # 安装运行sglang依赖的包
-RUN pip3 install --no-cache-dir torch==2.8.0 torchao==0.9.0 torchaudio==2.8.0 torchvision==0.23.0 vllm==0.11.0
+RUN pip3 install --no-cache-dir torch==2.9.1 torchao==0.9.0 torchaudio==2.9.1 torchvision==0.24.1
+
+# 安装flash-attn 2.8.3，配合sglang升级transformers 5.x
+ARG FLASH_ATTN_283_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/sglang_torch291/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl'
+RUN pip3 install --no-cache-dir ${FLASH_ATTN_283_WHL_URL}
 
 # for torch compile remote cache: https://yuque.antfin.com/deepxpu/uiwv6l/rtifd09662zz2u5k
 RUN pip3 install --no-cache-dir redis
@@ -79,6 +91,11 @@ RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${D
 # sglang安装时，numpy会升级为2.x， 重新降级为1.26.4
 RUN pip3 install --no-cache-dir --force-reinstall --no-deps numpy==1.26.4
 
+# 适配torch2.9.1，升级对应的nv库
+RUN pip3 install nvidia-nccl-cu12==2.28.3 --force-reinstall --no-deps
+RUN pip3 install nvidia-cudnn-cu12==9.16.0.29 --force-reinstall --no-deps
+RUN pip3 install nvidia-nvshmem-cu12==3.4.5 --force-reinstall --no-deps
+
 # TransferEngine安装
 ARG TRANSFER_ENGINE_WHL_URL='https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/ant-mooncake-transfer-engine/ant_mooncake_transfer_engine-0.3.4.post2-cp310-cp310-manylinux_2_17_x86_64.manylinux_2_35_x86_64.whl#sha256=519e4bb382be5a750c87ef93af66aa46606500f6832f946800d52b0786cf50d1'
 RUN pip3 uninstall -y mooncake-transfer-engine; pip3 install --force-reinstall --no-cache-dir ${TRANSFER_ENGINE_WHL_URL}
@@ -106,13 +123,11 @@ RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/deep_g
     tar -xPf deep_gemm_cache_common1216.tar && \
     rm -rf deep_gemm_cache_common1216.tar
 
-# 根据flashinfer-python版本更新flashinfer-jit-cache
-RUN FLASHINFER_VERSION=$(pip show flashinfer-python |grep Version | awk ' {print $2}'); \
-    SIMPLE_F_VERSION=$(echo -n ${FLASHINFER_VERSION} | sed 's#\.##g'); \
-    wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/flashinfer_jit_cache/flashinfer_jit_cache_${SIMPLE_F_VERSION}_cu128.tar" && \
-    tar -xf "flashinfer_jit_cache_${SIMPLE_F_VERSION}_cu128.tar" && \
-    pip3 install "flashinfer_jit_cache-${FLASHINFER_VERSION}+cu128-cp39-abi3-manylinux_2_28_x86_64.whl" && \
-    rm -rvf "flashinfer_jit_cache_${SIMPLE_F_VERSION}_cu128.tar" "flashinfer_jit_cache-${FLASHINFER_VERSION}+cu128-cp39-abi3-manylinux_2_28_x86_64.whl"
+# 安装flashinfer-jit-cache
+RUN wget "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/flashinfer_jit_cache/flashinfer_jit_cache_068_post1_cu128.tar" && \
+    tar -xf flashinfer_jit_cache_068_post1_cu128.tar && pip3 install flashinfer_jit_cache-0.6.8.post1+cu128-cp39-abi3-manylinux_2_28_x86_64.whl && \
+    rm -rf flashinfer_jit_cache_068_post1_cu128.tar flashinfer_jit_cache-0.6.8.post1+cu128-cp39-abi3-manylinux_2_28_x86_64.whl
+
 # checkpoint-engine
 RUN mkdir -p /root/checkpoint_engine
 COPY ./examples/checkpoint_engine/update.py /root/checkpoint_engine/update.py
@@ -138,6 +153,13 @@ RUN yum install -y gdb && \
 # support async model mount, refer: https://yuque.antfin.com/deepxpu/uiwv6l/ri1gufqzy4g8fdob
 ARG MODEL_MANAGER_VERSION="0.0.2"
 RUN pip3 install --no-cache-dir https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/model-manager/model-manager-${MODEL_MANAGER_VERSION}.tar.gz
+
+# 安装modctl和aistudio-modelhub
+RUN rpm -ivh https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/ant_7_x86_64_current/modctl/modctl-0.1.2-linux-noarch.rpm
+RUN pip3 install --no-cache-dir aistudio-modelhub==0.0.0.6
+
+# 安装sglang-router
+RUN pip3 install https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/simple-dev/sglang-router/sglang_router-0.1.9-py3-none-any.whl
 
 ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \

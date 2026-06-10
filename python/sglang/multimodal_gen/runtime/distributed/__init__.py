@@ -1,7 +1,5 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
-# SPDX-License-Identifier: Apache-2.0
-
 from sglang.multimodal_gen.runtime.distributed.communication_op import *
 from sglang.multimodal_gen.runtime.distributed.group_coordinator import (
     get_local_torch_device,
@@ -26,6 +24,9 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     model_parallel_is_initialized,
 )
 from sglang.multimodal_gen.runtime.distributed.utils import *
+
+# SPDX-License-Identifier: Apache-2.0
+
 
 __all__ = [
     # Initialization

@@ -7,7 +7,6 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-from sglang.srt.layers.linear import UnquantizedLinearMethod
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -15,7 +14,7 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
-from sglang.srt.layers.quantization.utils.utils import is_layer_skipped
+from sglang.srt.layers.quantization.utils import is_layer_skipped
 from sglang.srt.utils import set_weight_attrs
 
 if TYPE_CHECKING:
@@ -300,7 +299,6 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
-
         topk_weights, topk_ids, _ = topk_output
 
         output = cutlass_w4a8_moe(
@@ -336,10 +334,11 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
 
         from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe_deepep_ll
 
-        hidden_states, _, topk_ids, _, masked_m, _ = dispatch_output
+        hidden_states, hidden_scales, topk_ids, _, masked_m, _ = dispatch_output
 
         output = cutlass_w4a8_moe_deepep_ll(
             hidden_states,
+            hidden_scales,
             layer.w13_weight,
             layer.w2_weight,
             layer.w13_weight_scale_inv,

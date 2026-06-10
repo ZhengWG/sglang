@@ -1,0 +1,109 @@
+# 参考sgl-kernel/Dockerfile 中 deps阶段，构建出编译sgl-kernel的镜像
+ARG BASE_IMG=registry.cn-hangzhou.aliyuncs.com/augusto/manylinux-builder
+ARG CUDA_VERSION=13.0
+
+# Dependency stage: install system deps, CMake, ccache, Python deps (including torch)
+FROM ${BASE_IMG}:cuda${CUDA_VERSION} AS deps
+
+# Overridable build arguments
+ARG ARCH=x86_64
+ARG CUDA_VERSION=13.0
+# Manylinux python path tag, e.g. cp310-cp310 / cp312-cp312
+ARG PYTHON_TAG=cp310-cp310
+ARG CMAKE_VERSION_MAJOR=3.31
+ARG CMAKE_VERSION_MINOR=1
+# Install ccache 4.12.1 from source for CUDA support (yum provides old 3.7.7)
+ARG USE_CCACHE=1
+ARG CCACHE_VERSION=4.12.1
+ARG GITHUB_ARTIFACTORY=github.ednovas.xyz/https://github.com
+ARG PYTORCH_MIRROR=download.pytorch.org
+ARG PIP_DEFAULT_INDEX=https://pypi.antfin-inc.com/simple
+
+ENV PYTHON_ROOT_PATH=/opt/python/${PYTHON_TAG}
+ENV PATH=/opt/cmake/bin:${PATH}
+ENV LD_LIBRARY_PATH=/lib64:${LD_LIBRARY_PATH}
+ENV NINJA_STATUS="[%f/%t %es] "
+ENV FLASHINFER_CUDA_ARCH_LIST="8.0 8.9 9.0a 10.0a 12.0a"
+# CUDA headers path
+ENV CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}
+ENV C_INCLUDE_PATH=/usr/local/cuda/include/cccl${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}
+
+# Install build dependencies
+RUN yum install gcc gcc-c++ make wget tar numactl-devel libibverbs -y --nogpgcheck \
+ && ln -sv /usr/lib64/libibverbs.so.1 /usr/lib64/libibverbs.so \
+ && yum clean all && rm -rf /var/cache/yum
+
+# Install CMake (cached download)
+RUN --mount=type=cache,id=sgl-kernel-cmake,target=/cmake-downloads \
+    set -eux; \
+    CMAKE_TARBALL=cmake-${CMAKE_VERSION_MAJOR}.${CMAKE_VERSION_MINOR}-linux-${ARCH}.tar.gz; \
+    # Check if CMake is already cached
+    if [ -f /cmake-downloads/${CMAKE_TARBALL} ]; then \
+      echo "Using cached CMake from /cmake-downloads/${CMAKE_TARBALL}"; \
+      cp /cmake-downloads/${CMAKE_TARBALL} .; \
+    else \
+      CMAKE_TARBALL_URL=https://${GITHUB_ARTIFACTORY}/Kitware/CMake/releases/download/v${CMAKE_VERSION_MAJOR}.${CMAKE_VERSION_MINOR}/${CMAKE_TARBALL}; \
+      echo "Downloading CMake from: ${CMAKE_TARBALL_URL}"; \
+      wget --progress=dot ${CMAKE_TARBALL_URL}; \
+      # Cache the downloaded file
+      cp ${CMAKE_TARBALL} /cmake-downloads/; \
+    fi; \
+    tar -xzf ${CMAKE_TARBALL}; \
+    mv cmake-${CMAKE_VERSION_MAJOR}.${CMAKE_VERSION_MINOR}-linux-${ARCH} /opt/cmake; \
+    rm -f ${CMAKE_TARBALL}; \
+    cmake --version
+
+# Install ccache
+RUN if [ "${USE_CCACHE}" = "1" ]; then \
+    set -eux && \
+    cd /tmp && \
+    wget --progress=dot https://${GITHUB_ARTIFACTORY}/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}.tar.xz && \
+    tar -xf ccache-${CCACHE_VERSION}.tar.xz && \
+    cd ccache-${CCACHE_VERSION} && \
+    find . -name '*.cmake' | xargs -I {} sed -i "s#github.com#${GITHUB_ARTIFACTORY}#g" {} && \
+    mkdir build && cd build && \
+    cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_INSTALL_PREFIX=/usr -D ENABLE_TESTING=OFF -D REDIS_STORAGE_BACKEND=OFF -D HTTP_STORAGE_BACKEND=OFF -D ENABLE_DOCUMENTATION=OFF .. && \
+    make -j"$(nproc)" && \
+    make install && \
+    ccache --version && \
+    rm -rf /tmp/ccache-${CCACHE_VERSION}*; \
+  else \
+    echo "Skipping ccache build (USE_CCACHE=${USE_CCACHE})"; \
+  fi
+
+RUN set -eux; \
+    if [ "${ARCH}" = "aarch64" ]; then _LIB=sbsa; else _LIB="${ARCH}"; fi; \
+    mkdir -p /usr/lib/${ARCH}-linux-gnu/; \
+    ln -sf /usr/local/cuda-${CUDA_VERSION}/targets/${_LIB}-linux/lib/stubs/libcuda.so /usr/lib/${ARCH}-linux-gnu/libcuda.so
+
+# Install Python dependencies (torch + build tools)
+RUN --mount=type=cache,id=sgl-kernel-pip,target=/root/.cache/pip \
+    set -eux; \
+    case "${CUDA_VERSION}" in \
+      13.0) TORCH_VER=2.11.0; CU_TAG=cu130 ;; \
+      12.9) TORCH_VER=2.11.0; CU_TAG=cu129 ;; \
+      12.8) TORCH_VER=2.11.0; CU_TAG=cu128 ;; \
+      *)    TORCH_VER=2.11.0; CU_TAG=cu126 ;; \
+    esac; \
+    ${PYTHON_ROOT_PATH}/bin/pip config set global.index-url "${PIP_DEFAULT_INDEX}" ; \
+    ${PYTHON_ROOT_PATH}/bin/pip install torch==${TORCH_VER} --index-url https://${PYTORCH_MIRROR}/whl/${CU_TAG}; \
+    ${PYTHON_ROOT_PATH}/bin/pip install ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url ${PIP_DEFAULT_INDEX}
+
+# Rust toolchain for setuptools-rust extensions (e.g. sglang-grpc).
+# Requires >= 1.85 (edition 2024). Inherited by framework via FROM torch_deps.
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV RUSTUP_UPDATE_ROOT="https://mirrors.aliyun.com/rustup/rustup"
+ENV RUSTUP_DIST_SERVER="https://mirrors.aliyun.com/rustup"
+
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
+        | sh -s -- -y --no-modify-path --profile minimal \
+    && rustc --version && cargo --version
+
+# 配置rust crates.io
+COPY <<EOF /root/.cargo/config.toml
+[source.crates-io]
+replace-with = 'aliyun'
+[source.aliyun]
+registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+EOF
+

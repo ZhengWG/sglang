@@ -2,7 +2,6 @@ from typing import Union
 
 import torch
 
-from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -12,11 +11,12 @@ from sglang.srt.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.attention.fla.layernorm_gated import rms_norm_gated
+from sglang.srt.layers.utils import MultiPlatformOp
 from sglang.srt.model_loader.weight_utils import sharded_weight_loader
 from sglang.srt.utils.common import set_weight_attrs
 
 
-class Mixer2RMSNormGated(CustomOp):
+class Mixer2RMSNormGated(MultiPlatformOp):
     def __init__(
         self,
         full_hidden_size: int,
@@ -106,7 +106,7 @@ class Mixer2RMSNormGated(CustomOp):
             # Keep gate in float32 for numerical stability during silu
             return x * torch.nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
 
-        if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
+        if (self.n_groups % self.tp_size) != 0:
             return self.forward_native(x, gate)
 
         return rms_norm_gated(
@@ -115,6 +115,7 @@ class Mixer2RMSNormGated(CustomOp):
             bias=None,
             z=gate,
             eps=self.variance_epsilon,
+            group_size=self.group_size,
             norm_before_gate=False,
             is_rms_norm=True,
         )

@@ -1,29 +1,43 @@
 import asyncio
 import math
-import os
 import re
 import time
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
 import torchvision
+from decord import VideoReader
 from PIL import Image
 from torchvision.transforms import InterpolationMode
 
 from sglang.srt.environ import envs
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+from sglang.srt.managers.io_struct import MMProcessMetrics
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalProcessorOutput,
+)
+from sglang.srt.models.interns2preview import InternS2PreviewForConditionalGeneration
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
+from sglang.srt.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+)
+from sglang.srt.models.qwen3_5_mtp import Qwen3_5ForCausalLMMTP
 from sglang.srt.models.qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from sglang.srt.models.qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
-from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
+from sglang.srt.multimodal.processors.base_processor import (
+    MultimodalSpecialTokens,
+)
+from sglang.srt.utils import cpu_has_amx_support, is_cpu
 from sglang.utils import logger
-from sglang.srt.managers.io_struct import MMProcessMetrics
 
 MAX_RATIO = 200
 RESIZE_RESAMPLE = getattr(Image, envs.SGLANG_RESIZE_RESAMPLE.get(), None)
@@ -32,6 +46,23 @@ if envs.SGLANG_RESIZE_RESAMPLE.is_set() and RESIZE_RESAMPLE is None:
         f"Invalid RESIZE_RESAMPLE value: '{envs.SGLANG_RESIZE_RESAMPLE.get()}'. "
         f"Ignoring and using default."
     )
+
+
+_is_cpu_amx_available = cpu_has_amx_support()
+_is_cpu = is_cpu()
+if _is_cpu and _is_cpu_amx_available:
+    try:
+        import transformers
+
+        from sglang.srt.layers.amx_utils import fast_preprocess_cpu
+
+        transformers.models.qwen2_vl.image_processing_qwen2_vl_fast.Qwen2VLImageProcessorFast._preprocess = (
+            fast_preprocess_cpu
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to hack Qwen2VLImageProcessorFast with AMX optimization: {e}"
+        )
 
 
 def smart_resize_for_video(
@@ -53,9 +84,13 @@ def smart_resize_for_video(
     3. The aspect ratio of the image is maintained as closely as possible.
     """
     if num_frames < temporal_factor:
-        raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
+        raise ValueError(
+            f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}"
+        )
     if height < factor or width < factor:
-        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+        raise ValueError(
+            f"height:{height} or width:{width} must be larger than factor:{factor}"
+        )
     elif max(height, width) / min(height, width) > MAX_RATIO:
         raise ValueError(
             f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
@@ -115,16 +150,24 @@ def resize_image(
     max_pixels: int,
     size_factor: int,
     mm_sampling_kwargs: dict = {},
-) -> Image.Image:
-    width, height = image.size
+) -> Union[Image.Image, torch.Tensor]:
+    if isinstance(image, torch.Tensor):
+        _, height, width = image.shape
+    else:
+        width, height = image.size
 
     # 自定义长宽
-    if (mm_sampling_kwargs and "resized_height" in mm_sampling_kwargs
-        and "resized_width" in mm_sampling_kwargs):
+    if (
+        mm_sampling_kwargs
+        and "resized_height" in mm_sampling_kwargs
+        and "resized_width" in mm_sampling_kwargs
+    ):
         resized_height = mm_sampling_kwargs["resized_height"]
         resized_width = mm_sampling_kwargs["resized_width"]
         if resized_height > 0 and resized_width > 0:
-            logger.info(f"Resize image to {height}x{width} -> {resized_height}x{resized_width}")
+            logger.info(
+                f"Resize image to {height}x{width} -> {resized_height}x{resized_width}"
+            )
             height = resized_height
             width = resized_width
 
@@ -135,7 +178,14 @@ def resize_image(
         min_pixels=min_pixels,
         max_pixels=max_pixels,
     )
-    image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
+    if isinstance(image, Image.Image):
+        image = image.resize((resized_width, resized_height), resample=RESIZE_RESAMPLE)
+    else:
+        image = torchvision.transforms.functional.resize(
+            image,
+            [resized_height, resized_width],
+            interpolation=InterpolationMode.BILINEAR,
+        )
     return image
 
 
@@ -161,7 +211,13 @@ async def resize_image_async(
     size_factor: int,
     mm_sampling_kwargs: dict = {},
 ):
-    return resize_image(image, min_pixels, max_pixels, size_factor, mm_sampling_kwargs=mm_sampling_kwargs)
+    return resize_image(
+        image,
+        min_pixels,
+        max_pixels,
+        size_factor,
+        mm_sampling_kwargs=mm_sampling_kwargs,
+    )
 
 
 def smart_nframes(
@@ -237,6 +293,7 @@ async def preprocess_video(
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     try:
+        # preprocessed video
         entry_time = time.perf_counter()
         ele = {}
         if mm_sampling_kwargs:
@@ -245,6 +302,8 @@ async def preprocess_video(
         video = vr
         total_frames = video_fps = idx = None
         if not isinstance(vr, np.ndarray):
+            if not isinstance(vr, VideoReader):
+                return vr
             total_frames, video_fps = len(vr), vr.get_avg_fps()
             nframes = smart_nframes(
                 ele,
@@ -329,11 +388,16 @@ async def preprocess_video(
 
 # Compatible with Qwen-VL & Qwen-Omni Series
 class QwenVLImageProcessor(SGLangBaseProcessor):
+    supports_transformers_backend = True
     models = [
         Qwen2VLForConditionalGeneration,
         Qwen2_5_VLForConditionalGeneration,
         Qwen3VLForConditionalGeneration,
         Qwen3VLMoeForConditionalGeneration,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5MoeForConditionalGeneration,
+        Qwen3_5ForCausalLMMTP,
+        InternS2PreviewForConditionalGeneration,
         Qwen3OmniMoeForConditionalGeneration,
     ]
 
@@ -344,10 +408,11 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
 
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
 
-        self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
-        self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
+        self.IM_TOKEN_ID = hf_config.image_token_id
+        self.VIDEO_TOKEN_ID = hf_config.video_token_id
+
         self.vision_start_token_id = hf_config.vision_start_token_id
-        self.vision_end_token_id = hf_config.vision_end_token_id
+        self.vision_end_token_id = getattr(hf_config, "vision_end_token_id", None)
 
         self.audio_start_token_id = getattr(hf_config, "audio_start_token_id", None)
         self.audio_token_id = getattr(hf_config, "audio_token_id", None)
@@ -355,24 +420,31 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         self.IMAGE_FACTOR = 28
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = envs.SGLANG_IMAGE_MAX_PIXELS.get()
-        # FIXME(yudian.zy): 临时把qwen2.5-vl的单图大小限制为1k*1k，防止rank0 OOM
-        self.MAX_PIXELS = int(self.MAX_PIXELS // 12.25)
+        if envs.SGLANG_VLM_QWEN_LIMIT_PIXEL.get():
+            # Limit qwen2.5-vl single-image size to ~1k*1k to avoid rank0 OOM
+            self.MAX_PIXELS = int(self.MAX_PIXELS // 12.25)
 
-        self.VIDEO_MIN_PIXELS = 4 * 28 * 28 # 3136
-        self.VIDEO_MAX_PIXELS = 16384 * 28 * 28 # 12845056
+        self.VIDEO_MIN_PIXELS = 4 * 28 * 28  # 3136
+        self.VIDEO_MAX_PIXELS = 16384 * 28 * 28  # 12845056
         self.FPS = 2.0
         self.FPS_MIN_FRAMES = 4
         self.FPS_MAX_FRAMES = 768
         self.TEMPORAL_PATCH_SIZE = 2
 
-        if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        if self.model_type in ("qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"):
             image_processor = getattr(_processor, "image_processor", None)
             self.IMAGE_FACTOR = image_processor.patch_size * image_processor.merge_size
 
-            # FIXME(yudian.zy): 临时把qwen3-vl的单图大小限制为1k*1k，防止rank0 OOM
-            image_longest_edge = image_processor.size["longest_edge"]
-            if image_longest_edge >= (32 * self.IMAGE_FACTOR) ** 2:
-                image_processor.size["longest_edge"] = image_longest_edge // 16
+            if envs.SGLANG_VLM_QWEN_LIMIT_PIXEL.get() and self.model_type in (
+                "qwen3_vl",
+                "qwen3_vl_moe",
+                "qwen3_5",
+                "qwen3_5_moe",
+            ):
+                # Limit qwen3-vl single-image size to ~1k*1k to avoid rank0 OOM
+                image_longest_edge = image_processor.size["longest_edge"]
+                if image_longest_edge >= (32 * self.IMAGE_FACTOR) ** 2:
+                    image_processor.size["longest_edge"] = image_longest_edge // 16
             self.MIN_PIXELS = image_processor.size["shortest_edge"]
             self.MAX_PIXELS = image_processor.size["longest_edge"]
 
@@ -391,9 +463,378 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             image_token_regex=re.compile(
                 r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>"
             ),
-            video_token_id=hf_config.video_token_id,
+            video_token_id=self.VIDEO_TOKEN_ID,
             audio_token_id=self.audio_token_id,
         ).build(_processor)
+
+    def build_input_ids_with_timestamps(
+        self, prompt, embeddings, img_grid_thw, video_grid_thw, video_timestamps
+    ):
+        """
+        Build input_ids with timestamps for qwen3_vl models.
+        """
+        if not isinstance(prompt, list):
+            prompt = self._processor.tokenizer.encode(prompt)
+
+        img_token_id = getattr(self, "IM_TOKEN_ID", None)
+        video_token_id = getattr(self, "VIDEO_TOKEN_ID", None)
+        spatial_merge_size = getattr(self, "spatial_merge_size", 1)
+        vision_start_token_id = getattr(self, "vision_start_token_id", None)
+        vision_end_token_id = getattr(self, "vision_end_token_id", None)
+
+        input_ids = []
+        offsets = []
+        modality_list = []
+        cur_idx = 0
+
+        vision_start_indices = []
+        for i in range(len(prompt) - 1):
+            if img_token_id is not None and prompt[i + 1] == img_token_id:
+                vision_start_indices.append((i, Modality.IMAGE))
+            elif video_token_id is not None and prompt[i + 1] == video_token_id:
+                vision_start_indices.append((i, Modality.VIDEO))
+
+        img_idx = 0
+        video_idx = 0
+        for mm_start_idx, modality in vision_start_indices:
+            modality_list.append(modality)
+            video_tokens = None
+            if modality == Modality.IMAGE:
+                mm_token_num = img_grid_thw[img_idx].prod() // (spatial_merge_size**2)
+                mm_token_id = img_token_id
+                img_idx += 1
+            elif modality == Modality.VIDEO:
+                curr_timestamps = video_timestamps[video_idx]
+                num_frames = video_grid_thw[video_idx][0]
+                frame_seqlen = video_grid_thw[video_idx][1:].prod().item() // (
+                    spatial_merge_size**2
+                )
+                video_tokens = []
+                _current_offset = len(input_ids) + mm_start_idx + 1 - cur_idx
+                # take single frame as one mm_item
+                for frame_idx in range(num_frames):
+                    if frame_idx > 0:
+                        modality_list.append(Modality.VIDEO)
+                    curr_time = curr_timestamps[frame_idx]
+                    timestamp_text = f"<{curr_time:.1f} seconds>"
+                    timestamp_tokens = self._processor.tokenizer.encode(
+                        timestamp_text, add_special_tokens=False
+                    )
+                    video_tokens.extend(timestamp_tokens)
+                    _current_offset += len(timestamp_tokens)
+                    if vision_start_token_id is not None:
+                        video_tokens.append(vision_start_token_id)
+                        _current_offset += 1
+                    video_tokens.extend([video_token_id] * frame_seqlen)
+                    if vision_end_token_id is not None:
+                        video_tokens.append(vision_end_token_id)
+                    offsets.append(
+                        (_current_offset, _current_offset + frame_seqlen - 1)
+                    )
+                    _current_offset += (
+                        frame_seqlen + 1
+                        if vision_end_token_id is not None
+                        else frame_seqlen
+                    )  # for vision_end_token_id
+                mm_token_num = len(video_tokens)
+                mm_token_id = None
+                video_idx += 1
+            else:
+                logger.warning(
+                    f"{modality} modality is not supported for qwen3_vl models with timestamps."
+                )
+                continue
+            assert cur_idx <= mm_start_idx
+            input_ids.extend(prompt[cur_idx : mm_start_idx + 1])
+            if modality == Modality.VIDEO:
+                input_ids.extend(video_tokens)
+            else:
+                mm_offset_start = len(input_ids)
+                input_ids.extend([mm_token_id] * mm_token_num)
+                offsets.append((mm_offset_start, len(input_ids) - 1))
+            cur_idx = mm_start_idx + 2  # jump to vision_end_id
+        else:
+            input_ids.extend(prompt[cur_idx:])
+
+        return input_ids, offsets, modality_list
+
+    def compute_mrope_positions(self, input_ids, mm_items):
+        image_grid_thw = self._concat_mm_item_grid(
+            mm_items, "image_grid_thw", Modality.IMAGE
+        )
+        video_grid_thw = self._concat_mm_item_grid(
+            mm_items, "video_grid_thw", Modality.VIDEO
+        )
+
+        input_ids_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
+        mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
+            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+            image_token_id=self.mm_tokens.image_token_id,
+            video_token_id=self.mm_tokens.video_token_id,
+            vision_start_token_id=self.vision_start_token_id,
+            model_type=self.model_type,
+            tokens_per_second=getattr(
+                self.hf_config.vision_config, "tokens_per_second", None
+            ),
+            input_ids=input_ids_tensor,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+        )
+        return mrope_positions.squeeze(1), mrope_position_delta
+
+    @staticmethod
+    def _get_processor_output_value(ret, key):
+        if ret is None:
+            return None
+        return ret.get(key) if hasattr(ret, "get") else getattr(ret, key, None)
+
+    def _get_precomputed_mrope_from_output(self, ret):
+        mrope_positions = self._get_processor_output_value(ret, "mrope_positions")
+        mrope_position_delta = self._get_processor_output_value(
+            ret, "mrope_position_delta"
+        )
+        if mrope_positions is None or mrope_position_delta is None:
+            return None
+
+        mrope_positions = torch.as_tensor(mrope_positions)
+        if mrope_positions.ndim == 3:
+            if mrope_positions.shape[1] != 1:
+                return None
+            mrope_positions = mrope_positions.squeeze(1)
+        if mrope_positions.ndim != 2 or mrope_positions.shape[0] != 3:
+            return None
+
+        mrope_position_delta = torch.as_tensor(mrope_position_delta)
+        if mrope_position_delta.ndim <= 1:
+            mrope_position_delta = mrope_position_delta.reshape(-1, 1)
+        return mrope_positions, mrope_position_delta
+
+    @staticmethod
+    def _as_grid_batch(value):
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.unsqueeze(0) if value.ndim == 1 else value
+        tensor = torch.as_tensor(value, dtype=torch.long)
+        return tensor.unsqueeze(0) if tensor.ndim == 1 else tensor
+
+    def _compute_image_only_mrope_positions_from_offsets(
+        self,
+        input_len: int,
+        mm_items: List[MultimodalDataItem],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """instead of calling get_rope_index, build mrope position from mm_items.offsets and image_grid_thw of each image
+        basically a simplified version of get_rope_index for image-only reqs
+        """
+        if self.model_type not in (
+            "qwen3_vl",
+            "qwen3_vl_moe",
+            "qwen3_5",
+            "qwen3_5_moe",
+            "intern_s2_preview",
+        ):
+            return None
+
+        image_items = [item for item in mm_items if item.is_image()]
+        if not image_items or len(image_items) != len(mm_items):
+            return None
+
+        spatial_merge_size = self.hf_config.vision_config.spatial_merge_size
+        sorted_items = sorted(image_items, key=lambda item: item.offsets[0][0])
+        position_segments = []
+        st = 0
+        next_pos = 0
+
+        for item in sorted_items:
+            if item.offsets is None or len(item.offsets) != 1:
+                return None
+
+            start, end = item.offsets[0]
+            if start < st or end >= input_len:
+                return None
+
+            text_len = start - st
+            if text_len > 0:
+                position_segments.append(
+                    torch.arange(text_len, dtype=dtype, device=device)
+                    .view(1, -1)
+                    .expand(3, -1)
+                    + next_pos
+                )
+                next_pos += text_len
+
+            grid = self._as_grid_batch(item.model_specific_data.get("image_grid_thw"))
+            if grid is None or grid.shape[0] != 1:
+                return None
+            t, h, w = [int(x) for x in grid[0].tolist()]
+            llm_grid_t = t
+            llm_grid_h = h // spatial_merge_size
+            llm_grid_w = w // spatial_merge_size
+            num_image_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+            if num_image_tokens != end - start + 1:
+                return None
+
+            t_index = (
+                torch.arange(llm_grid_t, dtype=dtype, device=device)
+                .view(-1, 1)
+                .expand(llm_grid_t, llm_grid_h * llm_grid_w)
+                .reshape(-1)
+            )
+            h_index = (
+                torch.arange(llm_grid_h, dtype=dtype, device=device)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, llm_grid_h, llm_grid_w)
+                .reshape(-1)
+            )
+            w_index = (
+                torch.arange(llm_grid_w, dtype=dtype, device=device)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, llm_grid_w)
+                .reshape(-1)
+            )
+            position_segments.append(
+                torch.stack([t_index, h_index, w_index]) + next_pos
+            )
+            next_pos += max(llm_grid_t, llm_grid_h, llm_grid_w)
+            st = end + 1
+
+        if st < input_len:
+            text_len = input_len - st
+            position_segments.append(
+                torch.arange(text_len, dtype=dtype, device=device)
+                .view(1, -1)
+                .expand(3, -1)
+                + next_pos
+            )
+
+        mrope_positions = torch.cat(position_segments, dim=1).unsqueeze(1)
+        mrope_position_delta = (mrope_positions.max() + 1 - input_len).reshape(1, 1)
+        return mrope_positions, mrope_position_delta
+
+    @classmethod
+    def _concat_mm_item_grid(cls, mm_items: list[MultimodalDataItem], key, modality):
+        grids = []
+        for item in mm_items:
+            if not item.is_modality(modality):
+                continue
+            grid = cls._as_grid_batch(item.model_specific_data.get(key))
+            if grid is not None:
+                grids.append(grid)
+        if not grids:
+            return None
+        if len(grids) == 1:
+            return grids[0]
+        return torch.cat(grids, dim=0)
+
+    @classmethod
+    def _get_grid_from_output_or_items(
+        cls, ret, mm_items, key, modality, input_data=None
+    ):
+        grid = cls._get_processor_output_value(ret, key)
+        if grid is None:
+            grid = cls._concat_mm_item_grid(mm_items, key, modality)
+        if grid is None and input_data and isinstance(input_data[0], dict):
+            grid = input_data[0].get(key)
+        return grid
+
+    def get_mm_data(self, prompt, embeddings, **kwargs):
+        img_grid_thw = kwargs.get("img_grid_thw", None)
+        video_grid_thw = kwargs.get("video_grid_thw", None)
+        audio_feature_lens = kwargs.get("audio_feature_lens", None)
+        video_timestamps = kwargs.get("video_timestamps", None)
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", None)
+
+        audio_seq_lens = None
+        if audio_feature_lens is not None:
+            if self.model_type == "qwen3_omni_moe":
+                # apply _get_feat_extract_lengths to get seq_lens
+                input_lengths_leave = audio_feature_lens % 100
+                feat_lengths = (input_lengths_leave - 1) // 2 + 1
+                audio_seq_lens = (
+                    ((feat_lengths - 1) // 2 + 1 - 1) // 2
+                    + 1
+                    + (audio_feature_lens // 100) * 13
+                )
+            elif self.model_type == "qwen2_5_omni":
+                audio_seq_lens = (audio_feature_lens - 1) // 2 + 1
+                audio_seq_lens = (audio_seq_lens - 2) // 2 + 1
+
+        if (
+            self.model_type
+            in [
+                "qwen3_vl",
+                "qwen3_vl_moe",
+                "qwen3_5",
+                "qwen3_5_moe",
+                "intern_s2_preview",
+            ]
+            and video_timestamps is not None
+        ):
+            input_ids, offsets, modality_list = self.build_input_ids_with_timestamps(
+                prompt, embeddings, img_grid_thw, video_grid_thw, video_timestamps
+            )
+        else:
+            input_ids, offsets, modality_list = self.build_input_ids(
+                prompt, img_grid_thw, video_grid_thw, audio_seq_lens=audio_seq_lens
+            )
+        assert all(isinstance(modality, Modality) for modality in modality_list)
+
+        mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
+            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+            image_token_id=self.mm_tokens.image_token_id,
+            video_token_id=self.mm_tokens.video_token_id,
+            vision_start_token_id=self.vision_start_token_id,
+            model_type=self.model_type,
+            input_ids=torch.tensor(input_ids, dtype=torch.long).unsqueeze(0),
+            image_grid_thw=img_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            use_audio_in_video=False,
+            audio_seqlens=(
+                audio_feature_lens if self.model_type == "qwen3_omni_moe" else None
+            ),
+            audio_token_id=getattr(self.hf_config, "audio_token_id", None),
+            audio_start_token_id=self.audio_start_token_id,
+            position_id_per_seconds=getattr(
+                self.hf_config, "position_id_per_seconds", None
+            ),
+            tokens_per_second=getattr(
+                self.hf_config.vision_config, "tokens_per_second", None
+            ),
+        )
+        mrope_positions = mrope_positions.squeeze(1)
+
+        mm_items = []
+        consumed_per_modality = {}
+
+        for modality, offset in zip(modality_list, offsets):
+            num_tokens = offset[1] - offset[0] + 1
+            embedding_start = consumed_per_modality.get(modality, 0)
+            embedding_slice = embeddings[modality][
+                embedding_start : embedding_start + num_tokens
+            ]
+            consumed_per_modality[modality] = embedding_start + num_tokens
+            mm_items.append(
+                MultimodalDataItem(
+                    modality=modality,
+                    offsets=[offset],
+                    precomputed_embeddings=embedding_slice,
+                )
+            )
+
+        return MultimodalProcessorOutput(
+            input_ids=input_ids,
+            mm_items=mm_items,
+            im_start_id=self.vision_start_token_id,
+            im_end_id=self.vision_end_token_id,
+            im_token_id=self.mm_tokens.image_token_id,
+            video_token_id=self.mm_tokens.video_token_id,
+            audio_token_id=self.mm_tokens.audio_token_id,
+            mrope_positions=mrope_positions,
+            mrope_position_delta=mrope_position_delta,
+        )
 
     async def process_mm_data_async(
         self,
@@ -406,7 +847,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_metric = MMProcessMetrics()
         mm_metric.mm_entry_time = time.perf_counter()
         mm_metric.mm_entry_time_ts = time.time()
-        base_output = await self.load_mm_data_async(
+        base_output = await self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
             video_data=request_obj.video_data,
@@ -420,17 +861,25 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_sampling_kwargs = getattr(request_obj, "mm_sampling_kwargs", {})
 
         # Qwen-specific: resize images if they are raw Image objects
-        if base_output.images and isinstance(base_output.images[0], Image.Image):
+        if (
+            self.model_type != "paddleocr_vl"
+            and base_output.images
+            and isinstance(base_output.images[0], (Image.Image, torch.Tensor))
+        ):
             resize_tasks = [
                 resize_image_async(
-                    image, self.MIN_PIXELS, self.MAX_PIXELS, self.IMAGE_FACTOR, mm_sampling_kwargs=mm_sampling_kwargs,
+                    image,
+                    self.MIN_PIXELS,
+                    self.MAX_PIXELS,
+                    self.IMAGE_FACTOR,
+                    mm_sampling_kwargs=mm_sampling_kwargs,
                 )
                 for image in base_output.images
             ]
             base_output.images = await asyncio.gather(*resize_tasks)
 
         video_metadata = None
-        if base_output.videos:
+        if base_output.videos and not isinstance(base_output.videos[0], dict):
             video_results = await asyncio.gather(
                 *[
                     preprocess_video(
@@ -452,7 +901,13 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         mm_metric.mm_preprocess_time = time.perf_counter()
 
         # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
-        if self.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        if self.model_type in (
+            "qwen3_vl",
+            "qwen3_vl_moe",
+            "qwen3_5",
+            "qwen3_5_moe",
+            "intern_s2_preview",
+        ):
             mm_items, input_ids, ret = self.process_and_combine_mm_data(
                 base_output,
                 self.mm_tokens,
@@ -473,39 +928,91 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                     audio_item.feature_attention_mask, dim=1
                 )
 
-        second_per_grid_ts = getattr(ret, "second_per_grid_ts", None) or getattr(
-            ret, "video_second_per_grid", None
-        )
+        second_per_grid_ts = self._get_processor_output_value(ret, "second_per_grid_ts")
+        if second_per_grid_ts is None:
+            second_per_grid_ts = self._get_processor_output_value(
+                ret, "video_second_per_grid"
+            )
 
         mm_metric.mm_process_time = time.perf_counter()
 
         input_ids = input_ids.flatten()
+        base_input_ids = getattr(base_output, "input_ids", None)
+        if (
+            isinstance(base_input_ids, list)
+            and len(base_input_ids) == input_ids.numel()
+        ):
+            # reuse preprocess input if it already carries list of input_ids
+            input_ids_list = base_input_ids
+        else:
+            input_ids_list = input_ids.tolist()
 
-        mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
-            spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-            image_token_id=self.mm_tokens.image_token_id,
-            video_token_id=self.mm_tokens.video_token_id,
-            vision_start_token_id=self.vision_start_token_id,
-            model_type=self.model_type,
-            tokens_per_second=getattr(
-                self.hf_config.vision_config, "tokens_per_second", None
-            ),
-            input_ids=input_ids.unsqueeze(0),
-            image_grid_thw=getattr(ret, "image_grid_thw", None),
-            video_grid_thw=getattr(ret, "video_grid_thw", None),
-            second_per_grid_ts=second_per_grid_ts,
-            use_audio_in_video=False,
-            audio_seqlens=audio_feature_lengths,
-            audio_token_id=getattr(self.hf_config, "audio_token_id", None),
-            audio_start_token_id=self.audio_start_token_id,
-            position_id_per_seconds=getattr(
-                self.hf_config, "position_id_per_seconds", None
-            ),
+        # look for if padded_input_ids already exists before computing
+        padded_input_ids = self._get_processor_output_value(ret, "padded_input_ids")
+        if padded_input_ids is None:
+            padded_input_ids = MultimodalProcessorOutput.build_padded_input_ids(
+                input_ids_list, mm_items
+            )
+        elif isinstance(padded_input_ids, torch.Tensor):
+            # reuse existing padded_input_ids
+            padded_input_ids = padded_input_ids.flatten().tolist()
+        else:
+            padded_input_ids = list(padded_input_ids)
+
+        image_grid_thw = self._get_grid_from_output_or_items(
+            ret, mm_items, "image_grid_thw", Modality.IMAGE, image_data
         )
-        mrope_positions = mrope_positions.squeeze(1)
+        video_grid_thw = self._get_grid_from_output_or_items(
+            ret,
+            mm_items,
+            "video_grid_thw",
+            Modality.VIDEO,
+            request_obj.video_data,
+        )
+
+        mrope_result = self._get_precomputed_mrope_from_output(ret)
+        if mrope_result is None:
+            if (
+                video_grid_thw is None
+                and second_per_grid_ts is None
+                and audio_feature_lengths is None
+            ):
+                mrope_result = self._compute_image_only_mrope_positions_from_offsets(
+                    input_len=input_ids.numel(),
+                    mm_items=mm_items,
+                    dtype=input_ids.dtype,
+                    device=input_ids.device,
+                )
+        if mrope_result is None:
+            mrope_result = MRotaryEmbedding.get_rope_index(
+                spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+                image_token_id=self.mm_tokens.image_token_id,
+                video_token_id=self.mm_tokens.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                model_type=self.model_type,
+                tokens_per_second=getattr(
+                    self.hf_config.vision_config, "tokens_per_second", None
+                ),
+                # use the expanded token ids
+                input_ids=input_ids.unsqueeze(0),
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                use_audio_in_video=False,
+                audio_seqlens=audio_feature_lengths,
+                audio_token_id=getattr(self.hf_config, "audio_token_id", None),
+                audio_start_token_id=self.audio_start_token_id,
+                position_id_per_seconds=getattr(
+                    self.hf_config, "position_id_per_seconds", None
+                ),
+            )
+
+        mrope_positions, mrope_position_delta = mrope_result
+        if mrope_positions.ndim == 3:
+            mrope_positions = mrope_positions.squeeze(1)
         mm_metric.mm_get_rope_index_time = time.perf_counter()
 
-        if hasattr(request_obj,"metrics") and isinstance(request_obj.metrics, Dict):
+        if hasattr(request_obj, "metrics") and isinstance(request_obj.metrics, Dict):
             request_obj.metrics.update(mm_metric.to_dict())
 
         logger.info(
@@ -517,15 +1024,15 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             f"total_time: {(mm_metric.mm_get_rope_index_time - mm_metric.mm_entry_time) * 1000:.2f} ms"
         )
 
-        return {
-            "input_ids": input_ids.tolist(),
-            "mm_items": mm_items,
-            "im_start_id": self.IM_START_TOKEN_ID,
-            "im_end_id": self.IM_END_TOKEN_ID,
-            "im_token_id": self.mm_tokens.image_token_id,
-            "video_token_id": self.mm_tokens.video_token_id,
-            "audio_token_id": self.mm_tokens.audio_token_id,
-            "mrope_positions": mrope_positions,
-            "mrope_position_delta": mrope_position_delta,
-        }
-
+        return MultimodalProcessorOutput(
+            input_ids=input_ids_list,
+            padded_input_ids=padded_input_ids,
+            mm_items=mm_items,
+            im_start_id=self.vision_start_token_id,
+            im_end_id=self.vision_end_token_id,
+            im_token_id=self.mm_tokens.image_token_id,
+            video_token_id=self.mm_tokens.video_token_id,
+            audio_token_id=self.mm_tokens.audio_token_id,
+            mrope_positions=mrope_positions,
+            mrope_position_delta=mrope_position_delta,
+        )

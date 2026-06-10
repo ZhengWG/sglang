@@ -1,13 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
 import enum
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import orjson
 
 from sglang.srt.configs.modelopt_config import ModelOptConfig
 from sglang.srt.utils import is_hip
+
+from sglang.srt.rfork.rfork_worker import RForkWorker
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +28,16 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     LAYERED = "layered"
+    FLASH_RL = "flash_rl"  # For RL training with quantized models
     JAX = "jax"
     REMOTE = "remote"
     REMOTE_INSTANCE = "remote_instance"
+    RFORK = "rfork"
     RDMA = "rdma"
     LOCAL_CACHED = "local_cached"
+    FASTSAFETENSORS = "fastsafetensors"
+    PRIVATE = "private"
+    RUNAI_STREAMER = "runai_streamer"
 
 
 @dataclass
@@ -51,6 +60,8 @@ class LoadConfig:
         "dummy" will initialize the weights with random values, which is
             mainly for profiling.
         "bitsandbytes" will load nf4 type weights.
+        "flash_rl" will load weights with support for RL training
+            with quantized models, enabling efficient weight reloading.
     ignore_patterns: The list of patterns to ignore when loading the model.
         Default to "original/**/*" to avoid repeated loading of llama's
         checkpoints.
@@ -74,6 +85,14 @@ class LoadConfig:
     remote_instance_weight_loader_seed_instance_ip: Optional[str] = None
     remote_instance_weight_loader_seed_instance_service_port: Optional[int] = None
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
+    remote_instance_weight_loader_backend: Optional[str] = None
+    remote_instance_weight_loader_transfer_engine: Optional[Any] = None
+    remote_instance_weight_loader_transfer_engine_session_id: Optional[str] = None
+    modelexpress_url: Optional[str] = None
+    modelexpress_transport: str = "nixl"
+
+    rfork_worker: Optional[RForkWorker] = None
+    rfork_fallback_load_format: Optional[Union[str, LoadFormat]] = None
 
     # ModelOpt-specific loading options
     modelopt_checkpoint_restore_path: Optional[str] = None
@@ -82,6 +101,14 @@ class LoadConfig:
 
     # ModelOpt configuration object
     modelopt_config: Optional[ModelOptConfig] = None
+
+    # QuantizedRL-specific options (for FlashRL-style quantization)
+    rl_quant_profile: Optional[str] = (
+        None  # Path to rollout quantization profile (e.g., /root/profile.7b.pt)
+    )
+
+    # For multi-layer MTP
+    draft_model_idx: Optional[int] = None
 
     def __post_init__(self):
         model_loader_extra_config = self.model_loader_extra_config or {}
