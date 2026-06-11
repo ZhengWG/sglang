@@ -65,10 +65,28 @@ class KDAKernelDispatcher:
             )
 
             self.extend_kernel = CulaKDAKernel()
+        elif prefill_backend.is_cutedsl():
+            if not is_cuda():
+                raise ValueError("KDA CuTe DSL backend requires CUDA")
+            from sglang.srt.layers.attention.linear.kernels.kda_cutedsl import (
+                CuteDSLKDAKernel,
+            )
+
+            cutedsl_kernel = CuteDSLKDAKernel()
+            if getattr(cutedsl_kernel, "supports_prefill", False):
+                # SM100 chunk prefill pipeline.
+                self.extend_kernel = cutedsl_kernel
+            else:
+                # CuTe DSL prefill kernels need SM100 (Blackwell); on older GPUs
+                # fall back to the Triton chunk kernel.
+                self.extend_kernel = triton_kernel
+                rank0_log(
+                    "KDA cutedsl prefill needs SM100; falling back to Triton extend."
+                )
         else:
             raise ValueError(
                 f"Unsupported KDA prefill backend: {prefill_backend}. "
-                "KDA currently supports 'triton' and 'cula'."
+                "KDA supports 'triton' or 'cula' or 'cutedsl' (cutedsl prefill needs SM100)."
             )
 
         self.supports_packed_decode = getattr(
