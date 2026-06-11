@@ -448,9 +448,7 @@ class BailingMoEGate(nn.Module):
             self.expert_bias = None
 
     def forward(self, hidden_states):
-        logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None).to(
-            hidden_states.dtype
-        )
+        logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None)
         return logits
 
 
