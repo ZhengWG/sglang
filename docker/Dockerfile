@@ -608,6 +608,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Install MSCCL++ Python dependencies and package (builds extension via CMake through pip)
 RUN --mount=type=cache,target=/root/.cache/pip \
     ln -sv /usr/lib/x86_64-linux-gnu/libibverbs.so.1 /usr/lib/x86_64-linux-gnu/libibverbs.so && \
+    git config --global url."https://gitee.com/mirrors/dlpack".insteadOf "https://github.com/dmlc/dlpack.git" && \
+    git config --global url."https://gitee.com/mirrors/dlpack".insteadOf "https://github.com/dmlc/dlpack" && \
+    git config --global url."https://gitee.com/mirrors/nlohmann-json".insteadOf "https://github.com/nlohmann/json.git" && \
+    git config --global url."https://gitee.com/mirrors/nlohmann-json".insteadOf "https://github.com/nlohmann/json" && \
+    git config --global url."https://gitee.com/staugust/nanobind".insteadOf "https://github.com/wjakob/nanobind.git" && \
+    git config --global url."https://gitee.com/staugust/nanobind".insteadOf "https://github.com/wjakob/nanobind" && \
     git clone --depth=1 --branch ${MSCCLPP_VERSION} https://${GITHUB_ARTIFACTORY}/microsoft/mscclpp.git /tmp/mscclpp \
     && case "${CUDA_VERSION}" in \
            12.*) \
@@ -759,11 +765,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 
 # Install pre-built gateway artifacts from parallel builder
-COPY --from=gateway_builder /build/sgl-model-gateway-bin /usr/local/bin/sgl-model-gateway
-COPY --from=gateway_builder /build/gateway_wheels /tmp/gateway_wheels
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --force-reinstall /tmp/gateway_wheels/*.whl \
-    && rm -rf /tmp/gateway_wheels
+# COPY --from=gateway_builder /build/sgl-model-gateway-bin /usr/local/bin/sgl-model-gateway
+# COPY --from=gateway_builder /build/gateway_wheels /tmp/gateway_wheels
+# RUN --mount=type=cache,target=/root/.cache/pip \
+#     python3 -m pip install --force-reinstall /tmp/gateway_wheels/*.whl \
+#     && rm -rf /tmp/gateway_wheels
 
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
@@ -920,7 +926,7 @@ COPY --from=framework_final /usr/local/lib/python3.12/dist-packages /usr/local/l
 COPY --from=framework_final /sgl-workspace /sgl-workspace
 
 # Copy sgl-model-gateway binary
-COPY --from=framework_final /usr/local/bin/sgl-model-gateway /usr/local/bin/sgl-model-gateway
+# COPY --from=framework_final /usr/local/bin/sgl-model-gateway /usr/local/bin/sgl-model-gateway
 
 # Copy sglang binary
 COPY --from=framework_final /usr/local/bin/sglang /usr/local/bin/sglang
