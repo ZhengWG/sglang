@@ -352,7 +352,7 @@ class DefaultModelLoader(BaseModelLoader):
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
-        model_config: Optional["ModelConfig"] = None
+        model_config: Optional[ModelConfig] = None
         """The model configuration (for checking architecture, etc)."""
 
         @classmethod
@@ -518,7 +518,7 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors
 
     def _get_weights_iterator(
-        self, source: "Source"
+        self, source: Source
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
@@ -2977,7 +2977,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
-        model_config: Optional["ModelConfig"] = None
+        model_config: Optional[ModelConfig] = None
         """The model configuration (for checking architecture, etc)."""
 
         @classmethod
@@ -3077,7 +3077,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return hf_folder, hf_weights_files
 
     def _get_weights_iterator(
-        self, source: "Source"
+        self, source: Source
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         from sglang.srt.model_loader.weight_utils import (

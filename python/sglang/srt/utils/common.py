@@ -468,7 +468,7 @@ class DynamicGradMode(_DecoratorContextManager):
         else:
             torch.set_grad_enabled(self.prev)
 
-    def clone(self) -> "DynamicGradMode":
+    def clone(self) -> DynamicGradMode:
         r"""
         Create a copy of this class
         """
