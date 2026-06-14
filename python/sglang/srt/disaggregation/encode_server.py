@@ -11,6 +11,7 @@ import pickle
 import threading
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from http import HTTPStatus
 from typing import Dict, List, Optional, Set, Tuple, Union
@@ -2551,7 +2552,8 @@ async def _dp_worker_health_encode(enc: MMEncoder) -> None:
         # No processor → can't functionally probe; liveness alone is healthy.
         return None
 
-    req_id = f"{HEALTH_CHECK_RID_PREFIX}_{time.time()}"
+    # uuid keeps rids unique across workers; a bare time.time() can collide.
+    req_id = f"{HEALTH_CHECK_RID_PREFIX}_{uuid.uuid4().hex}"
     try:
         _, _, _, error_msg, error_code = await enc.encode(
             mm_items=mm_items,
@@ -3761,7 +3763,8 @@ async def health_generate():
         return Response(status_code=200)
 
     try:
-        req_id = f"{HEALTH_CHECK_RID_PREFIX}_{time.time()}"
+        # uuid keeps rids unique across workers; a bare time.time() can collide.
+        req_id = f"{HEALTH_CHECK_RID_PREFIX}_{uuid.uuid4().hex}"
 
         dummy_request = {
             "mm_items": mm_items,
