@@ -310,7 +310,7 @@ def _get_offset_data(offsets, offsets_start_idx, offsets_end_idx):
     for offset in offsets[offsets_start_idx:offsets_end_idx]:
         if isinstance(offset, (list, tuple)) and len(offset) >= 2:
             start, end = offset[0], offset[1]
-            num_tokens += end - start
+            num_tokens += end - start + 1
             if start_idx == 0 or start < start_idx:
                 start_idx = start
     return start_idx, num_tokens
@@ -2658,7 +2658,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         mm_meta_infos = []
         total_pixels = 0
-        total_vision_tokens = 0
 
         patch_size = None
         if self.mm_processor:
@@ -2684,6 +2683,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
             offsets = item_metadata.get("offsets", [])
             grid_thws = []
+            sizes = None
 
             if modality_str == "image":
                 grid_thws = item_metadata.get("image_grid_thw", None)
@@ -2709,16 +2709,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         except Exception:
                             pass
 
-                    # Calculate num_tokens from offsets for this grid_thw
-                    num_tokens = 0
-                    start_idx = 0
                     offsets_start_idx = offsets_start_idxs[item_idx]
                     offsets_end_idx = offsets_end_idxs[item_idx]
                     start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
                     if size:
                         total_pixels += size[0] * size[1] * size[2]
-                    if num_tokens:
-                        total_vision_tokens += num_tokens
 
                     mm_meta_infos.append({
                         "modality": modality_str,
@@ -2729,8 +2724,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     })
             elif sizes:
                 # No grid_thw for some models, for example, internvl-series
-                num_tokens = 0
-                start_idx = 0
                 offsets_start_idxs, offsets_end_idxs = _get_offsets_start_end_idxs(offsets, sizes)
                 if offsets_start_idxs is None or offsets_end_idxs is None:
                     logger.warning(f"No support for offsets and sizes length mismatch, {offsets=}, {sizes=}")
@@ -2742,8 +2735,6 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     start_idx, num_tokens = _get_offset_data(offsets, offsets_start_idx, offsets_end_idx)
                     if size:
                         total_pixels += size[0] * size[1] * size[2]
-                    if num_tokens:
-                        total_vision_tokens += num_tokens
                     mm_meta_infos.append({
                         "modality": modality_str,
                         "grid_thw": None,
@@ -2761,9 +2752,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                             start, end = offset[0], offset[1]
                             if start_idx == 0 or start < start_idx:
                                 start_idx = start
-                            num_tokens += end - start
-                    if num_tokens:
-                        total_vision_tokens += num_tokens
+                            num_tokens += end - start + 1
                     mm_meta_infos.append({
                         "modality": modality_str,
                         "grid_thw": None,
@@ -2781,6 +2770,13 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             meta_info["mm_meta_infos"] = mm_meta_infos
         if total_pixels:
             meta_info["total_pixels"] = total_pixels
+
+        # Vision token count now relies on the scheduler-computed per-modality counts
+        total_vision_tokens = (
+            meta_info.get("image_tokens", 0)
+            + meta_info.get("video_tokens", 0)
+            + meta_info.get("audio_tokens", 0)
+        )
         if total_vision_tokens:
             meta_info["total_vision_tokens"] = total_vision_tokens
 
