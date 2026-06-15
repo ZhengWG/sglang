@@ -209,6 +209,12 @@ class Envs:
     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
     SGLANG_ASYNC_MODEL_MOUNT = EnvBool(False)
 
+    # Multimodal
+    # Override video decode backend selection. Unset = auto-detect (torchcodec
+    # if importable, else decord). Set to "torchcodec" or "decord" to force one;
+    # forcing "torchcodec" still falls back to decord if it is unavailable.
+    SGLANG_VIDEO_DECODE_BACKEND = EnvStr(None)
+
     # Logging Options
     SGLANG_LOG_GC = EnvBool(False)
     SGLANG_LOG_FORWARD_ITERS = EnvBool(False)

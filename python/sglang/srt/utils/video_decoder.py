@@ -5,14 +5,37 @@ import os
 
 import numpy as np
 
+from sglang.srt.environ import envs
+
 logger = logging.getLogger(__name__)
 
-try:
-    from torchcodec.decoders import VideoDecoder
+# Backend selection. SGLANG_VIDEO_DECODE_BACKEND overrides auto-detection:
+#   unset/invalid -> torchcodec if importable, else decord
+#   "torchcodec"  -> force torchcodec (falls back to decord if unavailable)
+#   "decord"      -> force decord
+_BACKEND = envs.SGLANG_VIDEO_DECODE_BACKEND.get()
+if _BACKEND not in (None, "torchcodec", "decord"):
+    logger.warning(
+        "Ignoring invalid SGLANG_VIDEO_DECODE_BACKEND=%r (expected 'torchcodec' or 'decord').",
+        _BACKEND,
+    )
+    _BACKEND = None
 
-    _BACKEND = "torchcodec"
-except (ImportError, RuntimeError):
-    _BACKEND = "decord"
+if _BACKEND != "decord":
+    forced_torchcodec = _BACKEND == "torchcodec"
+    try:
+        from torchcodec.decoders import VideoDecoder
+
+        _BACKEND = "torchcodec"
+    except (ImportError, RuntimeError):
+        if forced_torchcodec:
+            logger.warning(
+                "SGLANG_VIDEO_DECODE_BACKEND=torchcodec requested but torchcodec is "
+                "unavailable; falling back to decord."
+            )
+        _BACKEND = "decord"
+
+logger.info(f"Video decode backend: {_BACKEND}.")
 
 
 _cuda_backend_enabled: bool | None = None
@@ -31,6 +54,22 @@ def _try_cuda_backend() -> bool:
     except Exception:
         _cuda_backend_enabled = False
     return _cuda_backend_enabled
+
+
+class _FrameBatch:
+    """decord-`NDArray`-like wrapper so torchcodec frames support `.asnumpy()`.
+
+    Lets `VideoDecoderWrapper.get_batch(...).asnumpy()` work as a drop-in for
+    the raw decord `VideoReader` interface used by some processors.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: np.ndarray):
+        self._data = data
+
+    def asnumpy(self) -> np.ndarray:
+        return self._data
 
 
 class VideoDecoderWrapper:
@@ -108,6 +147,15 @@ class VideoDecoderWrapper:
             return batch.data.numpy()
         else:
             return self._decoder.get_batch(indices).asnumpy()
+
+    # ---- decord-compatible shims ----
+    # Let this wrapper stand in for a raw decord `VideoReader` so processors
+    # that call `get_avg_fps()` / `get_batch(...).asnumpy()` work unchanged.
+    def get_avg_fps(self) -> float:
+        return self.avg_fps
+
+    def get_batch(self, indices) -> "_FrameBatch":
+        return _FrameBatch(self.get_frames_at(list(indices)))
 
     def get_frames_as_tensor(self, indices: list):
         """Return frames at given indices as a torch tensor (NHWC, uint8, pinned memory)."""

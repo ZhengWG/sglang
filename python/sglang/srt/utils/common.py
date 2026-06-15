@@ -89,13 +89,14 @@ from starlette.routing import Mount
 from torch import nn
 from torch.library import Library
 from torch.utils._contextlib import _DecoratorContextManager
-from torchvision.io import ImageReadMode, decode_image, read_image, decode_jpeg
+from torchvision.io import ImageReadMode, decode_image, decode_jpeg, read_image
 from torchvision.transforms.v2 import functional as F
 from typing_extensions import Literal
 
 from sglang.srt.environ import envs
 from sglang.srt.observability.func_timer import enable_func_timer
 from sglang.srt.platforms import current_platform
+from sglang.srt.utils.video_decoder import _BACKEND, VideoDecoderWrapper
 
 if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
     from model_manager.apis import get_model_path_from_manager
@@ -115,7 +116,6 @@ COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 # List of compile cache dirs for save/load to speed up engine launch.
 COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
 
-_BACKEND = "decord"
 
 def flatten_arrays_to_pinned_cpu(parts: List[array[int]], pin: bool) -> torch.Tensor:
     """Flatten array.array('q') buffers into one int64 CPU tensor.
@@ -1140,7 +1140,74 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
     raise NotImplementedError(f"Invalid image: {image_file}")
 
 
-def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
+def _normalize_video_input(
+    video_file: Union[str, bytes],
+) -> Union[str, bytes, None]:
+    """Normalize video input (URL, base64, file://, etc.) to a file path or bytes.
+
+    Returns a file path or bytes suitable for a decoder, or None on failure.
+    URLs and base64 are returned as bytes (no temp files needed since both
+    torchcodec and VideoDecoderWrapper accept bytes natively).
+    """
+    if isinstance(video_file, bytes):
+        return video_file
+    elif isinstance(video_file, str):
+        if video_file.startswith(("http://", "https://")):
+            timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+            response = requests.get(video_file, stream=True, timeout=timeout)
+            response.raise_for_status()
+            return response.content
+        elif video_file.startswith("data:"):
+            _, encoded = video_file.split(",", 1)
+            return pybase64.b64decode(encoded, validate=True)
+        elif video_file.startswith("file://"):
+            return unquote(urlparse(video_file).path)
+        elif os.path.isfile(unquote(urlparse(video_file).path)):
+            return video_file
+        else:
+            return pybase64.b64decode(video_file, validate=True)
+    else:
+        return None
+
+
+def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
+    if isinstance(video_file, VideoData):
+        # preprocess_kwargs is consumed by the multimodal processor, not here.
+        video_file = video_file.url
+
+    # Backend-independent fast paths (run regardless of the decode backend):
+    # already-decoded frames are passed through untouched.
+    if isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
+        return video_file
+    # `data:video/jpeg;` is a base64 frame *sequence*, not a real video
+    # container, so neither torchcodec nor decord can decode it -- handle it
+    # directly and return the stacked frames.
+    if isinstance(video_file, str) and video_file.startswith("data:"):
+        media_type, encoded = video_file.split(",", 1)
+        if media_type.startswith("data:video/jpeg;"):
+
+            def load_video_frame(frame_data):
+                image_frame = pybase64.b64decode(frame_data, validate=True)
+                image = Image.open(BytesIO(image_frame))
+                image.load()
+                return image.convert("RGB")
+
+            return np.stack(
+                [
+                    np.asarray(load_video_frame(frame_data))
+                    for frame_data in encoded.split(",")
+                ]
+            )
+
+    # Default backend: torchcodec (decided at import time in video_decoder).
+    if _BACKEND == "torchcodec":
+        source = _normalize_video_input(video_file)
+        if source is None:
+            raise ValueError(f"Unsupported video input type: {type(video_file)}")
+        device = "cuda" if use_gpu else "cpu"
+        return VideoDecoderWrapper(source, device=device)
+
+    # ===== Fallback: original decord path =====
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
 
@@ -1173,21 +1240,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
-                media_type, encoded = video_file.split(",", 1)
-                if media_type.startswith("data:video/jpeg;"):
-
-                    def load_video_frame(frame_data):
-                        image_frame = pybase64.b64decode(frame_data, validate=True)
-                        image = Image.open(BytesIO(image_frame))
-                        image.load()
-                        return image.convert("RGB")
-
-                    return np.stack(
-                        [
-                            np.asarray(load_video_frame(frame_data))
-                            for frame_data in encoded.split(",")
-                        ]
-                    )
+                _, encoded = video_file.split(",", 1)
                 video_bytes = pybase64.b64decode(encoded, validate=True)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
@@ -1205,8 +1258,6 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                 tmp_file.write(video_bytes)
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
-        elif isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
-            vr = video_file
         else:
             raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
@@ -1218,7 +1269,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
 
 
 def sample_video_frames(
-    video: "VideoReader", *, desired_fps: int, max_frames: int
+    video: VideoReader, *, desired_fps: int, max_frames: int
 ) -> list[int]:
     total_frames = len(video)
     assert total_frames > 0, "Video must have at least one frame"

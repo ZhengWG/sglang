@@ -37,6 +37,7 @@ from sglang.srt.multimodal.processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.utils import cpu_has_amx_support, is_cpu
+from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 from sglang.utils import logger
 
 MAX_RATIO = 200
@@ -302,7 +303,7 @@ async def preprocess_video(
         video = vr
         total_frames = video_fps = idx = None
         if not isinstance(vr, np.ndarray):
-            if not isinstance(vr, VideoReader):
+            if not isinstance(vr, (VideoReader, VideoDecoderWrapper)):
                 return vr
             total_frames, video_fps = len(vr), vr.get_avg_fps()
             nframes = smart_nframes(
