@@ -795,6 +795,22 @@ def set_random_seed(seed: int) -> None:
         torch.xpu.manual_seed_all(seed)
 
 
+_mm_http_session = threading.local()
+
+
+def get_mm_http_session() -> requests.Session:
+    """Per-thread HTTP session for multimodal downloads, to pool/reuse TCP
+    connections. Pid-checked so a forked worker rebuilds its own, not the parent's.
+    """
+    pid = os.getpid()
+    session = getattr(_mm_http_session, "session", None)
+    if session is None or getattr(_mm_http_session, "pid", None) != pid:
+        session = requests.Session()
+        _mm_http_session.session = session
+        _mm_http_session.pid = pid
+    return session
+
+
 def load_audio(
     audio_file: str, sr: Optional[int] = None, mono: bool = True
 ) -> np.ndarray:
@@ -810,7 +826,7 @@ def load_audio(
         audio_file.startswith("http://") or audio_file.startswith("https://")
     ):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-        with requests.get(audio_file, timeout=timeout) as response:
+        with get_mm_http_session().get(audio_file, timeout=timeout) as response:
             response.raise_for_status()
             source = response.content
     elif isinstance(audio_file, str) and audio_file.startswith("file://"):
@@ -1064,7 +1080,9 @@ def load_image_tensor(
         # Handle HTTP/HTTPS URL
         if image_file.startswith("http://") or image_file.startswith("https://"):
             timeout = int(os.getenv("REQUEST_TIMEOUT", "4"))
-            response = requests.get(image_file, stream=True, timeout=timeout)
+            response = get_mm_http_session().get(
+                image_file, stream=True, timeout=timeout
+            )
             try:
                 response.raise_for_status()
                 img_bytes = response.content
@@ -1104,7 +1122,7 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
         return image_file
     if image_file.startswith(("http://", "https://")):
         timeout = int(os.getenv("REQUEST_TIMEOUT", "4"))
-        response = requests.get(image_file, timeout=timeout)
+        response = get_mm_http_session().get(image_file, timeout=timeout)
         try:
             response.raise_for_status()
             result = response.content
@@ -1145,11 +1163,13 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
         elif isinstance(video_file, str):
             if video_file.startswith(("http://", "https://")):
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-                response = requests.get(video_file, stream=True, timeout=timeout)
-                response.raise_for_status()
-                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
+                with get_mm_http_session().get(
+                    video_file, stream=True, timeout=timeout
+                ) as response:
+                    response.raise_for_status()
+                    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    for chunk in response.iter_content(chunk_size=8192):
+                        tmp_file.write(chunk)
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
