@@ -1004,6 +1004,9 @@ class OpenAIServingChat(OpenAIServingBase):
         hidden_states = {}
         routed_experts = {}
         cached_tokens_details = {}
+        image_tokens = {}
+        audio_tokens = {}
+        video_tokens = {}
 
         stream_started = False
         try:
@@ -1030,6 +1033,9 @@ class OpenAIServingChat(OpenAIServingBase):
                 cached_tokens_details[index] = content["meta_info"].get(
                     "cached_tokens_details", None
                 )
+                image_tokens[index] = content["meta_info"].get("image_tokens", 0)
+                audio_tokens[index] = content["meta_info"].get("audio_tokens", 0)
+                video_tokens[index] = content["meta_info"].get("video_tokens", 0)
 
                 cache_report = self.tokenizer_manager.server_args.enable_cache_report
 
@@ -1228,6 +1234,17 @@ class OpenAIServingChat(OpenAIServingBase):
 
             # Additional usage chunk
             if include_usage:
+                # Multimodal tokens are per-prompt (input side), so aggregate
+                # once per prompt (first choice), matching prompt/cached semantics.
+                total_image_tokens = sum(
+                    tok for idx, tok in image_tokens.items() if idx % request.n == 0
+                )
+                total_audio_tokens = sum(
+                    tok for idx, tok in audio_tokens.items() if idx % request.n == 0
+                )
+                total_video_tokens = sum(
+                    tok for idx, tok in video_tokens.items() if idx % request.n == 0
+                )
                 usage = UsageProcessor.calculate_streaming_usage(
                     prompt_tokens,
                     reasoning_tokens,
@@ -1235,6 +1252,9 @@ class OpenAIServingChat(OpenAIServingBase):
                     cached_tokens=cached_tokens,
                     n_choices=request.n,
                     enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
+                    image_tokens=total_image_tokens,
+                    audio_tokens=total_audio_tokens,
+                    video_tokens=total_video_tokens,
                 )
                 # Build metadata
                 metadata = {
@@ -1435,11 +1455,27 @@ class OpenAIServingChat(OpenAIServingBase):
             )
             choices.append(choice_data)
 
-        # Calculate usage
+        # Calculate usage. Multimodal tokens are per-prompt (input side), so
+        # aggregate once per prompt (stride by n), matching prompt/cached semantics.
+        image_tokens = sum(
+            ret[i]["meta_info"].get("image_tokens", 0)
+            for i in range(0, len(ret), request.n)
+        )
+        audio_tokens = sum(
+            ret[i]["meta_info"].get("audio_tokens", 0)
+            for i in range(0, len(ret), request.n)
+        )
+        video_tokens = sum(
+            ret[i]["meta_info"].get("video_tokens", 0)
+            for i in range(0, len(ret), request.n)
+        )
         usage = UsageProcessor.calculate_response_usage(
             ret,
             n_choices=request.n,
             enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
+            image_tokens=image_tokens,
+            audio_tokens=audio_tokens,
+            video_tokens=video_tokens,
         )
 
         # Build metadata

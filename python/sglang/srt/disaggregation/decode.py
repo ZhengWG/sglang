@@ -1547,6 +1547,11 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
         decode_req.req.cached_tokens_device = cached_tokens[1].item()
         decode_req.req.cached_tokens_host = cached_tokens[2].item()
         decode_req.req.cached_tokens_storage = cached_tokens[3].item()
+        # Multimodal prompt token counts packed into cached_tokens slots 4-6
+        # by the prefill node (see MetadataBuffers.set_buf).
+        decode_req.req.mm_image_tokens = cached_tokens[4].item()
+        decode_req.req.mm_audio_tokens = cached_tokens[5].item()
+        decode_req.req.mm_video_tokens = cached_tokens[6].item()
 
         # req trace metric stats
         if self.scheduler.enable_trace:
