@@ -452,6 +452,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
         self.remote_instance_transfer_engine_weight_info = None
+        self._post_load_weight_executor = None
+        self._post_load_weight_future = None
 
         self.msprobe_debugger = None
         if server_args.msprobe_dump_config is not None:
@@ -787,8 +789,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     DefaultModelLoader.Source.init_new(config, self.model)
                 )
 
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(get_weights, self.model_config)
+            self._post_load_weight_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1
+            )
+            self._post_load_weight_future = self._post_load_weight_executor.submit(
+                get_weights, self.model_config
+            )
 
         # For MTP models like DeepSeek-V3 or GLM-4.5, the MTP layer(s) are used separately as draft
         # models for speculative decoding. In those cases, `num_nextn_predict_layers` is used to
@@ -982,11 +988,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if server_args.forward_hooks:
             register_forward_hooks(self.model, server_args.forward_hooks)
 
-        if (
-            POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
-        ) and is_default_loader:
-            weights = future.result()
-            executor.shutdown()
+        if self._post_load_weight_future is not None:
+            future = self._post_load_weight_future
+            executor = self._post_load_weight_executor
+            try:
+                weights = future.result()
+            finally:
+                if executor is not None:
+                    executor.shutdown()
+                self._post_load_weight_future = None
+                self._post_load_weight_executor = None
 
             tic = time.perf_counter()
             logger.info(f"Update weight begin. This can take up to several seconds.")
