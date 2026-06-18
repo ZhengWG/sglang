@@ -12,12 +12,7 @@ from transformers import PretrainedConfig
 
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
-    get_moe_expert_parallel_world_size,
-    get_moe_tensor_parallel_rank,
-    get_moe_tensor_parallel_world_size,
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
     moe_expert_parallel_all_reduce,
     moe_tensor_model_parallel_all_reduce,
 )
@@ -30,11 +25,7 @@ from sglang.srt.layers.communicator import (
     LayerScatterModes,
     enable_moe_dense_fully_dp,
 )
-from sglang.srt.layers.dp_attention import (
-    get_attention_tp_rank,
-    get_attention_tp_size,
-    is_dp_attention_enabled,
-)
+from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -85,6 +76,7 @@ from sglang.srt.models.deepseek_common.utils import (
 )
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     BumpAllocator,
@@ -164,8 +156,8 @@ class DsV3MLA(DeepseekV2AttentionMLA):
             alt_stream,
             skip_rope,
         )
-        attn_tp_rank = get_attention_tp_rank()
-        attn_tp_size = get_attention_tp_size()
+        attn_tp_rank = get_parallel().attn_tp_rank
+        attn_tp_size = get_parallel().attn_tp_size
         self.gated_attention_proj_granularity_type = getattr(
             config, "gated_attention_proj_granularity_type", None
         )
@@ -325,12 +317,8 @@ class BailingMLP(nn.Module):
 
         self.config = config
         self.swiglu_limit = swiglu_limit
-        self.tp_size = (
-            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
-        )
-        self.tp_rank = (
-            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
-        )
+        self.tp_size = tp_size if tp_size is not None else get_parallel().tp_size
+        self.tp_rank = tp_rank if tp_rank is not None else get_parallel().tp_rank
 
         # Store original and padded intermediate sizes
         self.intermediate_size = intermediate_size
@@ -481,11 +469,11 @@ class BailingMoE(nn.Module):
         self.layer_id = layer_id
         self.alt_stream = alt_stream
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.moe_ep_size = get_moe_expert_parallel_world_size()
-        self.moe_tp_size = get_moe_tensor_parallel_world_size()
-        self.moe_tp_rank = get_moe_tensor_parallel_rank()
+        self.tp_size = get_parallel().tp_size
+        self.tp_rank = get_parallel().tp_rank
+        self.moe_ep_size = get_parallel().moe_ep_size
+        self.moe_tp_size = get_parallel().moe_tp_size
+        self.moe_tp_rank = get_parallel().moe_tp_rank
 
         self.top_k = config.num_experts_per_tok
         self.norm_expert_prob = getattr(config, "norm_topk_prob", False)
@@ -880,7 +868,7 @@ class BailingMoEAttention(nn.Module):
         self.layer_id = layer_id
 
         self.hidden_size = config.hidden_size
-        tp_size = get_attention_tp_size()
+        tp_size = get_parallel().attn_tp_size
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -1354,7 +1342,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_parallel().tp_size
 
         # Determine num_fused_shared_experts
         self.determine_num_fused_shared_experts()
@@ -1479,7 +1467,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     block_n = weight_block_size[0]
                     block_k = weight_block_size[1]
                     # Use moe_tp_size for alignment check (accounts for EP mode)
-                    moe_ep_size = get_moe_expert_parallel_world_size()
+                    moe_ep_size = get_parallel().moe_ep_size
                     moe_tp_size = (
                         self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
                     )
@@ -1521,7 +1509,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             )
 
         # Log EP mode info
-        moe_ep_size = get_moe_expert_parallel_world_size()
+        moe_ep_size = get_parallel().moe_ep_size
         if moe_ep_size > 1:
             log_info_on_rank0(
                 logger,

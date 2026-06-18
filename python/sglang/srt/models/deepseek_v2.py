@@ -48,7 +48,6 @@ from sglang.srt.configs.model_config import (
 from sglang.srt.distributed import (
     divide,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.environ import envs
@@ -2731,7 +2730,7 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
             input_embeds is not None
             and get_attn_tp_context().use_input_scattered(forward_batch)
         ):
-            if get_tensor_model_parallel_rank() != 0:
+            if get_parallel().tp_rank != 0:
                 input_embeds = torch.zeros_like(input_embeds)
         with get_attn_tp_context().maybe_input_scattered(forward_batch):
             hidden_states = self.model(
