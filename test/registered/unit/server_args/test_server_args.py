@@ -147,6 +147,17 @@ class TestLoadBalanceMethod(unittest.TestCase):
         self.assertEqual(server_args.disaggregation_transfer_backend, "mooncake")
 
 
+class TestMambaRadixCacheArgs(unittest.TestCase):
+    def test_bailing_moe_v3_supports_extra_buffer(self):
+        server_args = ServerArgs(model_path="dummy")
+
+        self.assertTrue(
+            server_args._support_mamba_cache_extra_buffer(
+                "BailingMoeV3ForCausalLM"
+            )
+        )
+
+
 class TestContextParallelServerArgs(CustomTestCase):
     def setUp(self):
         self.parser = server_args_module.argparse.ArgumentParser()

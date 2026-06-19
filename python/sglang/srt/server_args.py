@@ -2820,6 +2820,7 @@ class ServerArgs:
             "InternS2PreviewForConditionalGeneration",
             "MiniCPMV4_6ForConditionalGeneration",
             "BailingMoeV2_5ForCausalLM",
+            "BailingMoeV3ForCausalLM",
             "FalconH1ForCausalLM",
             "GraniteMoeHybridForCausalLM",
             "NemotronHForCausalLM",
