@@ -968,28 +968,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # batch.
         self.eager_runner = EagerRunner(self)
 
-        # cuda-graph capture: prefill before decode, so both coalesce onto the
-        # eager buffer allocated above. (init_prefill_cuda_graph routes prefill
-        # to the eager runner when the prefill graph is disabled.)
-        self.init_prefill_cuda_graph()
-        if not disable_cuda_graph and cg_supported:
-            self.init_decode_cuda_graph()
-        else:
-            self.decode_cuda_graph_runner = None
-            self.graph_mem_usage = 0
-        if disable_cuda_graph:
-            # Decode cuda graph disabled: route eager decode through the
-            # EagerRunner (the dispatch gate isinstance(..., EagerRunner) keeps
-            # _forward_raw off any replay branch).
-            self.decode_cuda_graph_runner = self.eager_runner
-
-        # Register forward hooks AFTER cuda-graph capture so their tensor ops are
-        # not traced into any captured graph — capture stays hook-free and hooks
-        # fire only on the eager forward path (capture replay never runs Python
-        # hooks anyway).
-        if server_args.forward_hooks:
-            register_forward_hooks(self.model, server_args.forward_hooks)
-
+        # Finalize post-load weights before either CUDA graph is captured.
         if self._post_load_weight_future is not None:
             future = self._post_load_weight_future
             executor = self._post_load_weight_executor
@@ -1014,6 +993,28 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.info(
                 f"Update weight end. Time elapsed: {time.perf_counter() - tic:.2f} s. "
             )
+
+        # cuda-graph capture: prefill before decode, so both coalesce onto the
+        # eager buffer allocated above. (init_prefill_cuda_graph routes prefill
+        # to the eager runner when the prefill graph is disabled.)
+        self.init_prefill_cuda_graph()
+        if not disable_cuda_graph and cg_supported:
+            self.init_decode_cuda_graph()
+        else:
+            self.decode_cuda_graph_runner = None
+            self.graph_mem_usage = 0
+        if disable_cuda_graph:
+            # Decode cuda graph disabled: route eager decode through the
+            # EagerRunner (the dispatch gate isinstance(..., EagerRunner) keeps
+            # _forward_raw off any replay branch).
+            self.decode_cuda_graph_runner = self.eager_runner
+
+        # Register forward hooks AFTER cuda-graph capture so their tensor ops are
+        # not traced into any captured graph — capture stays hook-free and hooks
+        # fire only on the eager forward path (capture replay never runs Python
+        # hooks anyway).
+        if server_args.forward_hooks:
+            register_forward_hooks(self.model, server_args.forward_hooks)
 
         if envs.SGLANG_RFORK_ENABLED.get() and self.model_config.is_rfork_model:
             # Start RFork seed service
