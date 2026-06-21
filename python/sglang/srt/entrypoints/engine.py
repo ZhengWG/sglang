@@ -48,9 +48,6 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.compile_cache import save_compile_cache
 
-# Fix a bug of Python threading
-setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
-
 import torch
 import uvloop
 import zmq
