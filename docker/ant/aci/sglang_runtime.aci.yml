@@ -41,14 +41,13 @@ parameters:
   transfer_engine_whl_url: "" # 如果有开源或者内部预编译的transfer-engine whl包，可以通过这个参数传递给dockerfile安装，否则会在dockerfile里编译安装, 如果指定安装，需要确认kvpool版本和依赖和sglang一致，在Dockerfile中 pip installl --no-deps 安装，避免破坏sglang依赖的包版本
   kvpool_whl_url: "" # 蚂蚁内部的kvpool whl包，默认不安装，同上，--no-deps模式，避免破坏sglang依赖的包版本
   runtime_base_image:  "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc" # runtime基础镜像，社区是ubuntu，蚂蚁内部有更适合的基础镜像，使用这个文档里的ngc镜像：https://yuque.antfin.com/antos/linux/fcia0gilxedyiuy9#s0g2S "registry.cn-hangzhou.aliyuncs.com/augusto/cuda" "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc"
-  runtime_base_image_version: "25.08" # 蚂蚁内部镜像 25.06是cuda 12.9.1.010， 25.08是cuda 13.0.0.044， cuda镜像12.9.1 tag为12.9.1-cudnn-devel-ubuntu24.04， 13.0.1的tag为13.0.1-cudnn-devel-ubuntu24.04
   ubuntu_mirror: "https://mirrors.aliyun.com" # 构建过程中使用的ubuntu镜像源，默认使用阿里云镜像源，其他可选项还有：mirrors.tuna.tsinghua.edu.cn、mirrors.ustc.edu.cn、mirrors.cloud.tencent.com等
   pip_default_index: "https://pypi.antfin-inc.com/simple" # 构建过程中使用的pip安装源，默认使用蚂蚁内部镜像源，其他可选项还有：https://pypi.tuna.tsinghua.edu.cn/simple、https://mirrors.aliyun.com/pypi/simple等
   github_artifactory: "github.ednovas.xyz/https://github.com" # 由于github在国内访问不稳定，构建过程中访问github的地址可以替换成这个镜像地址，默认不替换，如果需要替换，在dockerfile里访问github的地方需要替换成这个地址
   install_flashinfer_jit_cache: "1"
   runtime_version: "1.1.15"
   runtime_llm_version: "1.1.9"
-  image_build_target: "runtime" # 可选值为runtime(生产镜像) 或者 framework_final(开发调试镜像)
+  image_build_target: "framework_final" # 可选值为runtime(精简镜像，对应社区的lmsysorg/sglang:v0.5.12.post1-cu130-runtime, 比framework_final小了大概1GB，但是构建时间长了不少) 或者 framework_final(完整镜像，对应社区的lmsysorg/sglang:v0.5.12.post1-cu130)
   enable_below_sm90: ON # 是否支持sm90以下的GPU，默认支持,可选值为[ ON, OFF ], aarch64 模式下可选OFF用来加速构建
   arch: "x86_64" # 可选 'x86_64' 'aarch64'
   yum_mirror: "https://mirrors.aliyun.com"
@@ -75,7 +74,14 @@ jobs:
         else
           BASE_IMG="registry.cn-hangzhou.aliyuncs.com/augusto/manylinux-builder"
         fi
+
+        case "$CUDA_VERSION_FULL" in \
+          12.9.1) RUNTIME_BASE_IMAGE_TAG=25.06 ;; \
+          13.0.1) RUNTIME_BASE_IMAGE_TAG=25.08 ;; \
+          *) echo "Unsupported CUDA version: $CUDA_VERSION_FULL" && exit 1 ;; \
+        esac
         
+        export RUNTIME_BASE_IMAGE_TAG=${RUNTIME_BASE_IMAGE_TAG}
         # check DEPS_TAG with Dockerfile version
         #DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile  ./sgl-kernel/build.sh)
         DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile)
@@ -88,7 +94,7 @@ jobs:
         import json
         import os
         result = {}
-        for key in [ "DEPS_TAG", "CUDA_VERSION", "PY_TAG", "BASE_IMG", "ARCH" ]:
+        for key in [ "DEPS_TAG", "CUDA_VERSION", "PY_TAG", "BASE_IMG", "ARCH", "RUNTIME_BASE_IMAGE_TAG" ]:
           result[key.lower()] = os.getenv(key)
         print(json.dumps(result, separators=(",", ":")))
         EOF
@@ -270,7 +276,7 @@ jobs:
       imageTag: ${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}} # 构建产物镜像 tag
       dockerfile: ./docker/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
       contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
-      buildArgs: SGLANG_BUILD_COMMIT=${{vcs.commitShortSha}},SGLANG_BUILD_URL=${{pipeline.url}},RUNTIME_BASE_IMAGE=${{parameters.runtime_base_image}}:${{parameters.runtime_base_image_version}},CUDA_VERSION=${{parameters.cuda_version_full}},SGLANG_KERNEL_WHL_URL=${{parameters.sglang_kernel_whl_url}},SGLANG_WHL_URL=${{parameters.sglang_whl_url}},SGLANG_KERNEL_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang_kernel.url}},SGLANG_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang.url}},DEEPGEMM_WHL_URL=${{parameters.deepgemm_whl_url}},FLASHMLA_WHL_URL=${{parameters.flashmla_whl_url}},DEEPEP_WHL_URL=${{parameters.deepep_whl_url}},TRANSFER_ENGINE_WHL_URL=${{parameters.transfer_engine_whl_url}},KVPOOL_WHL_URL=${{parameters.kvpool_whl_url}},UBUNTU_MIRROR=${{parameters.ubuntu_mirror}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},INSTALL_FLASHINFER_JIT_CACHE=${{parameters.install_flashinfer_jit_cache}},RUNTIME_VERSION=${{parameters.runtime_version}},RUNTIME_LLM_VERSION=${{parameters.runtime_llm_version}} # docker build 的 args 参数，格式为 key1=value1,key2=value2，注意key/value的格式，不能有空格、双引号等特殊字符
+      buildArgs: SGLANG_BUILD_COMMIT=${{vcs.commitShortSha}},SGLANG_BUILD_URL=${{pipeline.url}},RUNTIME_BASE_IMAGE=${{parameters.runtime_base_image}}:${{jobs.verify_params.outputs.output.runtime_base_image_tag}},CUDA_VERSION=${{parameters.cuda_version_full}},SGLANG_KERNEL_WHL_URL=${{parameters.sglang_kernel_whl_url}},SGLANG_WHL_URL=${{parameters.sglang_whl_url}},SGLANG_KERNEL_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang_kernel.url}},SGLANG_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang.url}},DEEPGEMM_WHL_URL=${{parameters.deepgemm_whl_url}},FLASHMLA_WHL_URL=${{parameters.flashmla_whl_url}},DEEPEP_WHL_URL=${{parameters.deepep_whl_url}},TRANSFER_ENGINE_WHL_URL=${{parameters.transfer_engine_whl_url}},KVPOOL_WHL_URL=${{parameters.kvpool_whl_url}},UBUNTU_MIRROR=${{parameters.ubuntu_mirror}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},INSTALL_FLASHINFER_JIT_CACHE=${{parameters.install_flashinfer_jit_cache}},RUNTIME_VERSION=${{parameters.runtime_version}},RUNTIME_LLM_VERSION=${{parameters.runtime_llm_version}} # docker build 的 args 参数，格式为 key1=value1,key2=value2，注意key/value的格式，不能有空格、双引号等特殊字符
       compression: uncompressed # 为新创建和缓存的镜像层选择压缩类型，默认值为未压缩uncompressed
       forceCompression: false # 对所有镜像层强制应用压缩类型compression(包括已经存在的层)
       registryUsername: null # 镜像 registry 用户名，建议使用 aci secrets 方式传递，避免泄露 (reg.docker.alibaba-inc.com、acs-reg.alipay.com 不传时默认使用平台公共账号 admin.for.antb)

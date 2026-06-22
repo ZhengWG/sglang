@@ -92,7 +92,7 @@ jobs:
         RUN FLASHINFER_VERSION=$(pip show flashinfer-python |grep Version | awk ' { print $2}') && FLASHINFER_JIT_CACHE_VERSION=$(pip show flashinfer-jit-cache |grep Version | awk ' { print $2}') && \
             if [ "${FLASHINFER_VERSION}" != "${FLASHINFER_JIT_CACHE_VERSION}" ]; then \
                 echo "flashinfer-python version ($FLASHINFER_VERSION) and flashinfer-jit-cache version ($FLASHINFER_JIT_CACHE_VERSION) do not match!"; \
-                RUN pip3 install https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/whls/flashinfer-jit-cache/flashinfer_jit_cache-${FLASHINFER_VERSION}%2Bcu130-cp39-abi3-manylinux_2_28_x86_64.whl
+                pip3 install https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/whls/flashinfer-jit-cache/flashinfer_jit_cache-${FLASHINFER_VERSION}%2Bcu130-cp39-abi3-manylinux_2_28_x86_64.whl; \
             fi
 
         LABEL ai.sglang.build.url="${SGLANG_BUILD_URL}"

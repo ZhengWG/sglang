@@ -110,8 +110,6 @@ build_sglang_whl_only: "true"
 | 参数名 | 默认值 | 说明 | 可选项 |
 |--------|--------|------|--------|
 | `runtime_base_image` | `reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc` | 运行时基础镜像，蚂蚁内部镜像为ubuntu-ai, 社区为cuda | `reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc`, `registry.cn-hangzhou.aliyuncs.com/augusto/cuda` |
-| `runtime_base_image_version` | `25.08` | 基础镜像版本，蚂蚁内部镜像 `25.06` 是 cuda 12.9.1.010，`25.08` 是 cuda 13.0.0.044；cuda 镜像 12.9.1 tag 为 `12.9.1-cudnn-devel-ubuntu24.04`，13.0.1 的 tag 为 `13.0.1-cudnn-devel-ubuntu24.04` | `25.06`, `25.08`, `12.9.1-cudnn-devel-ubuntu24.04`, `13.0.1-cudnn-devel-ubuntu24.04` |
-
 #### 镜像源和代理参数
 
 | 参数名 | 默认值 | 说明 | 可选项 |

@@ -51,7 +51,7 @@ fi
 # Python setup (combined with apt update to reduce layers)
 # Ubuntu 24.04 ships Python 3.12 in main, so we no longer need the deadsnakes
 # PPA. Dropping it avoids transient Launchpad 504s in `add-apt-repository`.
-RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=base-apt,sharing=locked \
     # ngc images have already set constraint.txt, we need to disable it
     if [ -f /etc/pip/constraint.txt ]; then \
         mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
@@ -76,7 +76,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
     && ln -s apt_pkg.cpython-312-*-linux-gnu.so apt_pkg.so
 
 # Install system dependencies (organized by category for better caching)
-RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=base-apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     # Core system utilities
     ca-certificates \
@@ -417,7 +417,7 @@ WORKDIR /tools
 
 # Minimal apt deps needed for oh-my-zsh install in this stage
 # Full dev apt packages (gdb, vim, tmux, nsight, etc.) are installed in the framework stage
-RUN --mount=type=cache,target=/var/cache/apt,id=devtools-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=devtools-apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends zsh git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -554,7 +554,7 @@ COPY --from=devtools_builder /tools/just /usr/local/bin/
 COPY --from=devtools_builder /root/.oh-my-zsh /root/.oh-my-zsh
 
 # Install dev apt packages (need to re-run since we're in a different stage)
-RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     ninja-build \
@@ -583,7 +583,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     && apt-get clean
 
 # Install NVIDIA development tools
-RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt,sharing=locked \
     apt update -y \
     && apt install -y --no-install-recommends gnupg \
     && echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) /" | tee /etc/apt/sources.list.d/nvidia-devtools.list \
@@ -686,7 +686,7 @@ COPY docker/configs/.zshrc /root/.zshrc
 # libtasn1-6:      CVE-2025-13151
 # dpkg:            CVE-2025-6297
 RUN python3 -m pip install --upgrade "urllib3>=2.6.3" "pillow>=12.1.1"
-RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt,sharing=locked \
     apt-get update && apt-get install -y --only-upgrade \
     binutils binutils-common binutils-x86-64-linux-gnu libbinutils \
     libctf0 libctf-nobfd0 libgprofng0 libsframe1 \
@@ -727,7 +727,6 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
         git clone --depth=1 --branch v${SGL_VERSION} https://${GITHUB_ARTIFACTORY}/sgl-project/sglang.git /sgl-workspace/sglang; \
     fi \
     && rm -rf /tmp/local_src
-
 ENV HF_ENDPOINT="https://hf-mirror.com"
 # Editable install (fast - dependencies already installed via constraints)
 # Clean up __pycache__/tests/pyc in same RUN to avoid writing ~28k files to layer
@@ -751,8 +750,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
                 echo "download sgl-flash-attn3 kernels from ant failed, retrying in 10s..." && sleep 10; \
             done; \
             rm -f /tmp/prepare_sgl_flash_attn3_kernels.py && \
-             for i in 1 2 3 4 5; do \
-                 echo "Attempt $i/5: downloading sgl-kernel cubins..." && \
+             for i in 1 2 3; do \
+                 echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
                  kernels download python && \
                  success=1 && break; \
                  echo "sgl-kernel cubin download failed, retrying in 30s..." && sleep 30; \
@@ -780,6 +779,87 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
+
+# install sglang from wheel if URL or local path provided, to avoid editable install overhead when wheel is available
+RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
+        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}"; \
+    elif [ -n "$SGLANG_WHL_URL" ]; then \
+        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}"; \
+    fi
+
+# Runtime logging and internal launch scripts expect these paths to exist.
+RUN mkdir -p /home/admin/logs /opt/conda/bin \
+    && ln -sf /usr/bin/python /opt/conda/bin/python \
+    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
+    && ln -sf /home/admin/logs /logs
+
+# install cuda-compat scripts, make sure cuda-compat package has been installed
+COPY ./docker/ant/update_cuda_compat.sh /root/.update_cuda_compat.sh
+
+RUN echo -e '\nsource /root/.update_cuda_compat.sh' >> /root/.bashrc
+
+ENV CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}} \
+    C_INCLUDE_PATH=/usr/local/cuda/include/cccl:/usr/local/cuda/include${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}
+
+# 安装x-runtime
+ARG RUNTIME_VERSION
+ARG RUNTIME_LLM_VERSION
+RUN rm -rf /home/admin/runtime/ && mkdir -p /home/admin/runtime/ && \
+    cd /home/admin/runtime/ && \
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime/${RUNTIME_VERSION}/serving_runtime-${RUNTIME_VERSION}.tar -O serving_runtime-${RUNTIME_VERSION}.tar && \
+    tar xf serving_runtime-${RUNTIME_VERSION}.tar && \
+    wget https://artifacts.antgroup-inc.cn/artifact/repositories/zark-common/serving_runtime_llm/${RUNTIME_LLM_VERSION}/serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar -O serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar && \
+    tar xf serving_runtime_llm-${RUNTIME_LLM_VERSION}.tar
+
+RUN apt-get update && apt-get install -y gdb && \
+    pip3 install pystack-debugger py-spy concurrent_log_handler
+
+# support async model mount, refer: https://yuque.antfin.com/deepxpu/uiwv6l/ri1gufqzy4g8fdob
+ARG MODEL_MANAGER_VERSION="0.0.2"
+RUN pip3 install --no-cache-dir https://artifacts.antgroup-inc.cn/artifact/repositories/simple-dev/model-manager/model-manager-${MODEL_MANAGER_VERSION}.tar.gz
+
+# 安装modctl和aistudio-modelhub
+RUN wget https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/ant-common/antregistry/modctl/0.1.2/modctl-0.1.2-linux-amd64.deb && dpkg -i modctl-0.1.2-linux-amd64.deb && rm modctl-0.1.2-linux-amd64.deb
+RUN pip3 install --no-cache-dir aistudio-modelhub==0.0.0.6
+
+# 安装sglang-router
+RUN pip3 install https://artifacts.antgroup-inc.cn/t/MAIN_SITE/artifact/repositories/simple-dev/sglang-router/sglang_router-0.1.9-py3-none-any.whl
+
+# install ossutil
+RUN wget "https://gosspublic.alicdn.com/ossutil/v2/2.1.1/ossutil-2.1.1-linux-amd64.zip" && \
+    unzip -o ossutil-2.1.1-linux-amd64.zip -d /usr/local/ && \
+    chmod +x /usr/local/ossutil-2.1.1-linux-amd64/ossutil && \
+    ln -sf /usr/local/ossutil-2.1.1-linux-amd64/ossutil /usr/local/bin/ossutil && \
+    rm -vf ossutil-2.1.1-linux-amd64.zip
+
+# 安装蚂蚁内部的decord2, 社区的解码会夯死
+ARG DECORD2_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/decord2_fix/decord2-2.1.0-cp312-cp312-manylinux_2_28_x86_64.whl'
+RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${DECORD2_WHL_URL}
+RUN pip3 install --force-reinstall --no-cache-dir numpy==1.26.4
+
+# 安装jq和ffmpeg
+RUN apt-get update && apt-get install -y jq ffmpeg && rm -rf /var/lib/apt/lists/* && apt-get clean
+RUN pip3 install scipy==1.15.3 distro cryptography modelscope aistudio-modelhub pillow-heif --no-cache-dir
+
+# Install DeepGEMM JIT cache for DeepSeek V4.
+RUN echo "DEEP_GEMM_CACHE_BUST=${DEEP_GEMM_CACHE_BUST}" && \
+    wget -O deep_gemm_cache_for_v4.tar "http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yudian.zy/deep_gemm_cache_for_v4.tar" && \
+    tar -xPf deep_gemm_cache_for_v4.tar && \
+    rm -rf deep_gemm_cache_for_v4.tar
+
+# Merge Ubuntu public CAs with the base image bundle, which may contain internal CAs.
+RUN if [ -f /etc/ssl/certs/ca-bundle.crt ]; then \
+        cp /etc/ssl/certs/ca-bundle.crt /tmp/ca-bundle.crt; \
+        cat /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.crt > /etc/ssl/certs/ca-bundle.crt; \
+        rm /tmp/ca-bundle.crt; \
+    else \
+        cp /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-bundle.crt; \
+    fi && \
+    ls -lh /etc/ssl/certs/ca-bundle.crt
+
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt \
+    ENGINE_TYPE=sglang
 
 # Keep build provenance at the end so metadata changes do not invalidate build layers.
 ARG SGLANG_BUILD_COMMIT=unknown
@@ -841,7 +921,7 @@ RUN if [ -n "$UBUNTU_MIRROR" ]; then \
 fi
 # Install runtime dependencies (devel base provides gcc/g++/build tools)
 # Python 3.12 ships in Ubuntu 24.04 main, so no deadsnakes PPA needed.
-RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt,sharing=locked \
     # ngc images have already set constraint.txt, we need to disable it
     if [ -f /etc/pip/constraint.txt ]; then \
         mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
@@ -916,7 +996,7 @@ ENV LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8
 
 # Fix Trivy-reported CVEs (see framework stage for full CVE list)
-RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
+RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt,sharing=locked \
     apt-get update && apt-get install -y --only-upgrade \
     binutils binutils-common binutils-x86-64-linux-gnu libbinutils \
     libctf0 libctf-nobfd0 libgprofng0 libsframe1 \
