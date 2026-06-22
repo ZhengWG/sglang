@@ -1113,9 +1113,7 @@ class ServerArgs:
     ] = False
     forward_pass_metrics_worker_id: A[str, Arg(help=argparse.SUPPRESS)] = ""
     forward_pass_metrics_ipc_name: A[Optional[str], Arg(help=argparse.SUPPRESS)] = None
-    enable_trace: A[bool, "Enable opentelemetry trace"] = (
-        os.getenv("ENABLE_TRACE", "0") == "1"
-    )
+    enable_trace: A[bool, "Enable opentelemetry trace"] = False
     trace_modules: A[
         str,
         "Select the components to trace. Available options are 'request' and 'mooncake'. Format: <module1 name>,<module2 name>,...",
@@ -1123,7 +1121,7 @@ class ServerArgs:
     otlp_traces_endpoint: A[
         str,
         "Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
-    ] = os.getenv("OTLP_TRACES_ENDPOINT", "localhost:4317")
+    ] = "localhost:4317"
     # RequestMetricsExporter configuration
     export_metrics_to_file: A[
         bool,
@@ -6316,6 +6314,14 @@ class ServerArgs:
 
         # Auto-derived from Annotated[..., Arg(...)] field metadata.
         add_cli_args_from_dataclass(parser, ServerArgs)
+        # These CLI defaults are environment-driven, while direct ServerArgs
+        # construction retains the dataclass defaults above.
+        parser.set_defaults(
+            enable_trace=os.getenv("ENABLE_TRACE", "0") == "1",
+            otlp_traces_endpoint=os.getenv(
+                "OTLP_TRACES_ENDPOINT", "localhost:4317"
+            ),
+        )
 
         # --- Fields with dynamic choices (computed at add_cli_args time) ---
         reasoning_parser_choices = list(ReasoningParser.DetectorMap.keys())
