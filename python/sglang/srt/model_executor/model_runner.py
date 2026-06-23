@@ -976,8 +976,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.info(f"Update weight begin. This can take up to several seconds.")
 
             success, message = self.update_weights_from_disk(
-                model_path=server_args.model_path,
-                load_format=server_args.load_format,
+                model_path=self.server_args.model_path,
+                load_format=self.server_args.load_format,
                 weights=weights,
             )
             assert success, message
