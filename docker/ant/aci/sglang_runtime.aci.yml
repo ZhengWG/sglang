@@ -45,8 +45,8 @@ parameters:
   pip_default_index: "https://pypi.antfin-inc.com/simple" # 构建过程中使用的pip安装源，默认使用蚂蚁内部镜像源，其他可选项还有：https://pypi.tuna.tsinghua.edu.cn/simple、https://mirrors.aliyun.com/pypi/simple等
   github_artifactory: "github.ednovas.xyz/https://github.com" # 由于github在国内访问不稳定，构建过程中访问github的地址可以替换成这个镜像地址，默认不替换，如果需要替换，在dockerfile里访问github的地方需要替换成这个地址
   install_flashinfer_jit_cache: "1"
-  runtime_version: "1.1.15"
-  runtime_llm_version: "1.1.9"
+  runtime_version: "2.0.0"
+  runtime_llm_version: "2.0.0"
   image_build_target: "framework_final" # 可选值为runtime(精简镜像，对应社区的lmsysorg/sglang:v0.5.12.post1-cu130-runtime, 比framework_final小了大概1GB，但是构建时间长了不少) 或者 framework_final(完整镜像，对应社区的lmsysorg/sglang:v0.5.12.post1-cu130)
   enable_below_sm90: ON # 是否支持sm90以下的GPU，默认支持,可选值为[ ON, OFF ], aarch64 模式下可选OFF用来加速构建
   arch: "x86_64" # 可选 'x86_64' 'aarch64'
