@@ -3035,7 +3035,11 @@ class ServerArgs:
             ),
             ("MoE A2A backend", lambda: self.moe_a2a_backend != "none"),
             ("LoRA", lambda: bool(self.lora_paths) or self.enable_lora),
-            ("multimodal model", lambda: self.get_model_config().is_multimodal),
+            (
+                "multimodal model",
+                lambda: self.get_model_config().is_multimodal
+                and not self.get_model_config().is_multimodal_piecewise_cuda_graph_supported,
+            ),
             (
                 "GGUF quantization",
                 lambda: self.load_format == "gguf"
@@ -3289,9 +3293,12 @@ class ServerArgs:
         if self.mem_fraction_static is None:
             # Constant meta data (e.g., from attention backend)
             reserved_mem = 512
+            effective_chunked_prefill_size = self.chunked_prefill_size // (
+                self.dp_size if self.enable_dp_attention and self.dp_size > 1 else 1
+            )
             # For activation during large prefill
             if self.chunked_prefill_size > 0:
-                reserved_mem += max(self.chunked_prefill_size, 2048) * 1.5
+                reserved_mem += max(effective_chunked_prefill_size, 2048) * 1.5
             else:
                 reserved_mem += max(self.max_prefill_tokens, 2048) * 1.5
             # For cuda graphs
