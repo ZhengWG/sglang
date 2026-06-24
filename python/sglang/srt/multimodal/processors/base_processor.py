@@ -2,7 +2,6 @@ import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
-import functools
 import multiprocessing as mp
 import os
 import re
@@ -553,20 +552,26 @@ class BaseMultimodalProcessor(ABC):
             if modality == Modality.IMAGE:
                 if SGL_PREPROCESS_USE_IMAGE_TENSOR:
                     img, _ = load_image_tensor(data, discard_alpha_channel)
-                else:
-                    img, _ = load_image(data, cls.gpu_image_decode)
+                    return img
+
+                img, _ = load_image(data, cls.gpu_image_decode)
+                if isinstance(img, torch.Tensor):
                     if discard_alpha_channel:
-                        if isinstance(img, torch.Tensor):
-                            # nvJPEG / torchvision decode can return [1,H,W]
-                            # (grayscale) or [4,H,W] (with alpha); HF image
-                            # processors won't broadcast channels for tensor
-                            # inputs, so normalize to 3 channels here.
-                            if img.dim() == 3 and img.shape[0] == 1:
-                                img = img.expand(3, -1, -1).contiguous()
-                            elif img.dim() == 3 and img.shape[0] == 4:
-                                img = img[:3].contiguous()
-                        elif img.mode != "RGB":
-                            img = img.convert("RGB")
+                        # nvJPEG / torchvision decode can return [1,H,W]
+                        # (grayscale) or [4,H,W] (with alpha); HF image
+                        # processors won't broadcast channels for tensor
+                        # inputs, so normalize to 3 channels here.
+                        if img.dim() == 3 and img.shape[0] == 1:
+                            img = img.expand(3, -1, -1).contiguous()
+                        elif img.dim() == 3 and img.shape[0] == 4:
+                            img = img[:3].contiguous()
+                    return img
+
+                # PIL decodes lazily; force decoding in the io worker so it
+                # doesn't run later on the event-loop thread.
+                if discard_alpha_channel and img.mode != "RGB":
+                    return img.convert("RGB")
+                img.load()
                 return img
             elif modality == Modality.VIDEO:
                 return load_video(data, frame_count_limit)
