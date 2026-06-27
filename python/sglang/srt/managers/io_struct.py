@@ -74,6 +74,10 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _default_get_loads_include() -> List[str]:
+    return ["all"]
+
+
 class BaseReq(msgspec.Struct, tag=True, kw_only=True, array_like=True):
     """Base for single-request IPC payloads."""
 
@@ -90,7 +94,7 @@ class BaseBatchReq(msgspec.Struct, tag=True, kw_only=True, array_like=True):
 
     rids: Optional[List[str]] = None
     http_worker_ipcs: Optional[List[Optional[str]]] = None
-    metrics: Optional[Dict] = field(default_factory=lambda: {}, kw_only=True)
+    metrics: Optional[Dict] = msgspec.field(default_factory=dict)
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source, handler):
@@ -1314,7 +1318,7 @@ class BatchTokenIDOutput(BaseBatchReq, kw_only=True):
 
     # todo: 只保留 time_stats
     # rid->req metrics mapping
-    req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
+    req_metrics: Dict[str, ReqMetric] = msgspec.field(default_factory=dict)
     # For observability
     # Pickled Optional[List[SchedulerReqTimeStats]]
     time_stats: Optional[PickleWrapper] = None
@@ -1392,7 +1396,7 @@ class BatchStrOutput(BaseBatchReq, kw_only=True):
 
     # todo: 只保留 time_stats
     # rid->req metrics mapping
-    req_metrics: Dict[str, ReqMetric] = field(default_factory=dict)
+    req_metrics: Dict[str, ReqMetric] = msgspec.field(default_factory=dict)
     # For observability
     # Pickled Optional[List[SchedulerReqTimeStats]]
     time_stats: Optional[PickleWrapper] = None
@@ -2089,7 +2093,7 @@ class GetLoadsReqInput(BaseReq, kw_only=True):
         {"core", "memory", "spec", "lora", "disagg", "queues", "all"}
     )
 
-    include: List[str] = msgspec.field(default_factory=lambda: ["all"])
+    include: List[str] = msgspec.field(default_factory=_default_get_loads_include)
     dp_rank: Optional[int] = None
 
     def __post_init__(self):

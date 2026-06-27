@@ -1,7 +1,13 @@
 import copy
+import pickle
 import unittest
+from array import array
 
-from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.managers.io_struct import (
+    BatchTokenIDOutput,
+    GenerateReqInput,
+    GetLoadsReqInput,
+)
 from sglang.test.ci.ci_register import (
     register_amd_ci,
     register_cpu_ci,
@@ -16,6 +22,54 @@ from sglang.test.test_utils import (
 register_cuda_ci(est_time=8, stage="base-b", runner_config="1-gpu-large")
 register_amd_ci(est_time=8, suite="stage-b-test-1-gpu-small-amd")
 register_cpu_ci(est_time=8, suite="base-c-test-cpu")
+
+
+class TestIpcStructPickle(CustomTestCase):
+    def test_batch_output_pickle_with_default_metrics(self):
+        payload = BatchTokenIDOutput(
+            rids=["rid"],
+            http_worker_ipcs=[None],
+            finished_reasons=[None],
+            decoded_texts=[""],
+            decode_ids=[array("l", [1])],
+            read_offsets=[0],
+            output_ids=None,
+            skip_special_tokens=[True],
+            spaces_between_special_tokens=[True],
+            no_stop_trim=[False],
+            prompt_tokens=[1],
+            reasoning_tokens=[0],
+            completion_tokens=[1],
+            cached_tokens=[0],
+            input_token_logprobs_val=None,
+            input_token_logprobs_idx=None,
+            output_token_logprobs_val=None,
+            output_token_logprobs_idx=None,
+            input_top_logprobs_val=None,
+            input_top_logprobs_idx=None,
+            output_top_logprobs_val=None,
+            output_top_logprobs_idx=None,
+            input_token_ids_logprobs_val=None,
+            input_token_ids_logprobs_idx=None,
+            output_token_ids_logprobs_val=None,
+            output_token_ids_logprobs_idx=None,
+            output_token_entropy_val=None,
+            output_hidden_states=None,
+            routed_experts=None,
+            indexer_topk=None,
+            placeholder_tokens_idx=None,
+            placeholder_tokens_val=None,
+        )
+
+        restored = pickle.loads(pickle.dumps(payload))
+
+        self.assertEqual(restored.metrics, {})
+        self.assertEqual(restored.rids, ["rid"])
+
+    def test_get_loads_input_pickle_with_default_include(self):
+        restored = pickle.loads(pickle.dumps(GetLoadsReqInput()))
+
+        self.assertEqual(restored.include, ["all"])
 
 
 class TestGenerateReqInputNormalization(CustomTestCase):
