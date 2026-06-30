@@ -1,6 +1,6 @@
 # 使用说明
 
-当前目录存放蚂蚁内部的sglang包构建和运行时镜像流水线和Dockerfile，以及构建镜像所需的一些配置文件。
+当前目录存放蚂蚁内部的sglang包构建和运行时镜像流水线和Dockerfile，以及构建镜像所需的一些配置文件，详情参考语雀文档[sglang引擎镜像制作流水线说明](https://yuque.antfin.com/hegpb4/kg7h1z/lvyiqs9tuxcem3hw)。
 常用的制作流程是： 
 1. 通过`sglang_runtime.aci.yml` 完整编译构建出可供线上使用的生产镜像，保证镜像中安装`sglang` 和`sglang-kernel` 依赖的必要包。由于是从编译sglang，sglang-kernel，然后编译安装deepep，flash-mla等sglang依赖的组件，此流水线构建时间比较费时，一般要两个小时。
 

@@ -795,21 +795,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && ( if [ -f python/kernels.lock ]; then mv python/kernels.lock /root/.cache/sglang/; fi ) \
     && ( find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true )
 
-
-# Install pre-built gateway artifacts from parallel builder
-# COPY --from=gateway_builder /build/sgl-model-gateway-bin /usr/local/bin/sgl-model-gateway
-# COPY --from=gateway_builder /build/gateway_wheels /tmp/gateway_wheels
-# When ai-dynamo is installed (dev image), reinstall the gateway wheel with
-# --no-deps so it cannot re-resolve and replace Dynamo's shared dependencies.
-# Otherwise resolve the gateway's own dependencies normally.
-# RUN --mount=type=cache,target=/root/.cache/pip \
-#     if [ "$INSTALL_DYNAMO" = "1" ]; then \
-#         python3 -m pip install --force-reinstall --no-deps /tmp/gateway_wheels/*.whl; \
-#     else \
-#         python3 -m pip install --force-reinstall /tmp/gateway_wheels/*.whl; \
-#     fi \
-#     && rm -rf /tmp/gateway_wheels
-
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
 
@@ -867,8 +852,7 @@ RUN wget "https://gosspublic.alicdn.com/ossutil/v2/2.1.1/ossutil-2.1.1-linux-amd
 
 # 安装蚂蚁内部的decord2, 社区的解码会夯死
 ARG DECORD2_WHL_URL='http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/decord2_fix/decord2-2.1.0-cp312-cp312-manylinux_2_28_x86_64.whl'
-RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-cache-dir ${DECORD2_WHL_URL}
-RUN pip3 install --force-reinstall --no-cache-dir numpy==1.26.4
+RUN pip3 uninstall -y decord2; pip3 install --force-reinstall --no-deps --no-cache-dir ${DECORD2_WHL_URL}
 
 # 安装jq和ffmpeg
 RUN apt-get update && apt-get install -y jq ffmpeg && rm -rf /var/lib/apt/lists/* && apt-get clean
