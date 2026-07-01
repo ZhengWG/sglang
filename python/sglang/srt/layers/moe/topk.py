@@ -24,6 +24,7 @@ from typing import (
     NamedTuple,
     Optional,
     Protocol,
+    Tuple,
     TypeGuard,
     runtime_checkable,
 )
@@ -176,11 +177,6 @@ if _is_cuda:
 
     except ImportError:
         fused_topk_deepseek = None
-
-    try:
-        from sgl_kernel import kimi_k2_moe_fused_gate
-    except ImportError as e:
-        pass
 
 if _is_cuda or _is_hip or _is_xpu:
     from sgl_kernel import topk_softmax
@@ -1033,7 +1029,7 @@ def biased_topk_jit_kernel_impl(
     num_token_non_padded: Optional[torch.Tensor] = None,
     expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
     apply_routed_scaling_factor_on_output: Optional[bool] = False,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
     if _use_aiter and scoring_func == "sqrtsoftplus" and num_fused_shared_experts == 0:
@@ -1373,32 +1369,45 @@ def _biased_grouped_topk_ungrouped(
     num_rows = gating_output.shape[0]
     num_experts = gating_output.shape[1]
     routed_topk = topk - num_fused_shared_experts
+    routed_scaling = (
+        routed_scaling_factor if routed_scaling_factor is not None else 1.0
+    )
 
-    gate_kernel = kimi_k2_moe_fused_gate
-    gate_input = gating_output.to(dtype=torch.float32)
-    gate_bias = correction_bias.to(dtype=torch.float32)
+    use_jit_bf16_gate = False
     if _SGLANG_EXPERIMENTAL_LORA_OPTI:
         from sglang.srt.lora.trtllm_lora_temp.environ import lora_envs
 
-        if (
+        use_jit_bf16_gate = (
             lora_envs.SGLANG_OPT_USE_JIT_KERNEL_KIMI_GATE.get()
             and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
-        ):
-            from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
-                kimi_k2_moe_fused_gate as _jit_kimi_k2_moe_fused_gate,
-            )
+            and routed_topk <= 8
+        )
 
-            # The JIT gate widens bf16/fp16 inside the kernel, avoiding host upcasts.
-            gate_kernel = _jit_kimi_k2_moe_fused_gate
-            gate_input = gating_output
-            gate_bias = correction_bias
+    if not use_jit_bf16_gate:
+        from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_gate
 
+        return jit_gate(
+            gating_output.to(dtype=torch.float32),
+            correction_bias.to(dtype=torch.float32),
+            topk=topk,
+            scoring_func="sigmoid",
+            num_fused_shared_experts=num_fused_shared_experts,
+            renormalize=renormalize,
+            routed_scaling_factor=routed_scaling,
+            apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+        )
+
+    from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
+        kimi_k2_moe_fused_gate as gate_kernel,
+    )
+
+    # The JIT gate widens bf16/fp16 inside the kernel, avoiding host upcasts.
     output, indices = gate_kernel(
-        gate_input,
-        gate_bias,
+        gating_output,
+        correction_bias,
         topk=routed_topk,
         renormalize=renormalize,
-        routed_scaling_factor=routed_scaling_factor,
+        routed_scaling_factor=routed_scaling,
         apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
     )
 
@@ -1417,8 +1426,9 @@ def _biased_grouped_topk_ungrouped(
         output = new_output
         indices = new_indices
 
-        sf = routed_scaling_factor if routed_scaling_factor is not None else 1.0
-        output[:, routed_topk:] = output[:, :routed_topk].sum(dim=-1, keepdim=True) / sf
+        output[:, routed_topk:] = (
+            output[:, :routed_topk].sum(dim=-1, keepdim=True) / routed_scaling
+        )
         indices[:, routed_topk:] = torch.randint(
             low=num_experts,
             high=num_experts + num_fused_shared_experts,
@@ -1441,8 +1451,7 @@ def biased_grouped_topk_gpu(
     num_fused_shared_experts: int = 0,
     routed_scaling_factor: Optional[float] = None,
     apply_routed_scaling_factor_on_output: Optional[bool] = False,
-):
-
+) -> Tuple[torch.Tensor, torch.Tensor]:
     num_tokens = gating_output.shape[0]
     num_experts = gating_output.shape[1]
     experts_per_group = (
@@ -1559,6 +1568,7 @@ def biased_grouped_topk_gpu(
             True,
             apply_routed_scaling_factor_on_output,
         )
+        return topk_weights, topk_ids
     else:
         # Use optimized path for Kimi K2 (384) and MiMo V2 Flash (256)
         # with num_expert_group=1.
@@ -1567,7 +1577,6 @@ def biased_grouped_topk_gpu(
             _is_cuda
             and num_experts in (256, 384)
             and num_expert_group == 1
-            and topk_routed <= 8
         ):
             return _biased_grouped_topk_ungrouped(
                 gating_output,
