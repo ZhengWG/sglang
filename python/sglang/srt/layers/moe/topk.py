@@ -1357,89 +1357,6 @@ def _biased_grouped_topk_postprocess(
     return topk_ids
 
 
-def _biased_grouped_topk_ungrouped(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    num_fused_shared_experts: int,
-    routed_scaling_factor: Optional[float],
-    apply_routed_scaling_factor_on_output: Optional[bool],
-):
-    num_rows = gating_output.shape[0]
-    num_experts = gating_output.shape[1]
-    routed_topk = topk - num_fused_shared_experts
-    routed_scaling = (
-        routed_scaling_factor if routed_scaling_factor is not None else 1.0
-    )
-
-    use_jit_bf16_gate = False
-    if _SGLANG_EXPERIMENTAL_LORA_OPTI:
-        from sglang.srt.lora.trtllm_lora_temp.environ import lora_envs
-
-        use_jit_bf16_gate = (
-            lora_envs.SGLANG_OPT_USE_JIT_KERNEL_KIMI_GATE.get()
-            and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
-            and routed_topk <= 8
-        )
-
-    if not use_jit_bf16_gate:
-        from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_gate
-
-        return jit_gate(
-            gating_output.to(dtype=torch.float32),
-            correction_bias.to(dtype=torch.float32),
-            topk=topk,
-            scoring_func="sigmoid",
-            num_fused_shared_experts=num_fused_shared_experts,
-            renormalize=renormalize,
-            routed_scaling_factor=routed_scaling,
-            apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
-        )
-
-    from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
-        kimi_k2_moe_fused_gate as gate_kernel,
-    )
-
-    # The JIT gate widens bf16/fp16 inside the kernel, avoiding host upcasts.
-    output, indices = gate_kernel(
-        gating_output,
-        correction_bias,
-        topk=routed_topk,
-        renormalize=renormalize,
-        routed_scaling_factor=routed_scaling,
-        apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
-    )
-
-    # Fill shared expert slots in-place (no cat needed).
-    # Shared expert weight = sum(routed_weights) / routed_scaling_factor.
-    # After kernel renormalization, sum(routed) = 1.0 (or *= rsf when
-    # apply_routed_scaling_factor_on_output is True), so shared weight equals
-    # 1/sf (or rsf/sf = 1.0), matching biased_grouped_topk_impl's semantics.
-    if num_fused_shared_experts > 0:
-        # Pre-allocate full-size tensors (routed + shared expert slots)
-        # Kernel uses output.size(1) as row stride, only fills first routed_topk columns
-        new_output = output.new_empty((num_rows, topk))
-        new_indices = indices.new_empty((num_rows, topk))
-        new_output[:, :routed_topk] = output
-        new_indices[:, :routed_topk] = indices
-        output = new_output
-        indices = new_indices
-
-        output[:, routed_topk:] = (
-            output[:, :routed_topk].sum(dim=-1, keepdim=True) / routed_scaling
-        )
-        indices[:, routed_topk:] = torch.randint(
-            low=num_experts,
-            high=num_experts + num_fused_shared_experts,
-            size=(num_rows, num_fused_shared_experts),
-            dtype=torch.int32,
-            device=gating_output.device,
-        )
-
-    return output, indices
-
-
 def biased_grouped_topk_gpu(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -1570,22 +1487,50 @@ def biased_grouped_topk_gpu(
         )
         return topk_weights, topk_ids
     else:
-        # Use optimized path for Kimi K2 (384) and MiMo V2 Flash (256)
-        # with num_expert_group=1.
         num_experts = gating_output.shape[1]
         if (
             _is_cuda
             and num_experts in (256, 384)
             and num_expert_group == 1
         ):
-            return _biased_grouped_topk_ungrouped(
-                gating_output,
+            # ===== TO BE REFACTORED ====
+            _use_jit_bf16_gate = False
+            if _SGLANG_EXPERIMENTAL_LORA_OPTI:
+                from sglang.srt.lora.trtllm_lora_temp.environ import lora_envs
+
+                _use_jit_bf16_gate = (
+                    lora_envs.SGLANG_OPT_USE_JIT_KERNEL_KIMI_GATE.get()
+                    and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
+                    and topk <= 8
+                )
+            if _use_jit_bf16_gate:
+                from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
+                    kimi_k2_moe_fused_gate as _kimi_k2_moe_fused_gate,
+                )
+
+                # bf16 pass-through: skip the two host-side fp32 upcast kernels.
+                return _kimi_k2_moe_fused_gate(
+                    gating_output,
+                    correction_bias,
+                    topk=topk,
+                    renormalize=renormalize,
+                    routed_scaling_factor=routed_scaling_factor,
+                    apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+                )
+            # ===== END TO BE REFACTORED ====
+            from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_gate
+
+            return jit_gate(
+                gating_output.to(dtype=torch.float32),
                 correction_bias,
-                topk,
-                renormalize,
-                num_fused_shared_experts,
-                routed_scaling_factor,
-                apply_routed_scaling_factor_on_output,
+                topk=topk,
+                scoring_func="sigmoid",
+                num_fused_shared_experts=num_fused_shared_experts,
+                renormalize=renormalize,
+                routed_scaling_factor=(
+                    routed_scaling_factor if routed_scaling_factor is not None else 1.0
+                ),
+                apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
             )
         elif (
             _is_cuda
