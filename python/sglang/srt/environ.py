@@ -233,6 +233,12 @@ class Envs:
     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
     SGLANG_ASYNC_MODEL_MOUNT = EnvBool(False)
 
+    # HTTP server
+    # Decompress request bodies tagged with `x-body-compressed`.
+    SGLANG_ENABLE_REQUEST_DECOMPRESSION = EnvBool(False)
+    # Override parsed request fields from headers.
+    SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES = EnvBool(False)
+
     # Logging Options
     SGLANG_LOG_GC = EnvBool(False)
     SGLANG_LOG_FORWARD_ITERS = EnvBool(False)
