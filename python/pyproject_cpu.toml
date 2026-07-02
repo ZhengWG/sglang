@@ -50,6 +50,7 @@ dependencies = [
   "pybase64",
   "pydantic",
   "python-multipart",
+  "pytest",
   "pyzmq>=25.1.2",
   "requests",
   "scipy",
@@ -70,6 +71,7 @@ dependencies = [
   "uvicorn",
   "uvloop",
   "xgrammar==0.2.1",
+  "zstandard",
   "opentelemetry-sdk>=1.26.0", # required by tracing
   "opentelemetry-api>=1.26.0", # required by tracing
   "opentelemetry-exporter-otlp>=1.26.0", # required by tracing
@@ -104,7 +106,6 @@ test = [
   "matplotlib",
   "pandas",
   "peft>=0.18.0",
-  "pytest",
   "sentence_transformers",
 ]
 all = []
