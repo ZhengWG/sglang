@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBackendBase
 from sglang.srt.layers.attention.linear.kernels.kda_triton import TritonKDAKernel
 from sglang.srt.layers.attention.linear.utils import (
@@ -230,6 +231,20 @@ class KDAAttnBackend(MambaAttnBackendBase):
         decode_backend = get_linear_attn_decode_backend()
         prefill_backend = get_linear_attn_prefill_backend()
         self.kernel_dispatcher = KDAKernelDispatcher(decode_backend, prefill_backend)
+        # Fused conv1d + gating-delta-rule chain-verify (MTP topk==1) fast
+        # path. Opt-in and KDA-only: no shared conv/GDN kernel is modified,
+        # and every unsupported case (tree, width != 4, T < 3) falls through
+        # to the reference two-kernel path below.
+        self._fused_chain_verify_fn = None
+        if envs.SGLANG_OPT_FUSED_KDA_VERIFY.get() and getattr(
+            self.kernel_dispatcher.decode_kernel, "supports_fused_chain_verify", False
+        ):
+            from sglang.srt.layers.attention.fla.fused_kda_conv_recurrent_verify import (
+                fused_kda_conv_gating_verify,
+            )
+
+            self._fused_chain_verify_fn = fused_kda_conv_gating_verify
+            rank0_log("KDA fused chain-verify kernel enabled (topk==1 path).")
         max_verify_batch_size = model_runner.max_running_requests
         # These target_verify helpers are indexed by batch position, not mamba slot id.
         self.verify_has_initial_state = torch.ones(
@@ -428,6 +443,43 @@ class KDAAttnBackend(MambaAttnBackendBase):
             retrieve_next_token = self.forward_metadata.retrieve_next_token
             retrieve_next_sibling = self.forward_metadata.retrieve_next_sibling
             retrieve_parent_token = self.forward_metadata.retrieve_parent_token
+
+            # Fused chain-verify fast path: one kernel replaces the
+            # transpose-copy + conv1d + transpose-copy + recurrence sequence.
+            # Chain (topk==1) only — retrieve_* are None there; the tree path
+            # and any unsupported shape keep the reference kernels.
+            if (
+                self._fused_chain_verify_fn is not None
+                and retrieve_next_token is None
+                and isinstance(mixed_qkv, torch.Tensor)
+                and layer.conv_weights.shape[-1] == 4
+                and draft_token_num >= 3
+            ):
+                return self._fused_chain_verify_fn(
+                    mixed_qkv=mixed_qkv,
+                    conv_weight=layer.conv_weights,
+                    conv_bias=layer.bias,
+                    conv_state=conv_states,
+                    conv_state_indices=conv_state_indices,
+                    intermediate_conv_window=(
+                        intermediate_conv_window_cache.transpose(-1, -2)
+                    ),
+                    intermediate_state_indices=intermediate_state_indices[:batch_size],
+                    a=a,
+                    b=b,
+                    A_log=layer.A_log,
+                    dt_bias=layer.dt_bias,
+                    ssm_states=ssm_states,
+                    cache_indices=conv_state_indices,
+                    intermediate_states_buffer=intermediate_state_cache,
+                    scale=layer.head_k_dim**-0.5,
+                    T=draft_token_num,
+                    num_q_heads=layer.q_dim // layer.head_q_dim,
+                    num_v_heads=layer.num_v_heads,
+                    head_k_dim=layer.head_k_dim,
+                    head_v_dim=layer.head_v_dim,
+                    lower_bound=getattr(layer, "lower_bound", None),
+                )
 
             # Reshape mixed_qkv: (seq_len, dim) -> (batch_size, dim, draft_token_num)
             mixed_qkv_reshaped = mixed_qkv.reshape(

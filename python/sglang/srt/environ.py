@@ -761,6 +761,9 @@ class Envs:
     # Mamba
     SGLANG_MAMBA_CONV_DTYPE = EnvStr("bfloat16")
     SGLANG_MAMBA_SSM_DTYPE = EnvStr(None)
+    # Fuse KDA conv1d + gating-delta-rule into one kernel on the MTP
+    # target-verify chain path (speculative_eagle_topk == 1). Experimental.
+    SGLANG_OPT_FUSED_KDA_VERIFY = EnvBool(False)
 
     # Unified Radix Tree
     SGLANG_ENABLE_UNIFIED_RADIX_TREE = EnvBool(False)
