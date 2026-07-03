@@ -1555,11 +1555,7 @@ def biased_grouped_topk_gpu(
         return topk_weights, topk_ids
     else:
         num_experts = gating_output.shape[1]
-        if (
-            _is_cuda
-            and num_experts in (256, 384)
-            and num_expert_group == 1
-        ):
+        if _is_cuda and num_experts == 384 and num_expert_group == 1:
             # ===== TO BE REFACTORED ====
             _use_jit_bf16_gate = False
             if _SGLANG_EXPERIMENTAL_LORA_OPTI:
@@ -1568,7 +1564,6 @@ def biased_grouped_topk_gpu(
                 _use_jit_bf16_gate = (
                     lora_envs.SGLANG_OPT_USE_JIT_KERNEL_KIMI_GATE.get()
                     and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
-                    and topk <= 8
                 )
             if _use_jit_bf16_gate:
                 from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
