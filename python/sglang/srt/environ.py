@@ -24,35 +24,6 @@ def _default_hip() -> bool:
         return False
 
 
-@contextmanager
-def temp_set_env(*, allow_sglang: bool = False, **env_vars: Any):
-    """Temporarily set environment variables, restoring originals on exit.
-
-    By default, SGLANG_*/SGL_* keys are rejected — use ``Envs`` descriptors
-    for those.  Pass ``allow_sglang=True`` only for special env vars that
-    intentionally bypass ``environ.py``.
-    """
-    if not allow_sglang:
-        for key in env_vars:
-            if key.startswith("SGLANG_") or key.startswith("SGL_"):
-                raise ValueError("temp_set_env should not be used for sglang env vars")
-
-    backup = {key: os.environ.get(key) for key in env_vars}
-    try:
-        for key, value in env_vars.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = str(value)
-        yield
-    finally:
-        for key, value in backup.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
 class EnvField:
     _allow_set_name = True
 
@@ -216,7 +187,6 @@ class ToolStrictLevel(IntEnum):
 
 
 class Envs:
-    # fmt: off
 
     # Model & File Download
     SGLANG_USE_MODELSCOPE = EnvBool(False)
@@ -321,7 +291,7 @@ class Envs:
     # Scheduler: memory leak test
     SGLANG_TEST_RETRACT = EnvBool(False)
     SGLANG_TEST_RETRACT_INTERVAL = EnvInt(3)
-    SGLANG_TEST_RETRACT_NO_PREFILL_BS = EnvInt(2 ** 31)
+    SGLANG_TEST_RETRACT_NO_PREFILL_BS = EnvInt(2**31)
     # Scheduler: force lazy extra_buffer prealloc to fail at decode boundaries
     SGLANG_TEST_MAMBA_LAZY_ALLOC_FAIL = EnvBool(False)
     # KL tests: skip the cache-hit count assertion (e.g. when alloc failure reduces hits)
@@ -363,7 +333,8 @@ class Envs:
     SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK = EnvBool(False)
 
     # Scheduler: others:
-    SGLANG_EMPTY_CACHE_INTERVAL = EnvFloat(-1)  # in seconds. Set if you observe high memory accumulation over a long serving period.
+    # in seconds. Set if you observe high memory accumulation over a long serving period.
+    SGLANG_EMPTY_CACHE_INTERVAL = EnvFloat(-1)
     SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP = EnvBool(False)
     # Force-enable the WAR (write-after-read) barrier for the overlap scheduler
     # even when is_cuda() is False (e.g. AMD/ROCm). On CUDA the barrier is
@@ -567,7 +538,7 @@ class Envs:
     # fine-grained opt switch reads False, keeping non-experimental paths byte-identical.
     SGLANG_EXPERIMENTAL_LORA_OPTI = EnvBool(False)
     # Quantize x to int8 in the dispatch operator
-    DEEP_NORMAL_MODE_USE_INT8_QUANT = EnvBool(False) # This argument is deprecated
+    DEEP_NORMAL_MODE_USE_INT8_QUANT = EnvBool(False)  # This argument is deprecated
     SGLANG_NPU_FUSED_MOE_MODE = EnvInt(1)
 
     # MTHREADS & MUSA
@@ -639,7 +610,7 @@ class Envs:
     SGLANG_MAX_KV_CHUNK_CAPACITY = EnvInt(128 * 1024)
 
     # DeepEP
-    SGLANG_DEEPEP_BF16_DISPATCH = EnvBool(False) # This argument is deprecated
+    SGLANG_DEEPEP_BF16_DISPATCH = EnvBool(False)  # This argument is deprecated
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(128)
     SGLANG_DEEPEP_LL_COMBINE_SEND_NUM_SMS = EnvInt(32)
     SGLANG_BLACKWELL_OVERLAP_SHARED_EXPERTS_OUTSIDE_SBO = EnvBool(False)
@@ -652,7 +623,9 @@ class Envs:
     SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(128)
 
     # DSA Backend (canonical names; fall back to SGLANG_NSA_* with deprecation warning)
-    SGLANG_DSA_FUSE_TOPK = EnvBoolWithAlias(True, deprecated_name="SGLANG_NSA_FUSE_TOPK")
+    SGLANG_DSA_FUSE_TOPK = EnvBoolWithAlias(
+        True, deprecated_name="SGLANG_NSA_FUSE_TOPK"
+    )
     SGLANG_DSA_TOPK_FLASHINFER_DETERMINISTIC = EnvBool(False)
     SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK = EnvStr(None)
     SGLANG_DSA_ENABLE_MTP_PRECOMPUTE_METADATA = EnvBoolWithAlias(
@@ -751,7 +724,6 @@ class Envs:
     # Multimodal preprocess (tokenizer process): exit after N CUDA OOMs; 0 disables.
     SGLANG_MM_CUDA_OOM_RESTART_THRESHOLD = EnvInt(0)
 
-
     # VLM Item CUDA IPC Transport
     SGLANG_USE_CUDA_IPC_TRANSPORT = EnvBool(False)
     SGLANG_USE_IPC_POOL_HANDLE_CACHE = EnvBool(False)
@@ -793,7 +765,9 @@ class Envs:
     SGLANG_NGRAM_FORCE_GREEDY_VERIFY = EnvBool(False)
 
     # Warmup
-    SGLANG_WARMUP_TIMEOUT = EnvFloat(-1) # in seconds. If a warmup forward batch takes longer than this, the server will crash to prevent hanging. Recommend to increase warmup timeout to 1800 to accommodate some kernel JIT precache e.g. deep gemm
+    # in seconds. If a warmup forward batch takes longer than this, the server will crash to prevent hanging.
+    # Recommend to increase warmup timeout to 1800 to accommodate some kernel JIT precache e.g. deep gemm
+    SGLANG_WARMUP_TIMEOUT = EnvFloat(-1)
 
     # HTTP Server
     SGLANG_TIMEOUT_KEEP_ALIVE = EnvInt(5)
@@ -970,8 +944,6 @@ class Envs:
 
     # RFork
     SGLANG_RFORK_ENABLED = EnvBool(False)
-
-    # fmt: on
 
     # EPD
     SGLANG_ENCODER_RECV_TIMEOUT = EnvFloat(180.0)
