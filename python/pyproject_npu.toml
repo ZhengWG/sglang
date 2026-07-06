@@ -96,6 +96,7 @@ tracing = [
 
 test = [
   "accelerate",
+  "pymupdf",
   "expecttest",
   "gguf",
   "jsonlines",

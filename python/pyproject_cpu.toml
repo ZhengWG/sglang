@@ -101,6 +101,7 @@ diffusion = [
 
 test = [
   "accelerate",
+  "pymupdf",
   "expecttest",
   "jsonlines",
   "matplotlib",
