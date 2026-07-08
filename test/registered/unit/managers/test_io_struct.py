@@ -5,6 +5,7 @@ from array import array
 
 from sglang.srt.managers.io_struct import (
     BatchTokenIDOutput,
+    EmbeddingReqInput,
     GenerateReqInput,
     GetLoadsReqInput,
 )
@@ -716,6 +717,26 @@ class TestGenerateReqInputNormalization(CustomTestCase):
         req = GenerateReqInput(input_embeds=[[0.1, 0.2]])
         req.normalize_batch_and_arguments()
         self.assertTrue(req.is_single)
+
+
+class TestEmbeddingReqInputNormalization(CustomTestCase):
+    """Test the normalization of EmbeddingReqInput."""
+
+    def test_batch_string_rid_expands_to_per_item_rids(self):
+        req = EmbeddingReqInput(text=["Hello", "World"], rid="trace_abc")
+
+        req.normalize_batch_and_arguments()
+
+        self.assertFalse(req.is_single)
+        self.assertEqual(req.rid, ["trace_abc_0", "trace_abc_1"])
+        self.assertEqual(req[0].rid, "trace_abc_0")
+        self.assertEqual(req[1].rid, "trace_abc_1")
+
+    def test_batch_list_rid_still_requires_unique_values(self):
+        req = EmbeddingReqInput(text=["Hello", "World"], rid=["dup", "dup"])
+
+        with self.assertRaisesRegex(ValueError, "Duplicate request IDs"):
+            req.normalize_batch_and_arguments()
 
 
 if __name__ == "__main__":
