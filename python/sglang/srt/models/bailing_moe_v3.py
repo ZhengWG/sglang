@@ -76,8 +76,7 @@ from sglang.srt.models.deepseek_common.utils import (
 )
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
-from sglang.srt.runtime_context import get_parallel
-from sglang.srt.server_args import get_global_server_args
+from sglang.srt.runtime_context import get_parallel, get_server_args, get_stream
 from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
@@ -1236,7 +1235,7 @@ class BailingMoELinearModel(nn.Module):
         else:
             self.word_embeddings = PPMissingLayer()
 
-        self.alt_stream = torch.cuda.Stream() if _is_cuda else None
+        self.alt_stream = get_stream("alt") if _is_cuda else None
 
         def layer_fn(idx, prefix):
             layer_idx = idx
@@ -1363,7 +1362,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     config.hidden_size,
                     params_dtype=torch.float32,
                     quant_config=quant_config,
-                    use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
+                    use_attn_tp_group=get_server_args().enable_dp_lm_head,
                 )
             )
             self.logits_processor = LogitsProcessor(config)
@@ -1401,7 +1400,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
           moe_intermediate_size * num_shared_experts which would NOT be compatible with fusion.
         """
         self.num_fused_shared_experts = 0
-        if get_global_server_args().disable_shared_experts_fusion:
+        if get_server_args().disable_shared_experts_fusion:
             return
 
         num_shared_experts = getattr(self.config, "num_shared_experts", 0)
@@ -1487,7 +1486,12 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         )
 
         if disable_reason is not None:
-            get_global_server_args().disable_shared_experts_fusion = True
+            from sglang.srt.arg_groups.overrides import declare_load_time_override
+
+            declare_load_time_override(
+                "BailingMoeV3ForCausalLM.determine_num_fused_shared_experts",
+                {"disable_shared_experts_fusion": True},
+            )
             self.num_fused_shared_experts = 0
             log_info_on_rank0(
                 logger,
