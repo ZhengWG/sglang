@@ -39,8 +39,6 @@ opentelemetry_initialized = False
 _trace_context_propagator = None
 tracer: Optional[trace.Tracer] = None
 
-global_trace_level = get_int_env_var("SGLANG_TRACE_LEVEL", 1)
-
 NORMAL_TRACE_LEVEL = 1
 ENHANCED_TRACE_LEVEL = 2
 APP_NAME = 'sglang'
@@ -100,9 +98,19 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Optional[Dict]:
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
+def get_global_trace_level() -> int:
+    from sglang.srt.runtime_context import get_resources
+
+    resources = get_resources()
+    if resources.trace_level is None:
+        resources.trace_level = get_int_env_var("SGLANG_TRACE_LEVEL", 1)
+    return resources.trace_level
+
+
 def set_global_trace_level(level: int):
-    global global_trace_level
-    global_trace_level = level
+    from sglang.srt.runtime_context import get_resources
+
+    get_resources().trace_level = level
 
 
 @dataclass
@@ -339,7 +347,7 @@ class TraceReqContext:
         external_trace_header: Optional[Dict[str, str]] = None,
     ):
         self.rid: str = str(rid)
-        self.trace_level = global_trace_level
+        self.trace_level = get_global_trace_level()
         self.tracing_enable: bool = opentelemetry_initialized and self.trace_level > 0
 
         # Filter by --trace-modules only for explicitly named modules; contexts

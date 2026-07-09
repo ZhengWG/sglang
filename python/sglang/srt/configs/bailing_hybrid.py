@@ -26,6 +26,7 @@ from sglang.srt.configs.mamba_utils import (
     Mamba2CacheParams,
     Mamba2StateShape,
 )
+from sglang.srt.runtime_context import get_parallel
 
 logger = logging.get_logger(__name__)
 
@@ -199,11 +200,10 @@ class BailingHybridConfig(PretrainedConfig):
 
     @property
     def mamba2_cache_params(self) -> Union[KimiLinearCacheParams, Mamba2CacheParams]:
-        from sglang.srt.layers.dp_attention import get_attention_tp_size
 
         if self.use_kda:
             shape = KimiLinearStateShape.create(
-                tp_world_size=get_attention_tp_size(),
+                tp_world_size=get_parallel().attn_tp_size,
                 num_heads=self.num_attention_heads,  # tptest v_heads?
                 head_dim=self.head_dim,
                 conv_kernel_size=self.short_conv_kernel_size,
@@ -212,7 +212,7 @@ class BailingHybridConfig(PretrainedConfig):
             return KimiLinearCacheParams(shape=shape, layers=self.linear_layer_ids)
         else:
             shape = Mamba2StateShape.create(
-                tp_world_size=get_attention_tp_size(),
+                tp_world_size=get_parallel().attn_tp_size,
                 intermediate_size=0,
                 n_groups=0,
                 num_heads=self.num_linear_key_value_heads,
