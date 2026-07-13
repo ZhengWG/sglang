@@ -203,14 +203,15 @@ ARG SGLANG_KERNEL_WHL_URL
 ARG SGLANG_WHL_URL
 ARG SGLANG_KERNEL_CURRENT_WHL
 ARG SGLANG_CURRENT_WHL
+ARG RUSTUP_DIST_MIRROR
 
 WORKDIR /sgl-workspace
 
 # Rust toolchain for setuptools-rust extensions (e.g. sglang-grpc).
 # Requires >= 1.85 (edition 2024). Inherited by framework via FROM torch_deps.
 ENV PATH="/root/.cargo/bin:${PATH}"
-ENV RUSTUP_UPDATE_ROOT="https://mirrors.ustc.edu.cn/rust-static/rustup"
-ENV RUSTUP_DIST_SERVER="https://mirrors.ustc.edu.cn/rust-static"
+ENV RUSTUP_UPDATE_ROOT="${RUSTUP_DIST_MIRROR}/rustup"
+ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_MIRROR}"
 
 RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
         | sh -s -- -y --no-modify-path --profile minimal \
@@ -476,6 +477,7 @@ ARG GITHUB_ARTIFACTORY
 ARG BRANCH_TYPE
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
+ARG RUSTUP_DIST_MIRROR
 
 WORKDIR /build
 
@@ -484,8 +486,8 @@ COPY sgl-model-gateway /build/sgl-model-gateway
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 # Install Rust, build gateway binary and Python bindings, then clean up Rust toolchain
-ENV RUSTUP_UPDATE_ROOT="https://mirrors.ustc.edu.cn/rust-static/rustup"
-ENV RUSTUP_DIST_SERVER="https://mirrors.ustc.edu.cn/rust-static"
+ENV RUSTUP_UPDATE_ROOT="${RUSTUP_DIST_MIRROR}/rustup"
+ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_MIRROR}"
 
 RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
         | sh -s -- -y \
