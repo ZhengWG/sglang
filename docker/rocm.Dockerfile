@@ -307,7 +307,7 @@ RUN git clone ${SGL_REPO} \
 RUN python -m pip cache purge
 
 # Copy config files to support MI300X in virtualized environments (MI300X_VF).  Symlinks will not be created in image build.
-RUN find /sgl-workspace/sglang/python/sglang/srt/layers/quantization/configs/ \
+RUN find /sgl-workspace/sglang/python/sglang/kernels/ops/quantization/configs/ \
          /sgl-workspace/sglang/python/sglang/srt/layers/moe/fused_moe_triton/configs/ \
          -type f -name '*MI300X*' | xargs -I {} sh -c 'vf_config=$(echo "$1" | sed "s/MI300X/MI300X_VF/"); cp "$1" "$vf_config"' -- {}
 
