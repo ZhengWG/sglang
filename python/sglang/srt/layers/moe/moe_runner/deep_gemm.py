@@ -241,7 +241,7 @@ class DeepGemmRunnerCore(MoeRunnerCore):
         dispose_tensor(hidden_states_scale)
 
         if self.config.gemm1_clamp_limit is not None:
-            from sglang.srt.layers.quantization.fp8_kernel import (
+            from sglang.kernels.ops.quantization.fp8_kernel import (
                 sglang_per_token_group_quant_fp8,
             )
 
