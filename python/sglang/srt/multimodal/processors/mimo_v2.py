@@ -16,6 +16,7 @@ import numpy as np
 import requests
 import torch
 import torch.nn.functional as F
+from decord import VideoReader
 from fastapi import HTTPException
 from PIL import Image
 from torchcodec.decoders import AudioDecoder
@@ -219,12 +220,31 @@ _QWEN2VL_PIXEL_STD = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
 _mean_std_cache = {}
 
 
-def _decode_frames_and_timestamps(vdw, ele):
+def _decode_frames_and_timestamps(video, ele, temporal_factor):
     # Shared E/D frame-sampling recipe: smart_nframes + linspace + permute.
-    total_frames, video_fps = len(vdw), vdw.avg_fps
-    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    is_decord = isinstance(video, VideoReader)
+    total_frames = len(video)
+    video_fps = video.get_avg_fps() if is_decord else video.avg_fps
+
+    sampling_kwargs = {k: v for k, v in ele.items() if v is not None}
+    if "num_frames" in sampling_kwargs:
+        sampling_kwargs.pop("fps", None)
+        sampling_kwargs["nframes"] = sampling_kwargs.pop("num_frames")
+    nframes = smart_nframes(
+        sampling_kwargs,
+        total_frames=total_frames,
+        temporal_factor=temporal_factor,
+        video_fps=video_fps,
+        default_fps=sampling_kwargs.get("fps", 2),
+        default_fps_min_frames=sampling_kwargs.get("min_frames", 8),
+        default_fps_max_frames=sampling_kwargs.get("max_frames", 256),
+    )
     idx = list(np.unique(np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)))
-    video_tensor = vdw.get_frames_as_tensor(idx).permute(0, 3, 1, 2).float()
+    if is_decord:
+        video_tensor = torch.from_numpy(video.get_batch(idx).asnumpy()).pin_memory()
+    else:
+        video_tensor = video.get_frames_as_tensor(idx)
+    video_tensor = video_tensor.permute(0, 3, 1, 2).float()
     timestamps = torch.as_tensor(idx, dtype=torch.float32) / video_fps
     return video_tensor, timestamps
 
@@ -532,7 +552,9 @@ class MiMoProcessor:
         )
         try:
             video_tuple = _decode_frames_and_timestamps(
-                vdw, self.default_video_processor_kwargs
+                vdw,
+                self.default_video_processor_kwargs,
+                temporal_factor=self.temporal_patch_size,
             )
         finally:
             if hasattr(vdw, "close"):
@@ -1662,7 +1684,11 @@ class MiMoV2Processor(BaseMultimodalProcessor):
         }
         ele = {**default_kwargs, **(preprocess_kwargs or {})}
         try:
-            return _decode_frames_and_timestamps(vdw, ele)
+            return _decode_frames_and_timestamps(
+                vdw,
+                ele,
+                temporal_factor=self.mimo_processor.temporal_patch_size,
+            )
         except Exception as e:
             logger.error(f"Video decode failed in _preprocess_video_sync: {e}")
             raise HTTPException(
