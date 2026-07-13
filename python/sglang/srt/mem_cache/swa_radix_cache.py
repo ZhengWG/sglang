@@ -42,6 +42,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+from sglang.srt.mem_cache.common import free_swa_out_of_window_slots
 from sglang.srt.mem_cache.events import KVCacheEventMixin
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.utils import split_node_hash_value
@@ -517,6 +518,19 @@ class SWARadixCache(KVCacheEventMixin, BasePrefixCache):
             return
 
         token_ids = req.get_fill_ids()
+
+        insert_swa_evicted_seqlen = 0
+        if envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.get():
+            free_swa_out_of_window_slots(
+                req,
+                len(token_ids) - 1,
+                sliding_window_size=self.sliding_window_size,
+                page_size=self.page_size,
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+            )
+            insert_swa_evicted_seqlen = req.swa_evicted_seqlen
+
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
@@ -534,6 +548,7 @@ class SWARadixCache(KVCacheEventMixin, BasePrefixCache):
                 key=radix_key,
                 value=values,
                 prev_prefix_len=old_prefix_len,
+                swa_evicted_seqlen=insert_swa_evicted_seqlen,
             )
         )
         new_prefix_len = result.prefix_len

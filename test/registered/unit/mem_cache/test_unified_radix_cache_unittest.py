@@ -1765,7 +1765,7 @@ class UnifiedRadixCacheSuite:
 
         swa_avail_before = allocator.swa_attn_allocator.available_size()
 
-        with envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
+        with envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
             cache.cache_unfinished_req(req)
 
         cushion = max(self.cfg.sliding_window_size, self.cfg.page_size)
@@ -1815,7 +1815,7 @@ class UnifiedRadixCacheSuite:
         req.extra_key = None
         req.swa_evicted_seqlen = 0
 
-        with envs.SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
+        with envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
             cache.cache_unfinished_req(req)
 
         self.assertEqual(

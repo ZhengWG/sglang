@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.allocator.swa import SWATokenToKVPoolAllocator
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -115,6 +116,8 @@ def _make_req(req_pool_idx, token_ids, cache_protected_len, tree):
         _kv_committed_len=len(token_ids),
     )
     req.pop_committed_kv_cache = lambda: req._kv_committed_len
+    req.get_fill_ids = lambda: req.origin_input_ids + req.output_ids
+    req.extend_range = SimpleNamespace(end=len(token_ids))
     return req
 
 
@@ -236,6 +239,75 @@ class TestSWAEvictionBoundary(unittest.TestCase):
         ScheduleBatch._evict_swa(batch, req, seq_len - 1)
 
         self.assertEqual(req.swa_evicted_seqlen, 0)
+
+    # -- Proactive eviction while caching an unfinished request --
+
+    def test_proactive_eviction_on_unfinished_req(self):
+        page_size, window, seq_len = 1, 4, 20
+        tree, allocator, pool = _build_swa_tree(
+            page_size=page_size, sliding_window_size=window
+        )
+        kv = _swa_alloc(allocator, seq_len)
+        pool.write((0, slice(0, seq_len)), kv)
+        req = _make_req(0, list(range(seq_len)), 0, tree)
+        swa_available_before = allocator.swa_available_size()
+
+        with envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
+            tree.cache_unfinished_req(req, chunked=True)
+
+        expected_evicted = seq_len - 1 - max(window, page_size)
+        self.assertEqual(req.swa_evicted_seqlen, expected_evicted)
+        self.assertGreaterEqual(
+            allocator.swa_available_size() - swa_available_before,
+            expected_evicted,
+        )
+        self.assertEqual(req.cache_protected_len, seq_len)
+        tree.sanity_check()
+
+    def test_proactive_eviction_on_unfinished_req_page_gt_window(self):
+        page_size, window, seq_len = 8, 2, 25
+        tree, allocator, pool = _build_swa_tree(
+            page_size=page_size, sliding_window_size=window
+        )
+        alloc_size = (seq_len + page_size - 1) // page_size * page_size
+        kv = _swa_alloc(allocator, alloc_size)
+        pool.write((0, slice(0, alloc_size)), kv)
+        req = _make_req(0, list(range(seq_len)), 0, tree)
+        swa_available_before = allocator.swa_available_size()
+
+        with envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.override(True):
+            tree.cache_unfinished_req(req, chunked=True)
+
+        expected_evicted = 16
+        self.assertEqual(req.swa_evicted_seqlen, expected_evicted)
+        self.assertGreaterEqual(
+            allocator.swa_available_size() - swa_available_before,
+            expected_evicted,
+        )
+        self.assertEqual(req.cache_protected_len, 24)
+        first_node = next(iter(tree.root_node.children.values()))
+        self.assertTrue(first_node.swa_tombstone)
+        tree.sanity_check()
+
+    def test_proactive_eviction_on_unfinished_req_disabled(self):
+        page_size, window, seq_len = 1, 4, 20
+        tree, allocator, pool = _build_swa_tree(
+            page_size=page_size, sliding_window_size=window
+        )
+        kv = _swa_alloc(allocator, seq_len)
+        pool.write((0, slice(0, seq_len)), kv)
+        req = _make_req(0, list(range(seq_len)), 0, tree)
+        # A non-zero request watermark can already exist after decode eviction.
+        # With proactive freeing disabled, legacy cache_unfinished_req behavior
+        # must still insert with the default watermark (zero).
+        req.swa_evicted_seqlen = seq_len - 1 - max(window, page_size)
+
+        with envs.SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS.override(False):
+            tree.cache_unfinished_req(req, chunked=True)
+
+        child = next(iter(tree.root_node.children.values()))
+        self.assertFalse(child.swa_tombstone)
+        tree.sanity_check()
 
     # -- Insert case 1: swa_evicted <= total_prefix_length --
 

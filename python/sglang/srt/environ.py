@@ -916,8 +916,12 @@ class Envs:
     SGLANG_OPT_SWA_SPLIT_LEAF_ON_INSERT = EnvBool(False)
     SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW = EnvBool(False)
 
-    # Unified radix cache
-    SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS = EnvBool(False)
+    # Proactively free out-of-window SWA slots while caching unfinished requests.
+    # Applies to both unified and legacy hybrid-SWA radix trees.
+    SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS = EnvBoolWithAlias(
+        False,
+        deprecated_name="SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS",
+    )
 
     # DeepGemm Mega MoE
     SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE = EnvBool(False)
