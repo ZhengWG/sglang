@@ -6,8 +6,8 @@ the on-NPU fused compressor kernel (``torch.ops.custom.compressor`` with
 ``cache_mode=1``) requires. Atlas A3 rejects ``cache_mode=2`` (ring) entirely,
 so this is the only valid layout on that hardware.
 
-Selected at pool construction time by
-:meth:`ModelRunnerKVCacheMixin._init_pools` when the model is DSV4 AND the
+Selected at pool construction time by ``KVCacheConfigurator._init_pools`` when
+the model is DSV4 AND the
 device is NPU. CUDA continues to use the unchanged base class.
 
 The subclass overrides only:
