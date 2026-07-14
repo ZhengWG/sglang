@@ -20,7 +20,8 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
-    _compute_pad_value,
+    MultimodalInputs,
+    MultimodalProcessorOutput,
 )
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
@@ -46,7 +47,12 @@ class TestMmHashesContract(CustomTestCase):
 
     def test_set_pad_value_honors_preset_hash(self):
         """set_pad_value() must use a pre-set hash without recomputing."""
-        item = MultimodalDataItem(modality=Modality.IMAGE, hash=0xDEADBEEF)
+        vocab_size = 1_000_000
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            hash=0xDEADBEEF,
+            model_vocab_size=vocab_size,
+        )
         # If hash_feature is invoked, the test fails — we patch it to
         # raise so any accidental recompute is loud.
         with patch(
@@ -57,7 +63,89 @@ class TestMmHashesContract(CustomTestCase):
         ):
             item.set_pad_value()
         self.assertEqual(item.hash, 0xDEADBEEF)
-        self.assertEqual(item.pad_value, _compute_pad_value(0xDEADBEEF))
+        raw_pad_value = 0xDEADBEEF % (1 << 30)
+        expected_pad_value = (
+            raw_pad_value + vocab_size
+            if raw_pad_value <= vocab_size
+            else raw_pad_value
+        )
+        self.assertEqual(item.pad_value, expected_pad_value)
+
+    def test_existing_pad_value_gets_vocab_offset_when_vocab_arrives(self):
+        """A pad computed before vocab propagation must be corrected later."""
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            hash=123,
+            pad_value=123,
+            model_vocab_size=1_000,
+        )
+        item.set_pad_value()
+        self.assertEqual(item.pad_value, 1_123)
+
+    def test_public_fixed_shift_pad_is_normalized_from_hash(self):
+        """A public/main fixed-shift pad must not survive on the tracker branch."""
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            hash=123,
+            pad_value=1_000_123,
+            model_vocab_size=1_000,
+        )
+        item.set_pad_value()
+        self.assertEqual(item.pad_value, 1_123)
+
+    def test_vocab_offset_is_idempotent_when_raw_pad_is_zero(self):
+        """Repeated calls must not add vocab_size more than once."""
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            hash=0,
+            model_vocab_size=1_000,
+        )
+        item.set_pad_value()
+        item.set_pad_value()
+        self.assertEqual(item.pad_value, 1_000)
+
+    @patch(
+        "sglang.srt.managers.schedule_batch.envs.SGLANG_MM_SKIP_COMPUTE_HASH.get",
+        return_value=True,
+    )
+    @patch("uuid.uuid4")
+    def test_skip_compute_hash_still_applies_vocab_offset(
+        self, mock_uuid4, _mock_skip_hash
+    ):
+        """Skipping feature hashing must not allow a normal token-id collision."""
+        mock_uuid4.return_value.int = 123
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            model_vocab_size=1_000,
+        )
+        item.set_pad_value()
+        self.assertEqual(item.hash, 123)
+        self.assertEqual(item.pad_value, 1_123)
+
+    def test_processor_output_refreshes_precomputed_padded_ids(self):
+        """Scheduler-side vocab propagation must also refresh padded_input_ids."""
+        item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            hash=123,
+            pad_value=123,
+            offsets=[(1, 2)],
+        )
+        processor_output = MultimodalProcessorOutput(
+            mm_items=[item],
+            input_ids=[10, 20, 20, 30],
+            padded_input_ids=[10, 123, 123, 30],
+            model_vocab_size=1_000,
+        )
+        mm_inputs = MultimodalInputs.from_processor_output(processor_output)
+        self.assertEqual(mm_inputs.mm_items[0].pad_value, 1_123)
+        self.assertEqual(mm_inputs.padded_input_ids, [10, 1_123, 1_123, 30])
+
+    def test_processor_output_from_dict_preserves_model_vocab_size(self):
+        """Dictionary reconstruction must not drop the dynamic vocab offset."""
+        output = MultimodalProcessorOutput.from_dict(
+            {"mm_items": [], "model_vocab_size": 1_000}
+        )
+        self.assertEqual(output.model_vocab_size, 1_000)
 
     def test_set_pad_value_is_deterministic_across_items(self):
         """Two items with the same preset hash must derive the same pad_value."""

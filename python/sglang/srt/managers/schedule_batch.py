@@ -285,6 +285,7 @@ class MultimodalDataItem:
         Set the pad value after first hashing the data
         """
         if self.pad_value is not None:
+            self._apply_model_vocab_offset()
             return
 
         from sglang.srt.managers.mm_utils import hash_feature
@@ -293,9 +294,7 @@ class MultimodalDataItem:
             import uuid
 
             self.hash = uuid.uuid4().int
-            self.pad_value = self.hash % (1 << 30)
-            return
-        if self.hash is None:
+        elif self.hash is None:
             if self.feature is not None:
                 hashed_feature = self.feature
             else:
@@ -303,11 +302,37 @@ class MultimodalDataItem:
             self.hash = hash_feature(hashed_feature)
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
-        if self.pad_value <= self.model_vocab_size:
-            logger.warning(
-                f"{self.pad_value=} conflict, add vocab offset {self.model_vocab_size=}"
+        self._apply_model_vocab_offset()
+
+    def _apply_model_vocab_offset(self) -> None:
+        """Normalize pad_value using the tracker branch's dynamic vocab offset."""
+        model_vocab_size = self.model_vocab_size or 0
+
+        if self.hash is not None:
+            raw_pad_value = self.hash % (1 << 30)
+            normalized_pad_value = (
+                raw_pad_value + model_vocab_size
+                if raw_pad_value <= model_vocab_size
+                else raw_pad_value
             )
-            self.pad_value += self.model_vocab_size
+            if (
+                raw_pad_value <= model_vocab_size
+                and self.pad_value != normalized_pad_value
+            ):
+                logger.warning(
+                    f"{raw_pad_value=} conflict, add vocab offset "
+                    f"{model_vocab_size=}"
+                )
+            self.pad_value = normalized_pad_value
+            return
+
+        # A caller may provide only pad_value without the source hash. Valid
+        # token ids are in [0, vocab_size), so equality is already safe here.
+        if self.pad_value < model_vocab_size:
+            logger.warning(
+                f"{self.pad_value=} conflict, add vocab offset {model_vocab_size=}"
+            )
+            self.pad_value += model_vocab_size
 
     def is_modality(self, modality: Modality) -> bool:
         return self.modality == modality
@@ -432,6 +457,7 @@ class MultimodalProcessorOutput:
             vision_position_ids=d.get("vision_position_ids"),
             media_nums_per_sample=d.get("media_nums_per_sample"),
             visible_frame_counts=d.get("visible_frame_counts"),
+            model_vocab_size=d.get("model_vocab_size", 0),
         )
 
     @staticmethod
@@ -534,6 +560,24 @@ class MultimodalInputs:
             item.model_vocab_size = model_vocab_size
             item.set_pad_value()
 
+        # Some processors materialize padded_input_ids before model_vocab_size is
+        # attached in TokenizerManager. Refresh the multimodal spans after the
+        # final vocab offset is applied so the serialized ids and item metadata
+        # cannot diverge.
+        padded_input_ids = obj.padded_input_ids
+        if padded_input_ids is not None:
+            if isinstance(padded_input_ids, torch.Tensor):
+                padded_input_ids = padded_input_ids.flatten().tolist()
+            else:
+                padded_input_ids = list(padded_input_ids)
+            for item in mm_items:
+                if item.offsets is None:
+                    continue
+                for start, end in item.offsets:
+                    padded_input_ids[start : end + 1] = [item.pad_value] * (
+                        end - start + 1
+                    )
+
         if envs.SGLANG_MM_BUFFER_SIZE_MB.get() > 0:
             for item in mm_items:
                 if item.feature is not None:
@@ -541,7 +585,7 @@ class MultimodalInputs:
 
         mm_inputs = MultimodalInputs(
             mm_items=mm_items,
-            padded_input_ids=obj.padded_input_ids,
+            padded_input_ids=padded_input_ids,
         )
         optional_args = [
             "mrope_positions",

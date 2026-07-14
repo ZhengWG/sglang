@@ -199,7 +199,7 @@ class MiMoV2ModelNextN(nn.Module):
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if input_embeds is None:
-            # Multimodal pad sentinels (MM_PAD_SHIFT_VALUE + hash) sit out of vocab;
+            # Multimodal pad sentinels are shifted out of the model vocabulary;
             # clamp to avoid an OOB gather. The draft gets visual semantics from target
             # hidden_states, so the embedding at these positions is unused anyway.
             hidden_states = self.embed_tokens(

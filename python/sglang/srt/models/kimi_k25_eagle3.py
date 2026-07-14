@@ -262,8 +262,8 @@ class Eagle3MLAModel(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         if input_embeds is None:
-            # MM positions in input_ids hold MM_PAD_SHIFT_VALUE+hash sentinels (far above
-            # vocab_size). Use target-produced mm_input_embeds for these positions and
+            # MM positions in input_ids hold hash-derived sentinels shifted beyond
+            # vocab_size. Use target-produced mm_input_embeds for these positions and
             # only call embed_tokens on the appended next-token to avoid embed OOB.
             embeds = forward_batch.mm_input_embeds
             if (
