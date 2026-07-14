@@ -1955,6 +1955,7 @@ def is_hybrid_swa_model(
         "Gemma4ForConditionalGeneration",
         "Gemma4UnifiedForConditionalGeneration",
         "LagunaForCausalLM",
+        "MellumForCausalLM",
         "UnlimitedOCRForCausalLM",
     }
     if any(arch in hybrid_swa_archs for arch in model_architectures):
@@ -2026,15 +2027,9 @@ def get_hybrid_layer_ids(
         "Gemma4ForCausalLM" in model_architectures
         or "Gemma4ForConditionalGeneration" in model_architectures
         or "Gemma4UnifiedForConditionalGeneration" in model_architectures
+        or "LagunaForCausalLM" in model_architectures
+        or "MellumForCausalLM" in model_architectures
     ):
-        layer_types = getattr(hf_text_config, "layer_types", [])
-        swa_attention_layer_ids = [
-            i for i, x in enumerate(layer_types) if x == "sliding_attention"
-        ]
-        full_attention_layer_ids = [
-            i for i, x in enumerate(layer_types) if x == "full_attention"
-        ]
-    elif "LagunaForCausalLM" in model_architectures:
         layer_types = getattr(hf_text_config, "layer_types", [])
         swa_attention_layer_ids = [
             i for i, x in enumerate(layer_types) if x == "sliding_attention"
