@@ -90,9 +90,14 @@ jobs:
 
         # 检查flashinfer-jit-cache版本
         RUN FLASHINFER_VERSION=$(pip show flashinfer-python |grep Version | awk ' { print $2}') && FLASHINFER_JIT_CACHE_VERSION=$(pip show flashinfer-jit-cache |grep Version | awk ' { print $2}') && \
+            FLASHINFER_CUBIN_VERSION=$(pip show flashinfer-cubin |grep Version | awk ' { print $2}') && \
             if [ "${FLASHINFER_VERSION}+cu130" != "${FLASHINFER_JIT_CACHE_VERSION}" ]; then \
                 echo "flashinfer-python version ($FLASHINFER_VERSION) and flashinfer-jit-cache version ($FLASHINFER_JIT_CACHE_VERSION) do not match!"; \
                 pip3 install https://pypi.antfin-inc.com/simple-dev/flashinfer-jit-cache/flashinfer_jit_cache-${FLASHINFER_VERSION}%2Bcu130-cp39-abi3-manylinux_2_28_x86_64.whl; \
+            fi; \
+            if [ "${FLASHINFER_VERSION}" != "${FLASHINFER_CUBIN_VERSION}" ]; then \
+                echo "flashinfer-python version ($FLASHINFER_VERSION) and flashinfer-cubin version ($FLASHINFER_CUBIN_VERSION) do not match!"; \
+                pip3 install flashinfer-cubin==${FLASHINFER_VERSION} -i https://pypi.antfin-inc.com/simple-dev; \
             fi
 
         LABEL ai.sglang.build.url="${SGLANG_BUILD_URL}"
