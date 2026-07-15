@@ -25,9 +25,9 @@ import sys
 
 import torch
 
-from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
-from sglang.srt.layers.attention.fla.kda import chunk_kda
-from sglang.srt.layers.attention.fla.l2norm import l2norm_fwd
+from sglang.kernels.ops.attention.fla.cumsum import chunk_local_cumsum
+from sglang.kernels.ops.attention.fla.kda import chunk_kda
+from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
 
 # cuLA kernel uses exp2() internally, so gate values must be in log-base-2 space.
 RCP_LN2 = 1.0 / math.log(2.0)

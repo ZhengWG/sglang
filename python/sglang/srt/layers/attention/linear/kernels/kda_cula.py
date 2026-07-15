@@ -34,7 +34,7 @@ def _triton_fallback(
     activation internally when A_log is provided, so they must be threaded
     through here too -- otherwise the fallback silently skips activation.
     """
-    from sglang.srt.layers.attention.fla.kda import chunk_kda
+    from sglang.kernels.ops.attention.fla.kda import chunk_kda
 
     return chunk_kda(
         q=q,
@@ -156,9 +156,9 @@ class CulaKDAKernel(LinearAttnKernelBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from sgl_kernel import kda_fwd_prefill
 
-        from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
-        from sglang.srt.layers.attention.fla.kda import kda_gate_chunk_cumsum
-        from sglang.srt.layers.attention.fla.l2norm import l2norm_fwd
+        from sglang.kernels.ops.attention.fla.cumsum import chunk_local_cumsum
+        from sglang.kernels.ops.attention.fla.kda import kda_gate_chunk_cumsum
+        from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
 
         # Input shapes: q, k, v = [1, packed_seq, H, D], g = [1, packed_seq, H, D], beta = [1, packed_seq, H]
         batch_size = q.shape[0]  # should be 1

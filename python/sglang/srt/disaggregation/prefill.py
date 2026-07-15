@@ -622,6 +622,8 @@ class SchedulerDisaggregationPrefillMixin:
         batch.mark_end_time()
 
         logprob_pt = 0
+        assert batch.spec_info is result.next_draft_input
+        draft_input = result.next_draft_input
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         next_token_ids = result.next_token_ids.tolist()
         self.batch_result_processor.move_logprobs_to_cpu(
@@ -660,11 +662,11 @@ class SchedulerDisaggregationPrefillMixin:
                     req.log_disaggregation_prefill_first_token_time_stats(batch_size=batch_size, total_tokens=total_tokens)
                 maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
-                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
-                    req.output_topk_p = batch.spec_info.topk_p[i]
-                    req.output_topk_index = batch.spec_info.topk_index[i]
+                if self.spec_algorithm.is_eagle() and draft_input is not None:
+                    req.output_topk_p = draft_input.topk_p[i]
+                    req.output_topk_index = draft_input.topk_index[i]
                     req.hidden_states_tensor = (
-                        batch.spec_info.hidden_states[i].cpu().clone()
+                        draft_input.hidden_states[i].cpu().clone()
                     )
                     dsa_topk_indices = batch.spec_info.dsa_topk_indices
                     if dsa_topk_indices is not None:
@@ -936,7 +938,11 @@ class SchedulerDisaggregationPrefillMixin:
         else:
             logger.warning(error_message)
         req.time_stats.trace_ctx.abort(abort_info={"reason": error_message})
-        if req.req_pool_idx is not None or self.tree_cache.supports_mamba():
+        if (
+            req.req_pool_idx is not None
+            or req.kv is not None
+            or req.mamba_pool_idx is not None
+        ):
             release_kv_cache(req, self.tree_cache)
         maybe_release_metadata_buffer(req, self.req_to_metadata_buffer_idx_allocator)
         req.pending_bootstrap = False

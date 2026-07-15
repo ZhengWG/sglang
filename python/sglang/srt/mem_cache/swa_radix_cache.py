@@ -457,19 +457,20 @@ class SWARadixCache(KVCacheEventMixin, BasePrefixCache):
         )
         return InsertResult(prefix_len=prefix_len)
 
-    def cache_finished_req(self, req: Req, is_insert: bool = True) -> None:
+    def cache_finished_req(
+        self, req: Req, is_insert: bool = True, *, kv_len_to_handle: int
+    ) -> None:
         """Cache request when it finishes."""
-        kv_committed_len = req.pop_committed_kv_cache()
         if self.disable:
             kv_indices = self.req_to_token_pool.req_to_token[
-                req.req_pool_idx, :kv_committed_len
+                req.req_pool_idx, :kv_len_to_handle
             ]
             self.token_to_kv_pool_allocator.free(kv_indices)
             return
 
-        token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
+        token_ids = (req.origin_input_ids + req.output_ids)[:kv_len_to_handle]
         kv_indices = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, :kv_committed_len
+            req.req_pool_idx, :kv_len_to_handle
         ]
 
         radix_key = RadixKey(
@@ -487,7 +488,7 @@ class SWARadixCache(KVCacheEventMixin, BasePrefixCache):
                     key=radix_key,
                     value=values,
                     prev_prefix_len=old_prefix_len,
-                    swa_evicted_seqlen=req.swa_evicted_seqlen,
+                    swa_evicted_seqlen=req.kv.swa_evicted_seqlen,
                 )
             )
         else:
@@ -529,7 +530,7 @@ class SWARadixCache(KVCacheEventMixin, BasePrefixCache):
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             )
-            insert_swa_evicted_seqlen = req.swa_evicted_seqlen
+            insert_swa_evicted_seqlen = req.kv.swa_evicted_seqlen
 
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)

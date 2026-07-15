@@ -30,9 +30,9 @@ def _try_import_cula():
 
 def _try_import_triton_ref():
     try:
-        from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
-        from sglang.srt.layers.attention.fla.kda import chunk_kda
-        from sglang.srt.layers.attention.fla.l2norm import l2norm_fwd
+        from sglang.kernels.ops.attention.fla.cumsum import chunk_local_cumsum
+        from sglang.kernels.ops.attention.fla.kda import chunk_kda
+        from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
 
         return chunk_kda, l2norm_fwd, chunk_local_cumsum
     except ImportError:

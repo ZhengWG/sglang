@@ -18,13 +18,13 @@ Representative results (H20-3e, ling-v3 per-rank shapes B1 T4 H4 HV4 K128 V128):
 
 import torch
 
-from sglang.srt.layers.attention.fla.fused_kda_conv_recurrent_verify import (
+from sglang.kernels.ops.attention.fla.fused_kda_conv_recurrent_verify import (
     fused_kda_conv_gating_verify,
 )
-from sglang.srt.layers.attention.fla.fused_sigmoid_gating_recurrent import (
+from sglang.kernels.ops.attention.fla.fused_sigmoid_gating_recurrent import (
     fused_sigmoid_gating_delta_rule_update,
 )
-from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
+from sglang.kernels.ops.mamba.causal_conv1d_triton import (
     causal_conv1d_update,
 )
 
