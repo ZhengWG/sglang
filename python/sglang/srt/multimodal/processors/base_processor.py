@@ -43,7 +43,6 @@ _is_cpu = is_cpu()
 _is_npu = is_npu()
 _is_xpu = is_xpu()
 
-SGL_USE_CUDA_IPC = envs.SGLANG_USE_CUDA_IPC_TRANSPORT.get()
 _IPC_POOL_HANDLE_CACHE = envs.SGLANG_USE_IPC_POOL_HANDLE_CACHE.get()
 SGL_PREPROCESS_USE_IMAGE_TENSOR = envs.SGLANG_PREPROCESS_USE_IMAGE_TENSOR.get()
 
@@ -192,6 +191,15 @@ class BaseMultimodalProcessor(ABC):
         self.server_args = server_args
         self.transport_mode = transport_mode
         self.keep_mm_feature_on_device = server_args.keep_mm_feature_on_device
+        configured_mm_feature_transport = getattr(
+            server_args, "mm_feature_transport", "cpu"
+        )
+        self.mm_feature_transport = (
+            configured_mm_feature_transport
+            if configured_mm_feature_transport in ("cpu", "cuda_ipc")
+            else "cpu"
+        )
+        self.use_cuda_ipc = self.mm_feature_transport == "cuda_ipc"
         self.disable_fast_image_processor = server_args.disable_fast_image_processor
         self.skip_tokenizer_init = server_args.skip_tokenizer_init
 
@@ -278,7 +286,7 @@ class BaseMultimodalProcessor(ABC):
 
         skip_mm_pool = kwargs.get("skip_mm_pool", False)
 
-        if SGL_USE_CUDA_IPC and not skip_mm_pool:
+        if self.use_cuda_ipc and not skip_mm_pool:
             # SGLANG_MM_FEATURE_CACHE_MB is the total pool budget across all
             # tokenizer workers. Each worker gets an equal share so that adding
             # workers doesn't multiply the GPU-side footprint.
@@ -499,7 +507,7 @@ class BaseMultimodalProcessor(ABC):
         if not self.keep_mm_feature_on_device:
             # move feature tensors to cpu
             for feature_name in self.FEATURE_NAMES:
-                if SGL_USE_CUDA_IPC:
+                if self.use_cuda_ipc:
                     pass
                 else:
                     if feature_name in result and isinstance(
@@ -1553,7 +1561,7 @@ class BaseMultimodalProcessor(ABC):
         4. copy
         """
 
-        if SGL_USE_CUDA_IPC:
+        if self.use_cuda_ipc:
             # post-process, prepare for cuda-ipc transfer
             for item in all_collected_items:
                 if isinstance(item.feature, torch.Tensor):
