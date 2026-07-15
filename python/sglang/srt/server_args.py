@@ -5945,11 +5945,6 @@ class ServerArgs:
                 self.validate_transfer_engine()
             )
 
-        # Preserve the target model's format before later speculative setup can
-        # adjust the target loader independently of the draft model loader.
-        if self.speculative_draft_load_format is None:
-            self.speculative_draft_load_format = self.load_format
-
     def _is_mistral_native_format(self) -> bool:
         """True iff the checkpoint requires load_format=mistral.
 

@@ -107,8 +107,6 @@ def capture_cuda_graphs(
             model_runner.model, model_runner.server_args.forward_hooks
         )
 
-    model_runner.maybe_start_rfork_seed_service()
-
     prealloc_symmetric_memory_pool(
         is_draft_worker=model_runner.is_draft_worker,
         enable_symm_mem=model_runner.server_args.enable_symm_mem,

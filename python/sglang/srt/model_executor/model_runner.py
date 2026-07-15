@@ -25,7 +25,7 @@ from typing import Optional, Union
 
 import torch
 
-from sglang.srt.configs.load_config import LoadConfig, LoadFormat
+from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import (
     AttentionArch,
     ModelConfig,
@@ -154,7 +154,6 @@ from sglang.srt.model_executor.runner import (
 )
 from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
 from sglang.srt.platforms import current_platform
-from sglang.srt.rfork.rfork_worker import RForkWorker
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.server_args import (  # noqa: F401  (re-export)
@@ -292,8 +291,6 @@ class ModelRunner:
 
         self._post_load_weight_executor = None
         self._post_load_weight_future = None
-        self.rfork_worker = None
-        self.rfork_fallback_load_format = None
 
         # Apply the rank zero filter to logger
         if server_args.show_time_cost:
@@ -493,9 +490,8 @@ class ModelRunner:
         if self.server_args.enable_lora:
             self.model_config.is_post_loading_model = False
 
-        self.maybe_prepare_rfork_or_async_mount()
+        self.maybe_prepare_async_mount()
         self.load_model()
-        self.maybe_restore_rfork_load_format()
         prepare_moe_topk(
             model=self.model,
             model_config=self.model_config,
@@ -527,29 +523,11 @@ class ModelRunner:
         self.maybe_enable_batch_invariant_mode()
         self.configure_kv_cache_dtype()
 
-    def maybe_prepare_rfork_or_async_mount(self):
-        if envs.SGLANG_RFORK_ENABLED.get() and self.model_config.is_rfork_model:
-            self.rfork_worker = RForkWorker(
-                self.server_args.disaggregation_mode,
-                self.server_args.node_rank,
-                self.ps.tp_rank,
-                self.gpu_id,
-                self.server_args.dtype,
-                self.is_draft_worker,
-            )
-            self.rfork_fallback_load_format = self.server_args.load_format
-            self.server_args.load_format = LoadFormat.RFORK
-        elif envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (
+    def maybe_prepare_async_mount(self):
+        if envs.SGLANG_ASYNC_MODEL_MOUNT.get() and not (
             POST_LOAD_MODEL_WEIGHT or self.model_config.is_post_loading_model
         ):
             self.model_config.model_path = get_model_path(with_weights=True)
-
-    def maybe_restore_rfork_load_format(self):
-        if (
-            self.rfork_worker is not None
-            and not self.rfork_worker.is_transfer_succeeded()
-        ):
-            self.server_args.load_format = self.rfork_fallback_load_format
 
     def maybe_start_post_load_weight_loading(self):
         if not (
@@ -604,10 +582,6 @@ class ModelRunner:
         logger.info(
             f"Update weight end. Time elapsed: {time.perf_counter() - tic:.2f} s."
         )
-
-    def maybe_start_rfork_seed_service(self):
-        if self.rfork_worker is not None:
-            self.rfork_worker.start_seed_service(self.model)
 
     def init_memory_saver_adapter(self):
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -925,8 +899,6 @@ class ModelRunner:
             tp_rank=self.ps.tp_rank,
             remote_instance_weight_transporter_engine=self.remote_instance_weight_transporter.engine,
             remote_instance_weight_transporter_session_id=self.remote_instance_weight_transporter.session_id,
-            rfork_worker=self.rfork_worker,
-            rfork_fallback_load_format=self.rfork_fallback_load_format,
             draft_model_idx=self.draft_model_idx,
         )
         if self.device == "cpu":

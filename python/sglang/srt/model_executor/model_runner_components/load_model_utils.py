@@ -171,8 +171,6 @@ def build_load_config(
     tp_rank: int,
     remote_instance_weight_transporter_engine: Any,
     remote_instance_weight_transporter_session_id: str,
-    rfork_worker: Any,
-    rfork_fallback_load_format: Any,
     draft_model_idx: Optional[int],
 ) -> LoadConfig:
     from sglang.srt.configs.modelopt_config import ModelOptConfig
@@ -198,8 +196,6 @@ def build_load_config(
         remote_instance_weight_loader_transfer_engine_session_id=remote_instance_weight_transporter_session_id,
         modelexpress_url=server_args.modelexpress_url,
         modelexpress_transport=server_args.modelexpress_transport,
-        rfork_worker=rfork_worker,
-        rfork_fallback_load_format=rfork_fallback_load_format,
         modelopt_config=modelopt_config,
         rl_quant_profile=server_args.rl_quant_profile,
         draft_model_idx=draft_model_idx,

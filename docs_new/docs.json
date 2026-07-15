@@ -162,10 +162,6 @@
       "destination": "/docs/advanced_features/quantized_kv_cache"
     },
     {
-      "source": "/advanced_features/rfork.html",
-      "destination": "/docs/advanced_features/rfork"
-    },
-    {
       "source": "/advanced_features/separate_reasoning.html",
       "destination": "/docs/advanced_features/separate_reasoning"
     },
