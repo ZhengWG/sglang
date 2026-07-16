@@ -1,5 +1,9 @@
+import io
+import sys
+import types
 import unittest
 from array import array
+from unittest.mock import patch
 
 import torch
 
@@ -7,12 +11,47 @@ from sglang.srt.utils.common import (
     flatten_arrays_to_int64_tensor,
     get_device_sm_nvidia_smi,
     get_nvidia_driver_version_str,
+    load_audio,
 )
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
 
 register_cuda_ci(est_time=5, stage="base-b", runner_config="1-gpu-small")
 register_amd_ci(est_time=5, stage="stage-b", runner_config="1-gpu-small-amd")
+
+
+class TestLoadAudio(CustomTestCase):
+    def test_torchcodec_is_independent_from_video_backend(self):
+        captured = {}
+
+        class FakeAudioDecoder:
+            def __init__(self, source, sample_rate, num_channels):
+                captured["source"] = source
+                captured["sample_rate"] = sample_rate
+                captured["num_channels"] = num_channels
+
+            def get_all_samples(self):
+                return types.SimpleNamespace(data=torch.tensor([[0.25, -0.5]]))
+
+        torchcodec_module = types.ModuleType("torchcodec")
+        decoders_module = types.ModuleType("torchcodec.decoders")
+        decoders_module.AudioDecoder = FakeAudioDecoder
+        torchcodec_module.decoders = decoders_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "torchcodec": torchcodec_module,
+                "torchcodec.decoders": decoders_module,
+            },
+        ):
+            audio = load_audio(b"fake-mp4-bytes", sr=24000)
+
+        self.assertIsInstance(captured["source"], io.BytesIO)
+        self.assertEqual(captured["source"].getvalue(), b"fake-mp4-bytes")
+        self.assertEqual(captured["sample_rate"], 24000)
+        self.assertEqual(captured["num_channels"], 1)
+        self.assertEqual(audio.tolist(), [0.25, -0.5])
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")

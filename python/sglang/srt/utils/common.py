@@ -1549,12 +1549,20 @@ def load_audio(
     else:
         raise ValueError(f"Invalid audio format: {audio_file}")
 
-    if _BACKEND == "torchcodec":
+    # Audio decoding is independent from the video decoder backend. `_BACKEND`
+    # is the legacy video backend selector and is normally set to "decord", so
+    # using it here made the TorchCodec branch unreachable even when
+    # torchcodec was installed.
+    try:
         from torchcodec.decoders import AudioDecoder
+    except (ImportError, OSError, RuntimeError):
+        AudioDecoder = None
 
+    if AudioDecoder is not None:
         try:
+            decoder_source = BytesIO(source) if isinstance(source, bytes) else source
             decoder = AudioDecoder(
-                source,
+                decoder_source,
                 sample_rate=sr,
                 num_channels=1 if mono else None,
             )
