@@ -134,3 +134,28 @@ elif _is_cpu and _is_cpu_amx_available:
     apply_rotary_pos_emb = torch.ops.sgl_kernel.apply_rotary_pos_emb_cpu
 else:
     apply_rotary_pos_emb = apply_rotary_pos_emb_native
+
+
+def apply_rotary_pos_emb_eager(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Eager (non-compiled) version of apply_rotary_pos_emb.
+
+    Identical to ``apply_rotary_pos_emb_native`` but without the
+    ``@torch.compile`` decorator. Use this when running inside CUDA graph
+    capture where torch.compile introduces incompatible random_rng ops.
+    """
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos = cos.unsqueeze(unsqueeze_dim).float()
+    sin = sin.unsqueeze(unsqueeze_dim).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed

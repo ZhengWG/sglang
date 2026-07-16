@@ -73,7 +73,10 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
+from sglang.srt.layers.rotary_embedding import (
+    apply_rotary_pos_emb,
+    apply_rotary_pos_emb_eager,
+)
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, get_bool_env_var
 
@@ -82,6 +85,36 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 ROTARY_EMBED_CLASSES = {
     "normal": apply_rotary_pos_emb,
 }
+
+
+_vision_rope_fn = None
+
+
+def _get_vision_rope_fn():
+    """Return the rotary embedding function for vision attention.
+
+    When ViT CUDA graph is enabled on CUDA, returns a Triton-based
+    in-place kernel that avoids the torch.compile + random_rng conflict.
+    Otherwise returns the default (potentially torch.compile'd) function.
+
+    The result is cached after the first call.
+    """
+    global _vision_rope_fn
+    if _vision_rope_fn is not None:
+        return _vision_rope_fn
+
+    if _is_cuda and envs.SGLANG_VIT_ENABLE_CUDA_GRAPH.get():
+        try:
+            from sglang.srt.layers.rotary_embedding.triton_kernels import (
+                triton_apply_rotary_pos_emb,
+            )
+
+            _vision_rope_fn = triton_apply_rotary_pos_emb
+        except ImportError:
+            _vision_rope_fn = apply_rotary_pos_emb_eager
+    else:
+        _vision_rope_fn = apply_rotary_pos_emb
+    return _vision_rope_fn
 
 # === Vision Encoder === #
 FLASHINFER_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
@@ -1179,7 +1212,6 @@ class VisionAttention(nn.Module):
             original_q_shape = q.shape
             original_k_shape = k.shape
 
-            # [total_tokens, head, head_size] for q / [total_tokens, kv_head, head_size] for k
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
 
@@ -1187,7 +1219,8 @@ class VisionAttention(nn.Module):
                 cos = torch.cat([cos, cos], dim=-1)
                 sin = torch.cat([sin, sin], dim=-1)
 
-            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            rope_fn = _get_vision_rope_fn()
+            q, k = rope_fn(q, k, cos, sin)
             q = q.view(original_q_shape)
             k = k.view(original_k_shape)
 
