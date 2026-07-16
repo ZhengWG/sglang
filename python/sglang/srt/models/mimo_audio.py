@@ -21,6 +21,7 @@ from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 
 from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.runtime_context import get_server_args
 
@@ -511,6 +512,7 @@ class AudioEncoderAttention(nn.Module):
             window_size=window_size,
             customized_position_embedding_applier=_audio_rope_applier,
             prefix="attn",
+            use_dp_attention_reduce=is_dp_attention_enabled(),
         )
 
     def forward(
