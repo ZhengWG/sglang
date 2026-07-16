@@ -394,6 +394,7 @@ FROM torch_deps AS hpc_ops_builder
 # RoPE kernels from the Tencent Hunyuan AI Infra team, consumed by the opt-in
 # hpc_ops attention and MoE runner backends.
 ARG HPC_OPS_COMMIT=2404f09766269d9533b66709f705c8eeb01421fc
+ARG HPC_OPS_BUILD_PARALLEL=4
 ARG GITHUB_ARTIFACTORY
 
 WORKDIR /build
@@ -404,10 +405,27 @@ WORKDIR /build
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     if [ "$(uname -m)" = "x86_64" ]; then \
-        git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
+        for attempt in 1 2 3; do \
+            rm -rf hpc-ops; \
+            if git clone --no-tags https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git; then \
+                break; \
+            fi; \
+            if [ "${attempt}" = "3" ]; then \
+                exit 1; \
+            fi; \
+            sleep $((attempt * 5)); \
+        done && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
-        PATH=/usr/bin:${PATH} python3 setup.py bdist_wheel -d /wheels; \
+        sed -i "s/\"-j16\"/\"-j${HPC_OPS_BUILD_PARALLEL}\", \"--verbose\"/" setup.py && \
+        if ! PATH=/usr/bin:${PATH} python3 setup.py bdist_wheel -d /wheels \
+                > /tmp/hpc-ops-build.log 2>&1; then \
+            grep -nEi "error:|fatal|killed|out of memory|nvcc fatal" \
+                /tmp/hpc-ops-build.log | tail -n 100 || true; \
+            tail -n 300 /tmp/hpc-ops-build.log; \
+            exit 1; \
+        fi; \
+        tail -n 20 /tmp/hpc-ops-build.log && rm /tmp/hpc-ops-build.log; \
     fi
 
 ########################################################
