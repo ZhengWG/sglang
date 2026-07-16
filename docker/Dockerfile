@@ -394,6 +394,7 @@ FROM torch_deps AS hpc_ops_builder
 # RoPE kernels from the Tencent Hunyuan AI Infra team, consumed by the opt-in
 # hpc_ops attention and MoE runner backends.
 ARG HPC_OPS_COMMIT=2404f09766269d9533b66709f705c8eeb01421fc
+ARG GITHUB_ARTIFACTORY
 
 WORKDIR /build
 
@@ -403,7 +404,7 @@ WORKDIR /build
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     if [ "$(uname -m)" = "x86_64" ]; then \
-        git clone https://github.com/Tencent/hpc-ops.git && \
+        git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
         python3 setup.py bdist_wheel -d /wheels; \
