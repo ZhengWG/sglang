@@ -407,7 +407,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
-        python3 setup.py bdist_wheel -d /wheels; \
+        PATH=/usr/bin:${PATH} python3 setup.py bdist_wheel -d /wheels; \
     fi
 
 ########################################################
