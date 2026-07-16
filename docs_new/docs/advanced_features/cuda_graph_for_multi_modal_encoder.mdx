@@ -74,3 +74,20 @@ python3 -m sglang.launch_server \
 ## Known supported models
 - Qwen2.5-VL (https://github.com/sgl-project/sglang/pull/14422)
 - Qwen3-VL (https://github.com/sgl-project/sglang/pull/15320)
+- Qwen3.5 / Qwen3.5-MoE (shares the Qwen3-VL ViT runner; the
+  `apply_rotary_pos_emb` op uses a Triton kernel on CUDA instead of
+  `torch.compile`, removing the previous CUDA-graph capture conflict)
+
+## Encoder-server (disaggregated) usage
+
+The disaggregated encoder process (`python/sglang/srt/disaggregation/encode_server.py`)
+loads the same model and dispatches `get_image_feature`/`get_video_feature`
+to the `Qwen3VLMoeVisionModel.forward(...)` path, so simply exporting the
+environment variable on the encoder host enables the ViT CUDA Graph:
+
+```shell Command
+SGLANG_VIT_ENABLE_CUDA_GRAPH=1 \
+python3 -m sglang.srt.disaggregation.encode_server \
+  --model Qwen/Qwen3.5-... \
+  --tp 1 --host 0.0.0.0 --port 30005
+```

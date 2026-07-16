@@ -270,3 +270,139 @@ def triton_ernie45_rope_fused_inplace(
         is_neox_style=is_neox_style,
         num_warps=num_warps,
     )
+
+
+@triton.jit
+def _triton_vision_rope_qk_inplace_kernel(
+    q_ptr,
+    k_ptr,
+    cos_ptr,
+    sin_ptr,
+    q_stride_t,
+    k_stride_t,
+    cos_stride_t,
+    sin_stride_t,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd_half: tl.constexpr,
+):
+    """Apply NEOX-style (rotate_half) rotary embedding to q,k in-place.
+
+    Layout:
+        q: (num_tokens, n_qh, hd) contiguous in last two dims with stride
+           q_stride_t between tokens.
+        k: (num_tokens, n_kh, hd) likewise.
+        cos/sin: (num_tokens, hd). The two halves of cos/sin may be equal
+        (when constructed from `cat([c, c], dim=-1)` upstream) or different
+        (e.g., HF position_embeddings); both are supported.
+
+    Performs the standard formula:
+        q1' = q1 * cos[:hd//2] - q2 * sin[:hd//2]
+        q2' = q2 * cos[hd//2:] + q1 * sin[hd//2:]
+    in float for numerical parity with `apply_rotary_pos_emb_native`.
+    """
+    pid = tl.program_id(0)
+    q_row = q_ptr + pid * q_stride_t
+    k_row = k_ptr + pid * k_stride_t
+    cos_row = cos_ptr + pid * cos_stride_t
+    sin_row = sin_ptr + pid * sin_stride_t
+
+    half_hd = hd // 2
+
+    d = tl.arange(0, pad_hd_half)
+    dmask = d < half_hd
+
+    cos1 = tl.load(cos_row + d, mask=dmask, other=0.0).to(tl.float32)
+    cos2 = tl.load(cos_row + half_hd + d, mask=dmask, other=0.0).to(tl.float32)
+    sin1 = tl.load(sin_row + d, mask=dmask, other=0.0).to(tl.float32)
+    sin2 = tl.load(sin_row + half_hd + d, mask=dmask, other=0.0).to(tl.float32)
+
+    qh = tl.arange(0, pad_n_qh)[:, None]
+    dd = d[None, :]
+    qmask = (qh < n_qh) & (dd < half_hd)
+    q_lo_off = qh * hd + dd
+    q_hi_off = q_lo_off + half_hd
+
+    q1 = tl.load(q_row + q_lo_off, mask=qmask, other=0.0).to(tl.float32)
+    q2 = tl.load(q_row + q_hi_off, mask=qmask, other=0.0).to(tl.float32)
+    q1_new = q1 * cos1[None, :] - q2 * sin1[None, :]
+    q2_new = q2 * cos2[None, :] + q1 * sin2[None, :]
+    tl.store(q_row + q_lo_off, q1_new, mask=qmask)
+    tl.store(q_row + q_hi_off, q2_new, mask=qmask)
+
+    kh = tl.arange(0, pad_n_kh)[:, None]
+    kmask = (kh < n_kh) & (dd < half_hd)
+    k_lo_off = kh * hd + dd
+    k_hi_off = k_lo_off + half_hd
+
+    k1 = tl.load(k_row + k_lo_off, mask=kmask, other=0.0).to(tl.float32)
+    k2 = tl.load(k_row + k_hi_off, mask=kmask, other=0.0).to(tl.float32)
+    k1_new = k1 * cos1[None, :] - k2 * sin1[None, :]
+    k2_new = k2 * cos2[None, :] + k1 * sin2[None, :]
+    tl.store(k_row + k_lo_off, k1_new, mask=kmask)
+    tl.store(k_row + k_hi_off, k2_new, mask=kmask)
+
+
+def triton_vision_rope_qk_inplace(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> None:
+    """CUDA-graph-safe vision NEOX RoPE applied in-place to q and k.
+
+    Replaces ``apply_rotary_pos_emb_native`` for the ViT path. The native
+    implementation is wrapped in ``torch.compile(dynamic=True)``, which on
+    capture-time injects dynamic-shape guards / RNG state that conflicts with
+    ``torch.cuda.graph`` capture (manifesting as ``random_rng`` errors).
+
+    Accepted shapes:
+        q: (num_tokens, n_qh, head_size) — float16/bfloat16/float32
+        k: (num_tokens, n_kh, head_size)
+        cos: (num_tokens, head_size)
+        sin: (num_tokens, head_size)
+
+    The kernel reads cos/sin in fp32 and accumulates in fp32, matching the
+    semantics of ``apply_rotary_pos_emb_native``.
+    """
+    assert q.dim() == 3 and k.dim() == 3, (q.shape, k.shape)
+    num_tokens, n_qh, head_size = q.shape
+    assert k.shape[0] == num_tokens and k.shape[2] == head_size, (q.shape, k.shape)
+    n_kh = k.shape[1]
+    assert cos.shape[-1] == head_size and sin.shape[-1] == head_size, (
+        cos.shape,
+        sin.shape,
+        head_size,
+    )
+    assert head_size % 2 == 0, head_size
+    # q / k are written in-place; require contiguous storage in the last two dims
+    # so the (head, dim) plane has stride (head_size, 1).
+    assert q.stride(-1) == 1 and q.stride(-2) == head_size, q.stride()
+    assert k.stride(-1) == 1 and k.stride(-2) == head_size, k.stride()
+    assert cos.stride(-1) == 1 and sin.stride(-1) == 1, (cos.stride(), sin.stride())
+
+    pad_n_qh = triton.next_power_of_2(n_qh)
+    pad_n_kh = triton.next_power_of_2(n_kh)
+    pad_hd_half = triton.next_power_of_2(head_size // 2)
+    num_warps = 4 if (pad_n_qh * pad_hd_half) <= 4096 else 8
+
+    _triton_vision_rope_qk_inplace_kernel[(num_tokens,)](
+        q,
+        k,
+        cos,
+        sin,
+        q.stride(0),
+        k.stride(0),
+        cos.stride(0),
+        sin.stride(0),
+        n_qh=n_qh,
+        n_kh=n_kh,
+        hd=head_size,
+        pad_n_qh=pad_n_qh,
+        pad_n_kh=pad_n_kh,
+        pad_hd_half=pad_hd_half,
+        num_warps=num_warps,
+    )
