@@ -721,6 +721,7 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     stream: bool = False
     stream_options: Optional[StreamOptions] = None
+    stream_interval: int = 1
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     user: Optional[str] = None
@@ -974,6 +975,7 @@ class ChatCompletionRequest(BaseModel):
             "custom_params": self.custom_params,
             "sampling_seed": self.seed,
             "spaces_between_special_tokens": spaces_between_special_tokens,
+            "stream_interval": self.stream_interval,
         }
 
         if self.response_format and self.response_format.type == "json_schema":
