@@ -400,14 +400,17 @@ ARG GITHUB_ARTIFACTORY
 WORKDIR /build
 
 # The kernels target Hopper (sm90a) only, so skip non-x86_64 images.
-# setup.py derives the version from `git rev-parse`, so keep the .git dir
-# (a source zip archive would not build).
+# setup.py derives the version from `git rev-parse`, so keep the .git directory.
+# Bound each clone attempt so a stalled GitHub proxy can trigger the retry loop.
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     if [ "$(uname -m)" = "x86_64" ]; then \
         for attempt in 1 2 3; do \
             rm -rf hpc-ops; \
-            if git clone --no-tags https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git; then \
+            if timeout 300 git \
+                    -c http.lowSpeedLimit=1024 \
+                    -c http.lowSpeedTime=60 \
+                    clone --no-tags https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git; then \
                 break; \
             fi; \
             if [ "${attempt}" = "3" ]; then \
