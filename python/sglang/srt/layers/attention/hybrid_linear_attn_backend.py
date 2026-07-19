@@ -817,13 +817,6 @@ class HybridLinearAttnBackend(AttentionBackend):
         self.token_to_kv_pool = full_attn_backend.token_to_kv_pool
         self.req_to_token_pool = full_attn_backend.req_to_token_pool
         self.max_context_len = getattr(full_attn_backend, "max_context_len", None)
-        # trtllm_mla / dsa fuse-rope checks read these off the top-level backend
-        # via get_attn_backend().data_type / .kv_cache_dtype. Delegate to the
-        # full-attn sub-backend so hybrid models don't AttributeError; None when
-        # the sub-backend lacks them -> the fuse-rope check just evaluates False,
-        # matching the non-hybrid non-fp8 path.
-        self.data_type = getattr(full_attn_backend, "data_type", None)
-        self.kv_cache_dtype = getattr(full_attn_backend, "kv_cache_dtype", None)
         self.needs_cpu_seq_lens = (
             full_attn_backend.needs_cpu_seq_lens
             or linear_attn_backend.needs_cpu_seq_lens
@@ -831,7 +824,11 @@ class HybridLinearAttnBackend(AttentionBackend):
 
     @property
     def data_type(self):
-        return self.full_attn_backend.data_type
+        return getattr(self.full_attn_backend, "data_type", None)
+
+    @property
+    def kv_cache_dtype(self):
+        return getattr(self.full_attn_backend, "kv_cache_dtype", None)
 
     def _is_full_attn(
         self, layer: Optional[RadixAttention], layer_id: Optional[int] = None
