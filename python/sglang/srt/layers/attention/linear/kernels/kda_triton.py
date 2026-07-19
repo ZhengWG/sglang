@@ -161,58 +161,11 @@ class TritonKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
-        intermediate_states_buffer: torch.Tensor = None,
-        intermediate_state_indices: torch.Tensor = None,
-        cache_steps: int = None,
-        retrieve_parent_token: torch.Tensor = None,
-        lower_bound: Optional[float] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        """Target verify mode for speculative decoding.
-
-        Similar to decode but with state update disabled and intermediate
-        state caching for rollback after verification.
-        """
-        return fused_sigmoid_gating_delta_rule_update(
-            A_log=A_log,
-            dt_bias=dt_bias,
-            q=q,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            initial_state_source=ssm_states,
-            initial_state_indices=cache_indices,
-            cu_seqlens=query_start_loc,
-            use_qk_l2norm_in_kernel=True,
-            softplus_beta=1.0,
-            softplus_threshold=20.0,
-            is_kda=True,
-            disable_state_update=True,
-            intermediate_states_buffer=intermediate_states_buffer,
-            intermediate_state_indices=intermediate_state_indices,
-            cache_steps=cache_steps,
-            retrieve_parent_token=retrieve_parent_token,
-            lower_bound=lower_bound,
-        )
-
-    def target_verify(
-        self,
-        A_log: torch.Tensor,
-        dt_bias: torch.Tensor,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        *,
-        ssm_states: torch.Tensor,
-        cache_indices: torch.Tensor,
-        query_start_loc: torch.Tensor,
         intermediate_states_buffer: torch.Tensor,
         intermediate_state_indices: torch.Tensor,
         cache_steps: int,
         retrieve_parent_token: torch.Tensor,
+        lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
         # KDA MTP / speculative-decode verify via the fused KDA kernel (IS_KDA=True),
@@ -241,6 +194,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             intermediate_state_indices=intermediate_state_indices,
             cache_steps=cache_steps,
             retrieve_parent_token=retrieve_parent_token,
+            lower_bound=lower_bound,
         )
 
     def extend(
@@ -257,8 +211,9 @@ class TritonKDAKernel(LinearAttnKernelBase):
         A_log: Optional[torch.Tensor] = None,
         dt_bias: Optional[torch.Tensor] = None,
         lower_bound: Optional[float] = None,
+        return_intermediate_states: bool = False,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return chunk_kda(
             q=q,
             k=k,
@@ -272,4 +227,5 @@ class TritonKDAKernel(LinearAttnKernelBase):
             A_log=A_log,
             dt_bias=dt_bias,
             lower_bound=lower_bound,
+            output_intermediate_states=return_intermediate_states,
         )

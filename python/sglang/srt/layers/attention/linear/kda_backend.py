@@ -46,6 +46,8 @@ class KDAKernelDispatcher:
         if decode_backend.is_triton():
             self.decode_kernel = triton_kernel
         elif decode_backend.is_cutedsl():
+            if not is_cuda():
+                raise ValueError("KDA CuTe DSL backend requires CUDA")
             from sglang.srt.layers.attention.linear.kernels.kda_cutedsl import (
                 CuteDSLKDAKernel,
             )
@@ -241,8 +243,8 @@ class KDAKernelDispatcher:
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        result = self.extend_kernel.extend(
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.extend_kernel.extend(
             q,
             k,
             v,
@@ -253,12 +255,6 @@ class KDAKernelDispatcher:
             query_start_loc=query_start_loc,
             **kwargs,
         )
-        # Upstream prefill backends return only the output, while the local
-        # state-tracking Triton/cuLA paths also return chunk-boundary states.
-        # Normalize both contracts for the caller.
-        if isinstance(result, tuple):
-            return result
-        return result, None
 
 
 class KDAAttnBackend(MambaAttnBackendBase):
@@ -266,6 +262,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
+        # mamba_cache.conv is [..., kernel-1, dim] while conv_states_shape expects the window length (kernel-1) at shape[-1], hence the transpose.
         self.conv_states_shape = (
             model_runner.req_to_token_pool.mamba_pool.mamba_cache.conv[0]
             .transpose(-1, -2)
@@ -356,22 +353,14 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
         lower_bound = kwargs.get("lower_bound", getattr(layer, "lower_bound", None))
 
-        # Skip split + reshape by consuming the packed mixed_qkv directly in a
-        # single fused Triton kernel (KDA per-K gate variant of GDN PR #20627).
-        #
-        # The packed kernel hard-assumes one token per sequence (T=1): it has no
-        # query_start_loc / per-sequence loop. forward_decode is only entered in
-        # decode mode (see HybridLinearAttnBackend.forward dispatch), where each
-        # request contributes exactly one token, so #tokens == #requests. Multi-
-        # token-per-seq speculative paths (target_verify / draft_extend) go
-        # through forward_extend instead. Assert the invariant so a future
-        # routing change fails loudly rather than silently corrupting state.
+        # The packed kernel assumes one token per request. Assert the dispatch
+        # invariant before taking the fused path.
         if self.kernel_dispatcher.supports_packed_decode:
             assert qkv.shape[0] == cache_indices.shape[0], (
                 "KDA packed decode requires one token per sequence (T=1): "
                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
             )
-            result = self.kernel_dispatcher.packed_decode(
+            core_attn_out = self.kernel_dispatcher.packed_decode(
                 mixed_qkv=qkv,
                 a=a,
                 b=b,
@@ -393,14 +382,14 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 self._track_mamba_state_decode(
                     forward_batch, conv_states, ssm_states, cache_indices
                 )
-            return result
+            return core_attn_out
 
         q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
-        result = self.kernel_dispatcher.decode(
+        core_attn_out = self.kernel_dispatcher.decode(
             q=q,
             k=k,
             v=v,
@@ -414,15 +403,12 @@ class KDAAttnBackend(MambaAttnBackendBase):
             lower_bound=lower_bound,
         )
 
-        # Track SSM/conv states for prefix caching during decode.
-        # The kernel updates ssm_states in-place; copy the updated states to
-        # persistent track slots so the radix cache can store them.
         if not forward_batch.forward_mode.is_target_verify():
             self._track_mamba_state_decode(
                 forward_batch, conv_states, ssm_states, cache_indices
             )
 
-        return result
+        return core_attn_out
 
     def forward_extend(
         self,
@@ -445,19 +431,16 @@ class KDAAttnBackend(MambaAttnBackendBase):
         conv_states = mamba_cache_params.conv[0].transpose(-1, -2)
 
         ssm_states = mamba_cache_params.temporal
+
         has_initial_state = forward_batch.extend_prefix_lens > 0
 
-        splits = [layer.q_dim, layer.k_dim, layer.v_dim]
-        mixed_qkv_t = mixed_qkv.transpose(0, 1)
         if self.forward_metadata.has_mamba_track_mask:
-            mixed_qkv_to_track = mixed_qkv_t[
-                :, self.forward_metadata.track_conv_indices
-            ].transpose(0, 1)
-            conv_states[self.forward_metadata.conv_states_mask_indices] = (
-                mixed_qkv_to_track
-            )
+            mamba_cache_params.conv[0][
+                self.forward_metadata.conv_states_mask_indices
+            ] = mixed_qkv[self.forward_metadata.track_conv_indices]
 
-        q, k, v = mixed_qkv_t.split(splits, dim=0)
+        splits = [layer.q_dim, layer.k_dim, layer.v_dim]
+        q, k, v = mixed_qkv.transpose(0, 1).split(splits, dim=0)
         q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights.split(
             splits, dim=0
         )
@@ -505,7 +488,8 @@ class KDAAttnBackend(MambaAttnBackendBase):
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
-        core_attn_out, h = self.kernel_dispatcher.extend(
+        track_ssm = self.forward_metadata.has_mamba_track_mask
+        core_attn_out = self.kernel_dispatcher.extend(
             q=q,
             k=k,
             v=v,
@@ -518,14 +502,13 @@ class KDAAttnBackend(MambaAttnBackendBase):
             dt_bias=layer.dt_bias,
             lower_bound=getattr(layer, "lower_bound", None),
             extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
-            # draft_extend_v2 must stay rollback-able, so kernels that commit
-            # state in place (e.g. FlashKDA) must not run for it.
+            # draft_extend_v2 must stay rollback-able, so kernels that commit state
+            # in place (e.g. FlashKDA) must not run for it.
             is_spec_decode=forward_batch.forward_mode.is_draft_extend_v2(),
+            return_intermediate_states=track_ssm,
         )
-
-        # Track SSM states at chunk boundaries for prefix caching.
-        # The h tensor from the FLA kernel contains per-chunk boundary states.
-        if h is not None:
+        if track_ssm:
+            core_attn_out, h = core_attn_out
             self._track_mamba_state_extend(
                 forward_batch, h, ssm_states, self.forward_metadata
             )
