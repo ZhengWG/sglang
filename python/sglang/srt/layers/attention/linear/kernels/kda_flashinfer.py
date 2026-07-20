@@ -5,7 +5,8 @@ no KDA prefill kernel, so ``extend`` stays on Triton / CuTe DSL.
 
 Contract with the Triton KDA reference:
   - raw per-K gate ``a`` is activated in-kernel as
-    ``-exp(A_log) * softplus(a + dt_bias)``;
+    ``-exp(A_log) * softplus(a + dt_bias)`` or, when ``lower_bound`` is set,
+    ``lower_bound * sigmoid(exp(A_log) * (a + dt_bias))``;
   - beta ``b`` is a logit, so this wrapper passes ``sigmoid(b)``;
   - q/k are L2-normalized in-kernel;
   - state layout is ``[N, HV, V, K]`` for committed and speculative state.
@@ -118,6 +119,7 @@ class FlashInferKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
+        lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
         batch_size = cache_indices.shape[0]
@@ -144,8 +146,9 @@ class FlashInferKDAKernel(LinearAttnKernelBase):
 
         A_log_fi, dt_bias_fi = self._prep_gate_params(A_log, dt_bias)
 
-        # Softplus gate (lower_bound=None) to match the Triton KDA decode path;
-        # in-place state update into the committed pool (no rollback for decode).
+        # Match the Triton gate mode: lower_bound=None selects the standard
+        # softplus gate, while a value selects the bounded safe gate. State is
+        # updated in place in the committed pool (no rollback for decode).
         # query_start_loc is the decode cu_seqlens (one token per request).
         output_fi, _ = self._recurrent_kda(
             q=query_fi,
@@ -160,7 +163,7 @@ class FlashInferKDAKernel(LinearAttnKernelBase):
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
-            lower_bound=None,
+            lower_bound=lower_bound,
             cu_seqlens=query_start_loc.to(torch.int32),
             ssm_state_indices=cache_indices.to(torch.int32),
         )
@@ -186,6 +189,7 @@ class FlashInferKDAKernel(LinearAttnKernelBase):
         intermediate_state_indices: torch.Tensor,
         cache_steps: int,
         retrieve_parent_token: torch.Tensor,
+        lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
         if retrieve_parent_token is not None:
@@ -272,7 +276,7 @@ class FlashInferKDAKernel(LinearAttnKernelBase):
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
-            lower_bound=None,
+            lower_bound=lower_bound,
             cu_seqlens=query_start_loc.to(torch.int32),
             ssm_state_indices=ssm_state_indices,
             num_spec_tokens=num_spec_tokens,

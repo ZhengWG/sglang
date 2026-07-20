@@ -140,17 +140,18 @@ def chunk_kda_cutedsl(
     if num_sms is None:
         num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
 
-    # Gate activation (standard KDA gate). Fused into the prologue is a B2 TODO;
-    # for now a small PyTorch pass, matching chunk_kda's kda_gate_chunk_cumsum.
+    # Gate activation. Fused into the prologue is a B2 TODO; for now use a small
+    # PyTorch pass matching chunk_kda's kda_gate_chunk_cumsum for both standard
+    # and bounded safe-gate models.
     if A_log is not None:
-        if lower_bound is not None:
-            raise NotImplementedError(
-                "KDA cutedsl: safe_gate (lower_bound) not yet supported"
-            )
         x = g.float()
         if dt_bias is not None:
             x = x + dt_bias.float().view(1, Hv, K)
-        g_act = -torch.exp(A_log.float()).view(1, Hv, 1) * F.softplus(x)
+        exp_A = torch.exp(A_log.float()).view(1, Hv, 1)
+        if lower_bound is None:
+            g_act = -exp_A * F.softplus(x)
+        else:
+            g_act = lower_bound * torch.sigmoid(exp_A * x)
     else:
         g_act = g.float()
 

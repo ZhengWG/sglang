@@ -40,8 +40,20 @@ class KDAKernelDispatcher:
         self,
         decode_backend: LinearAttnKernelBackend,
         prefill_backend: LinearAttnKernelBackend,
+        lower_bound: Optional[float] = None,
     ):
         triton_kernel = TritonKDAKernel()
+
+        # CuTe DSL recurrent KDA only implements the standard softplus gate.
+        # The model-level lower_bound is known when the backend is initialized,
+        # so resolve this incompatibility once instead of falling back on every
+        # decode call. CuTe DSL prefill remains independently selectable.
+        if decode_backend.is_cutedsl() and lower_bound is not None:
+            rank0_log(
+                "KDA cutedsl decode does not support bounded safe gate; "
+                "using Triton decode."
+            )
+            decode_backend = LinearAttnKernelBackend.TRITON
 
         if decode_backend.is_triton():
             self.decode_kernel = triton_kernel
@@ -281,7 +293,13 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 "KDA FlashInfer speculative decoding only supports topk=1 "
                 "(EAGLE tree verify / retrieve_parent_token is unsupported)."
             )
-        self.kernel_dispatcher = KDAKernelDispatcher(decode_backend, prefill_backend)
+        config = model_runner.model_config.hf_config
+        lower_bound = getattr(config, "kda_lower_bound", None)
+        self.kernel_dispatcher = KDAKernelDispatcher(
+            decode_backend,
+            prefill_backend,
+            lower_bound=lower_bound,
+        )
         # Fused conv1d + gating-delta-rule chain-verify (MTP topk==1) fast
         # path. Opt-in and KDA-only: no shared conv/GDN kernel is modified,
         # and every unsupported case (tree, width != 4, T < 3) falls through

@@ -124,9 +124,12 @@ def test_kda_chunk_cutedsl_correctness(num_seqs: int):
     assert state_error.mean().item() < 5e-3
 
 
-def test_kda_chunk_cutedsl_internal_gate_activation():
+@pytest.mark.parametrize(
+    "lower_bound", [None, -5.0], ids=["standard_gate", "safe_gate"]
+)
+def test_kda_chunk_cutedsl_internal_gate_activation(lower_bound):
     """The A_log/dt_bias gate activation inside chunk_kda_cutedsl must match
-    feeding a pre-activated gate."""
+    feeding a pre-activated standard or bounded safe gate."""
     torch.manual_seed(0)
     T = 256
     num_heads = 8
@@ -143,9 +146,12 @@ def test_kda_chunk_cutedsl_internal_gate_activation():
     beta = torch.sigmoid(torch.randn(1, T, num_heads, device="cuda")).float()
     h0 = torch.zeros(1, num_heads, head_dim, head_dim, device="cuda")
 
-    g_pre = -A_log.exp().view(1, num_heads, 1) * F.softplus(
-        g_raw[0] + dt_bias.view(1, num_heads, head_dim)
-    )
+    x = g_raw[0] + dt_bias.view(1, num_heads, head_dim)
+    exp_A = A_log.exp().view(1, num_heads, 1)
+    if lower_bound is None:
+        g_pre = -exp_A * F.softplus(x)
+    else:
+        g_pre = lower_bound * torch.sigmoid(exp_A * x)
     o_pre, ht_pre = chunk_kda_cutedsl(
         q[0], k[0], v[0], g_pre.float(), beta[0], h0.clone(), cu_seqlens, scale
     )
@@ -160,6 +166,7 @@ def test_kda_chunk_cutedsl_internal_gate_activation():
         scale,
         A_log=A_log,
         dt_bias=dt_bias,
+        lower_bound=lower_bound,
     )
     torch.cuda.synchronize()
     torch.testing.assert_close(o_int.float(), o_pre.float(), atol=2e-3, rtol=1e-2)

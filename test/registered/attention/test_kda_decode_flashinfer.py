@@ -42,6 +42,7 @@ if not _available:
 
 # KDA: head_k_dim == head_v_dim == 128; single q/v head group (HV == H) here.
 H, HV, K, V = 16, 16, 128, 128
+SAFE_GATE_LOWER_BOUND = -5.0
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ def _make_verify_inputs(
     )
 
 
-def _decode(kern, d, ssm):
+def _decode(kern, d, ssm, lower_bound=None):
     # `ssm` is updated in place (committed-pool decode step); pass a fresh clone.
     return kern.decode(
         d["q"],
@@ -117,10 +118,11 @@ def _decode(kern, d, ssm):
         ssm_states=ssm,
         cache_indices=d["cache_indices"],
         query_start_loc=d["qsl"],
+        lower_bound=lower_bound,
     ).reshape(d["B"], HV, V)
 
 
-def _verify(kern, d, ssm, intermediate_states):
+def _verify(kern, d, ssm, intermediate_states, lower_bound=None):
     return kern.target_verify(
         A_log=d["A_log"],
         dt_bias=d["dt_bias"],
@@ -136,10 +138,11 @@ def _verify(kern, d, ssm, intermediate_states):
         intermediate_state_indices=d["intermediate_indices"],
         cache_steps=d["T"],
         retrieve_parent_token=None,
+        lower_bound=lower_bound,
     ).reshape(d["seq"], HV, V)
 
 
-def _sequential_decode_states(kern, d):
+def _sequential_decode_states(kern, d, lower_bound=None):
     """Ground truth for verify checkpoints: single-token decode over each step."""
     B, T = d["B"], d["T"]
     st = d["ssm"].clone()  # committed pool [pool, HV, V, K], updated in place by decode
@@ -159,6 +162,7 @@ def _sequential_decode_states(kern, d):
             ssm_states=st,
             cache_indices=d["cache_indices"],
             query_start_loc=qsl_dec,
+            lower_bound=lower_bound,
         )
         ref[:, t] = st[ci]  # post-token-t state for each request
     return ref
@@ -167,8 +171,13 @@ def _sequential_decode_states(kern, d):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "lower_bound",
+    [None, SAFE_GATE_LOWER_BOUND],
+    ids=["standard_gate", "safe_gate"],
+)
 @pytest.mark.parametrize("batch_size", [1, 8, 64, 128])
-def test_kda_decode_flashinfer_matches_triton(batch_size):
+def test_kda_decode_flashinfer_matches_triton(batch_size, lower_bound):
     """FlashInfer decode output + committed-pool state update match the Triton
     KDA decode reference."""
     torch.manual_seed(batch_size)
@@ -176,9 +185,9 @@ def test_kda_decode_flashinfer_matches_triton(batch_size):
     fi, tri = FlashInferKDAKernel(), TritonKDAKernel()
 
     st_ref = d["ssm"].clone()
-    ref_out = _decode(tri, d, st_ref).float()
+    ref_out = _decode(tri, d, st_ref, lower_bound).float()
     st_fi = d["ssm"].clone()
-    out = _decode(fi, d, st_fi).float()
+    out = _decode(fi, d, st_fi, lower_bound).float()
     torch.cuda.synchronize()
 
     assert torch.isfinite(out).all(), "FlashInfer decode output has non-finite values"
@@ -198,8 +207,15 @@ def test_kda_decode_flashinfer_matches_triton(batch_size):
     ), f"decode state mean diff {s_err.mean().item():.2e}"
 
 
+@pytest.mark.parametrize(
+    "lower_bound",
+    [None, SAFE_GATE_LOWER_BOUND],
+    ids=["standard_gate", "safe_gate"],
+)
 @pytest.mark.parametrize("batch_size,num_spec", [(1, 7), (8, 7), (32, 3)])
-def test_kda_target_verify_flashinfer_matches_triton(batch_size, num_spec):
+def test_kda_target_verify_flashinfer_matches_triton(
+    batch_size, num_spec, lower_bound
+):
     """FlashInfer MTP / target_verify (topk=1) per-draft-token output matches the
     Triton KDA verify reference over T = 1 + num_spec draft tokens per sequence."""
     torch.manual_seed(batch_size + num_spec)
@@ -207,9 +223,19 @@ def test_kda_target_verify_flashinfer_matches_triton(batch_size, num_spec):
     fi, tri = FlashInferKDAKernel(), TritonKDAKernel()
 
     ref_out = _verify(
-        tri, d, d["ssm"].clone(), d["intermediate_states"].clone()
+        tri,
+        d,
+        d["ssm"].clone(),
+        d["intermediate_states"].clone(),
+        lower_bound,
     ).float()
-    out = _verify(fi, d, d["ssm"].clone(), d["intermediate_states"].clone()).float()
+    out = _verify(
+        fi,
+        d,
+        d["ssm"].clone(),
+        d["intermediate_states"].clone(),
+        lower_bound,
+    ).float()
     torch.cuda.synchronize()
 
     assert torch.isfinite(out).all(), "FlashInfer verify output has non-finite values"
@@ -223,8 +249,13 @@ def test_kda_target_verify_flashinfer_matches_triton(batch_size, num_spec):
     "batch_size,num_spec,extra_steps",
     [(1, 7, 0), (8, 7, 0), (32, 3, 2)],
 )
+@pytest.mark.parametrize(
+    "lower_bound",
+    [None, SAFE_GATE_LOWER_BOUND],
+    ids=["standard_gate", "safe_gate"],
+)
 def test_kda_target_verify_flashinfer_checkpoint_states(
-    batch_size, num_spec, extra_steps
+    batch_size, num_spec, extra_steps, lower_bound
 ):
     """Checkpoint states must match true sequential decode states."""
     torch.manual_seed(1000 + batch_size + num_spec)
@@ -236,12 +267,11 @@ def test_kda_target_verify_flashinfer_checkpoint_states(
     )
     fi = FlashInferKDAKernel()
 
-    ref_states = _sequential_decode_states(fi, d).float()
+    ref_states = _sequential_decode_states(fi, d, lower_bound).float()
 
     intermediate_states = d["intermediate_states"].clone()
-    _verify(
-        fi, d, d["ssm"].clone(), intermediate_states
-    )  # fills intermediate_states[n, t] in place
+    # Fills intermediate_states[n, t] in place.
+    _verify(fi, d, d["ssm"].clone(), intermediate_states, lower_bound)
     torch.cuda.synchronize()
 
     got = intermediate_states[:, : d["T"]].float()  # [B, T, HV, V, K] checkpoint states

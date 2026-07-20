@@ -22,7 +22,8 @@ def _is_blackwell() -> bool:
 class CuteDSLKDAKernel(LinearAttnKernelBase):
     """CuTe DSL kernel for KDA.
 
-    Decode: ``cutedsl_fused_sigmoid_gating_kda_update`` (SM90+).
+    Decode: ``cutedsl_fused_sigmoid_gating_kda_update`` (SM90+) for the standard
+    gate. Backend initialization routes bounded safe-gate decode to Triton.
     Extend (prefill): SM100 chunk pipeline ``chunk_kda_cutedsl`` (SM100+ only,
     ``head_k_dim`` must be 128). On SM90 the prefill path is unsupported; callers
     query :attr:`supports_prefill` and fall back to Triton.
@@ -71,8 +72,18 @@ class CuteDSLKDAKernel(LinearAttnKernelBase):
         ssm_states: torch.Tensor,
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
+        lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
+        # The CuTe DSL recurrent kernel currently implements only the standard
+        # softplus gate. The KDA dispatcher resolves safe-gate models to Triton
+        # during backend initialization; keep this guard for direct misuse.
+        if lower_bound is not None:
+            raise NotImplementedError(
+                "CuTe DSL KDA decode does not support bounded safe gate; "
+                "select the Triton decode backend."
+            )
+
         return cutedsl_fused_sigmoid_gating_kda_update(
             A_log=A_log,
             dt_bias=dt_bias,

@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import torch
 
@@ -11,6 +12,7 @@ from sglang.kernels.ops.attention.fla.fused_sigmoid_gating_recurrent import (
 )
 from sglang.kernels.ops.attention.fla.index import prepare_chunk_indices
 from sglang.kernels.ops.attention.fla.kda import (
+    chunk_kda,
     fused_recurrent_kda,
     kda_gate_chunk_cumsum,
 )
@@ -507,6 +509,165 @@ class TestKDAPackedDecode(unittest.TestCase):
             atol=2e-2,
             rtol=1e-2,
         )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.version.hip is None,
+    "Test requires NVIDIA CUDA",
+)
+class TestKDAChunkSafeGate(unittest.TestCase):
+    def test_lower_bound_enables_intra_safe_gate(self):
+        from sglang.kernels.ops.attention.fla import kda as kda_ops
+
+        q = torch.zeros(1, 1, 1, 1)
+        state = torch.zeros(1, 1, 1, 1)
+        indices = torch.zeros(1, dtype=torch.int32)
+
+        with (
+            mock.patch.object(
+                kda_ops, "kda_gate_chunk_cumsum", side_effect=lambda g, **_: g
+            ),
+            mock.patch.object(
+                kda_ops,
+                "chunk_kda_fwd_intra",
+                return_value=(q, q, None, q, q, None),
+            ) as intra,
+            mock.patch.object(
+                kda_ops, "chunk_gated_delta_rule_fwd_h", return_value=(state, q)
+            ),
+            mock.patch.object(kda_ops, "chunk_gla_fwd_o_gk", return_value=q),
+        ):
+            kda_ops.chunk_kda_fwd(
+                q=q,
+                k=q,
+                v=q,
+                g=q,
+                beta=torch.zeros(1, 1, 1),
+                scale=1.0,
+                initial_state=state,
+                initial_state_indices=indices,
+                A_log=torch.zeros(1),
+                lower_bound=-5.0,
+            )
+
+        self.assertTrue(intra.call_args.kwargs["safe_gate"])
+
+    def test_long_prefill_matches_recurrent(self):
+        """Exercise the non-fused-diagonal intra path with safe_gate enabled.
+
+        T=1088 and H=16 produce 17 * 16 = 272 CTAs, just above chunk_kda's
+        small-grid cutoff. This ensures lower_bound reaches
+        chunk_kda_fwd_intra(safe_gate=True), instead of being masked by the
+        fused-diagonal path used by shorter tests.
+        """
+        torch.manual_seed(0)
+        device = "cuda"
+        dtype = torch.bfloat16
+        T, H, K, V = 1088, 16, 32, 32
+        lower_bound = -5.0
+
+        q = torch.randn(1, T, H, K, device=device, dtype=dtype)
+        k = torch.randn(1, T, H, K, device=device, dtype=dtype)
+        v = torch.randn(1, T, H, V, device=device, dtype=dtype)
+        raw_g = torch.randn(1, T, H, K, device=device, dtype=dtype)
+        beta = torch.sigmoid(torch.randn(1, T, H, device=device)).to(dtype)
+        A_log = torch.randn(H, device=device, dtype=torch.float32) * 0.2
+        dt_bias = torch.randn(H * K, device=device, dtype=torch.float32) * 0.1
+        cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+        cache_indices = torch.tensor([0], device=device, dtype=torch.int32)
+        initial_state = (
+            torch.randn(1, H, V, K, device=device, dtype=torch.float32) * 0.01
+        )
+
+        gate_x = raw_g.float() + dt_bias.view(1, 1, H, K)
+        gate = lower_bound * torch.sigmoid(
+            torch.exp(A_log).view(1, 1, H, 1) * gate_x
+        )
+        ref_out, ref_state = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=gate,
+            beta=beta,
+            initial_state=initial_state.clone(),
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+        )
+
+        chunk_state = initial_state.clone()
+        out = chunk_kda(
+            q=q.clone(),
+            k=k.clone(),
+            v=v.clone(),
+            g=raw_g.clone(),
+            beta=beta.clone(),
+            initial_state=chunk_state,
+            initial_state_indices=cache_indices,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(
+            out.float(), ref_out.float(), atol=5e-2, rtol=5e-2
+        )
+        torch.testing.assert_close(
+            chunk_state.float(), ref_state.float(), atol=5e-2, rtol=5e-2
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability()[0] >= 9,
+    "Test requires NVIDIA SM90+",
+)
+class TestKDACuteDSLSafeGateRouting(unittest.TestCase):
+    def test_safe_gate_is_resolved_to_triton_at_dispatcher_init(self):
+        from sglang.srt.layers.attention.linear.kda_backend import (
+            KDAKernelDispatcher,
+        )
+        from sglang.srt.layers.attention.linear.kernels.kda_triton import (
+            TritonKDAKernel,
+        )
+        from sglang.srt.layers.attention.linear.utils import (
+            LinearAttnKernelBackend,
+        )
+
+        dispatcher = KDAKernelDispatcher(
+            decode_backend=LinearAttnKernelBackend.CUTEDSL,
+            prefill_backend=LinearAttnKernelBackend.TRITON,
+            lower_bound=-5.0,
+        )
+
+        self.assertIsInstance(dispatcher.decode_kernel, TritonKDAKernel)
+
+    def test_direct_safe_gate_decode_fails_fast(self):
+        try:
+            from sglang.srt.layers.attention.linear.kernels.kda_cutedsl import (
+                CuteDSLKDAKernel,
+            )
+        except ImportError as exc:
+            self.skipTest(f"CuTe DSL dependencies are unavailable: {exc}")
+
+        with self.assertRaisesRegex(NotImplementedError, "Triton decode backend"):
+            CuteDSLKDAKernel().decode(
+                None,
+                None,
+                None,
+                None,
+                None,
+                A_log=None,
+                dt_bias=None,
+                ssm_states=None,
+                cache_indices=None,
+                query_start_loc=None,
+                lower_bound=-5.0,
+            )
 
 
 if __name__ == "__main__":
