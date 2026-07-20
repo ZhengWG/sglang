@@ -58,6 +58,8 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt,sharing=locked \
         # touch an empty constraint.txt to avoid pip error about missing constraint file, since some pip install commands in later stages rely on this file existing
         touch /etc/pip/constraint.txt; \
         if [ -d /usr/local/lib/python3.12/dist-packages ]; then \
+            pip3 list --exclude pip  --no-color | awk 'NR>2 { print $1 }' | xargs  pip3 uninstall -y ; \
+            pip3 uninstall -y pip && \
             rm -rf /usr/local/lib/python3.12/dist-packages ; \
         fi \
     fi && \
@@ -200,10 +202,6 @@ ARG CUDA_VERSION
 ARG BUILD_TYPE
 ARG SGL_KERNEL_VERSION
 ARG GITHUB_ARTIFACTORY
-ARG SGLANG_KERNEL_WHL_URL
-ARG SGLANG_WHL_URL
-ARG SGLANG_KERNEL_CURRENT_WHL
-ARG SGLANG_CURRENT_WHL
 ARG RUSTUP_DIST_MIRROR
 
 WORKDIR /sgl-workspace
@@ -241,13 +239,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         13.0.1) CUINDEX=130 ;; \
         *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
     esac \
-    && if [ -n "$SGLANG_KERNEL_WHL_URL" ]; then \
-        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_WHL_URL}" \
-    ; \
-    elif [ -n "$SGLANG_KERNEL_CURRENT_WHL" ]; then \
-        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_CURRENT_WHL}" \
-    ; \
-    elif [ "$CUDA_VERSION" = "12.6.1" ]; then \
+    && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
         python3 -m pip install https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu124-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     elif [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
@@ -293,16 +285,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
            sed -i 's/flashinfer_python\[cu13\]/flashinfer_python[cu12]/' pyproject.toml && \
            sed -i 's/nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' pyproject.toml; \
        fi \
-    && if [ -n "$SGLANG_WHL_URL" ]; then \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}" \
-    ; \
-    elif [ -n "$SGLANG_CURRENT_WHL" ]; then \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}" \
-    ; \
-    else \
-        python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
-    ; \
-    fi \
+    && python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
     && if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
            pip list --format=freeze | awk -F'==' '/-cu13(==|$)/ {print $1}' \
                | xargs -r python3 -m pip uninstall -y && \
@@ -408,32 +391,36 @@ WORKDIR /build
 # setup.py derives the version from `git rev-parse`, so keep the .git directory.
 # Bound each clone attempt so a stalled GitHub proxy can trigger the retry loop.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    mkdir -p /wheels && \
     if [ "$(uname -m)" = "x86_64" ]; then \
-        for attempt in 1 2 3; do \
-            rm -rf hpc-ops; \
-            if timeout 300 git \
-                    -c http.lowSpeedLimit=1024 \
-                    -c http.lowSpeedTime=60 \
-                    clone --no-tags https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git; then \
-                break; \
-            fi; \
-            if [ "${attempt}" = "3" ]; then \
-                exit 1; \
-            fi; \
-            sleep $((attempt * 5)); \
-        done && \
+        git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
-        sed -i "s/\"-j16\"/\"-j${HPC_OPS_BUILD_PARALLEL}\", \"--verbose\"/" setup.py && \
-        if ! PATH=/usr/bin:${PATH} python3 setup.py bdist_wheel -d /wheels \
-                > /tmp/hpc-ops-build.log 2>&1; then \
-            grep -nEi "error:|fatal|killed|out of memory|nvcc fatal" \
-                /tmp/hpc-ops-build.log | tail -n 100 || true; \
-            tail -n 300 /tmp/hpc-ops-build.log; \
-            exit 1; \
-        fi; \
-        tail -n 20 /tmp/hpc-ops-build.log && rm /tmp/hpc-ops-build.log; \
+        mem_check(){ \
+          for i in $(seq 1 1000); do \
+            _MEM_LIMIT=$(( 30 * 1024 * 1024 * 1024)); \
+            _MEM_USAGE=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes); \
+            if [ "${_MEM_USAGE}" -gt "${_MEM_LIMIT}" ]; then \
+              ps -eo pid,ppid,user,%mem,rss,comm,args --sort=-rss | head -n 10 | awk ' NR > 1 { print $1}' | head -n 2 | xargs kill -9; \
+            fi; \
+            sleep 5; \
+            if find /wheels -maxdepth 1 -name '*.whl' | grep -q .; then \
+              break; \
+            fi; \
+          done; \
+          echo $(date) "build completed"; \
+        }; \
+        mem_check & \
+        mem_check_pid=$! \
+        success=0; \
+        for i in {1..5}; do \
+            python3 setup.py bdist_wheel -d /wheels; \
+            if [ "$?" -eq 0 ]; then \
+                success=1 && break; \
+            fi; \
+        done; \
+        kill "${mem_check_pid}" || true ; \
+        wait || true; \
+        [ "${success}" -eq 1 ]; \
     fi
 
 ########################################################
@@ -460,10 +447,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_cubin /flashinfer_jit_output/ \
     && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_cubin-*.dist-info /flashinfer_jit_output/ \
     && if [ "$INSTALL_FLASHINFER_JIT_CACHE" = "1" ]; then \
-        python3 -m pip install mitmproxy -I && \
-        curl -L https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools/mitm_runner.py -o /tmp/mitm_runner.py && \
-        python3 /tmp/mitm_runner.py --cmd \
-        python3 -m pip install flashinfer-jit-cache==${FLASHINFER_VERSION} --index-url https://flashinfer.ai/whl/cu${CUINDEX} \
+        python3 -m pip install flashinfer-jit-cache==${FLASHINFER_VERSION}+cu${CUINDEX} --index-url https://pypi.antfin-inc.com/simple-dev \
         && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_jit_cache /flashinfer_jit_output/ \
         && cp -r /usr/local/lib/python3.12/dist-packages/flashinfer_jit_cache-*.dist-info /flashinfer_jit_output/ ; \
     fi
@@ -807,6 +791,8 @@ ARG CUDA_VERSION
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
 ARG INSTALL_DYNAMO=0
+ARG SGLANG_CURRENT_WHL
+ARG SGLANG_KERNEL_CURRENT_WHL
 
 ARG GITHUB_ARTIFACTORY
 ARG PIP_DEFAULT_INDEX
@@ -876,8 +862,9 @@ WORKDIR /sgl-workspace/sglang
 # install sglang from wheel if URL or local path provided, to avoid editable install overhead when wheel is available
 RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
         pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}"; \
-    elif [ -n "$SGLANG_WHL_URL" ]; then \
-        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}"; \
+    fi && \
+    if [ -n "$SGLANG_KERNEL_CURRENT_WHL" ]; then \
+        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_CURRENT_WHL}"; \
     fi
 
 # Runtime logging and internal launch scripts expect these paths to exist.
@@ -991,8 +978,8 @@ FROM ${RUNTIME_BASE_IMAGE} AS runtime
 ARG CUDA_VERSION
 ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
-ARG SGLANG_WHL_URL
 ARG SGLANG_CURRENT_WHL
+ARG SGLANG_KERNEL_CURRENT_WHL
 ARG BUILD_TYPE
 ARG UBUNTU_MIRROR
 ARG PIP_DEFAULT_INDEX
@@ -1132,9 +1119,11 @@ fi
 
 RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
         pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_CURRENT_WHL}"; \
-    elif [ -n "$SGLANG_WHL_URL" ]; then \
-        pip3 install --no-cache-dir --force-reinstall --no-deps "sglang[${BUILD_TYPE}] @ ${SGLANG_WHL_URL}"; \
+    fi && \
+    if [ -n "$SGLANG_KERNEL_CURRENT_WHL" ]; then \
+        python3 -m pip install "sglang-kernel @ ${SGLANG_KERNEL_CURRENT_WHL}"; \
     fi
+
 WORKDIR /sgl-workspace/sglang
 
 # Runtime logging and internal launch scripts expect these paths to exist.

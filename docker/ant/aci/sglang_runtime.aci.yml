@@ -33,8 +33,6 @@ parameters:
   python_version: "3.10" # 3.10默认安装了torch,uv 等组件，构建比较快, 社区的sglang-kernel包也是用python3.10编译的, 和runtime里python版本没关系
   max_jobs: 24 # ninja编译并发度, 一般不用修改
   nvcc_threads: 4 # nvcc编译并发度, 一般不用修改
-  sglang_kernel_whl_url: ""
-  sglang_whl_url: ""
   deepgemm_whl_url: "" # deepgemm已经编译到sglang-kernel包,不需要安装了，如果安装老版本的sglang，需要安装这个包
   flashmla_whl_url: "" # 同上，可选项
   deepep_whl_url: "" # 同上，可选项
@@ -277,7 +275,7 @@ jobs:
       imageTag: ${{vcs.commitShortSha}}-${{pipeline.currentTimestamp}} # 构建产物镜像 tag
       dockerfile: ./docker/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
       contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
-      buildArgs: SGLANG_BUILD_COMMIT=${{vcs.commitShortSha}},SGLANG_BUILD_URL=${{pipeline.url}},RUNTIME_BASE_IMAGE=${{parameters.runtime_base_image}}:${{jobs.verify_params.outputs.output.runtime_base_image_tag}},CUDA_VERSION=${{parameters.cuda_version_full}},SGLANG_KERNEL_WHL_URL=${{parameters.sglang_kernel_whl_url}},SGLANG_WHL_URL=${{parameters.sglang_whl_url}},SGLANG_KERNEL_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang_kernel.url}},SGLANG_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang.url}},DEEPGEMM_WHL_URL=${{parameters.deepgemm_whl_url}},FLASHMLA_WHL_URL=${{parameters.flashmla_whl_url}},DEEPEP_WHL_URL=${{parameters.deepep_whl_url}},TRANSFER_ENGINE_WHL_URL=${{parameters.transfer_engine_whl_url}},KVPOOL_WHL_URL=${{parameters.kvpool_whl_url}},UBUNTU_MIRROR=${{parameters.ubuntu_mirror}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},INSTALL_FLASHINFER_JIT_CACHE=${{parameters.install_flashinfer_jit_cache}},RUNTIME_VERSION=${{parameters.runtime_version}},RUNTIME_LLM_VERSION=${{parameters.runtime_llm_version}},RUSTUP_DIST_MIRROR=${{parameters.rustup_dist_mirror}} # docker build 的 args 参数，格式为 key1=value1,key2=value2，注意key/value的格式，不能有空格、双引号等特殊字符
+      buildArgs: SGLANG_BUILD_COMMIT=${{vcs.commitShortSha}},SGLANG_BUILD_URL=${{pipeline.url}},RUNTIME_BASE_IMAGE=${{parameters.runtime_base_image}}:${{jobs.verify_params.outputs.output.runtime_base_image_tag}},CUDA_VERSION=${{parameters.cuda_version_full}},SGLANG_KERNEL_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang_kernel.url}},SGLANG_CURRENT_WHL=${{jobs.build_sglang_wheel_packages.outputs.artifacts.sglang.url}},DEEPGEMM_WHL_URL=${{parameters.deepgemm_whl_url}},FLASHMLA_WHL_URL=${{parameters.flashmla_whl_url}},DEEPEP_WHL_URL=${{parameters.deepep_whl_url}},TRANSFER_ENGINE_WHL_URL=${{parameters.transfer_engine_whl_url}},KVPOOL_WHL_URL=${{parameters.kvpool_whl_url}},UBUNTU_MIRROR=${{parameters.ubuntu_mirror}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},INSTALL_FLASHINFER_JIT_CACHE=${{parameters.install_flashinfer_jit_cache}},RUNTIME_VERSION=${{parameters.runtime_version}},RUNTIME_LLM_VERSION=${{parameters.runtime_llm_version}},RUSTUP_DIST_MIRROR=${{parameters.rustup_dist_mirror}} # docker build 的 args 参数，格式为 key1=value1,key2=value2，注意key/value的格式，不能有空格、双引号等特殊字符
       compression: gzip # 为新创建和缓存的镜像层选择压缩类型，默认值为未压缩uncompressed
       forceCompression: true # 对所有镜像层强制应用压缩类型compression(包括已经存在的层)
       registryUsername: null # 镜像 registry 用户名，建议使用 aci secrets 方式传递，避免泄露 (reg.docker.alibaba-inc.com、acs-reg.alipay.com 不传时默认使用平台公共账号 admin.for.antb)
