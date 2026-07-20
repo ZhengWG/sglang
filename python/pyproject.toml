@@ -243,11 +243,11 @@ fallback_version = "0.0.0.dev0"
 #path = "../rust/sglang-grpc/Cargo.toml"
 #binding = "PyO3"
 
-[[tool.setuptools-rust.ext-modules]]
-target = "sglang.srt.multimodal._core"
-path = "../rust/sglang-mm/Cargo.toml"
-binding = "PyO3"
-debug = false
+#[[tool.setuptools-rust.ext-modules]]
+#target = "sglang.srt.multimodal._core"
+#path = "../rust/sglang-mm/Cargo.toml"
+#binding = "PyO3"
+#debug = false
 
 [tool.kernels.dependencies]
 "kernels-community/sgl-flash-attn3" = 1
