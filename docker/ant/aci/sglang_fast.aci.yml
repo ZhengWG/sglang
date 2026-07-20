@@ -24,7 +24,7 @@ parameters:
   sglang_kernel_whl_url: ""
   sglang_whl_url: ""
   runtime_base_image:  "reg.docker.alibaba-inc.com/sglang/deepep-base" # 之前已经制作好的sglang runtime镜像，请确保这个镜像中安装的sglang和sglang-kernel版本的依赖，比如cuda，torch等和上面填写的whl包兼容，否则可能会出现运行时不兼容的问题
-  runtime_base_image_tag: "9e0b0d54-20260630165429" # 这个是已经制作好的镜像，已测试dsv3.1没问题，基于commit 9e0b0d54, 和社区的区别就是没安装gateway
+  runtime_base_image_tag: "5f20a4c5-20260719115403" # 这个是已经制作好的镜像，已测试dsv3.1没问题，基于commit 5f20a4c5, 和社区的区别就是没安装gateway
 
 jobs:
   构建sglang镜像:
