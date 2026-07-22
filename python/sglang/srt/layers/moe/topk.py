@@ -1689,7 +1689,7 @@ def biased_grouped_topk_gpu(
             and topk_routed <= 8
             and num_fused_shared_experts <= 1
         ):
-            from sglang.jit_kernel.bailing_moe_topk import (
+            from sglang.kernels.ops.moe.bailing_moe_topk import (
                 bailing_moe_biased_grouped_topk,
             )
 

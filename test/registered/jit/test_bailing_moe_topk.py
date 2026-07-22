@@ -3,7 +3,9 @@ import sys
 import pytest
 import torch
 
-from sglang.jit_kernel.bailing_moe_topk import bailing_moe_biased_grouped_topk
+from sglang.kernels.ops.moe.bailing_moe_topk import (
+    bailing_moe_biased_grouped_topk,
+)
 from sglang.srt.layers.moe.topk import (
     biased_grouped_topk_gpu,
     biased_grouped_topk_impl,
@@ -158,7 +160,7 @@ def test_biased_grouped_topk_gpu_dispatches_to_bailing_jit(monkeypatch) -> None:
             ),
         )
 
-    import sglang.jit_kernel.bailing_moe_topk as bailing_moe_topk
+    import sglang.kernels.ops.moe.bailing_moe_topk as bailing_moe_topk
 
     monkeypatch.setattr(
         bailing_moe_topk,
