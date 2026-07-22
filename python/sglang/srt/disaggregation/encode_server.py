@@ -1813,21 +1813,14 @@ class MMEncoder:
                 f"(shape={mm_data.shape}, element_size={self._element_size})"
             )
 
-            # RDMA reads a flat [data_ptr, data_ptr + nbytes) range, so the
-            # source must be contiguous. Do this before caching so sibling
-            # /send calls reuse the same tensor and the same MR.
+            # RDMA reads a flat address range; keep the source contiguous and
+            # cache it so sibling /send calls reuse the same tensor and MR.
             if not embedding.is_contiguous():
                 embedding = embedding.contiguous()
             mm_data.cached_embedding = embedding
 
-            # Request-level shared MR. Paths that don't pre-register in
-            # _run_forward (e.g. batch_encode) register lazily on the first
-            # /send. There is no await between the mr_ptr check and the
-            # register/store below, so concurrent sibling-TP /send coroutines
-            # on this event loop cannot double-register the same address
-            # (Mooncake rejects overlapping MRs). Deregistration is deferred
-            # to _cleanup_inflight_encode_state so an early-finishing sibling
-            # cannot invalidate the MR while another transfer is in flight.
+            # Request-level shared MR, registered lazily on the first /send;
+            # deregistration is deferred to _cleanup_inflight_encode_state.
             fwd_state = self._forward_results.setdefault(req_id, {})
             mr_shared = fwd_state.get("mr_ptr") == embedding.data_ptr()
             if not mr_shared:
