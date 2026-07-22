@@ -75,9 +75,9 @@ from sglang.srt.models.deepseek_common.utils import (
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
 from sglang.srt.runtime_context import (
+    get_exec,
     get_forward,
     get_parallel,
-    get_server_args,
     get_stream,
 )
 from sglang.srt.utils import (
@@ -1364,7 +1364,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     config.hidden_size,
                     params_dtype=torch.float32,
                     quant_config=quant_config,
-                    use_attn_tp_group=get_server_args().enable_dp_lm_head,
+                    use_attn_tp_group=get_parallel().enable_dp_lm_head,
                 )
             )
             self.logits_processor = LogitsProcessor(config)
@@ -1403,7 +1403,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
           moe_intermediate_size * num_shared_experts which would NOT be compatible with fusion.
         """
         self.num_fused_shared_experts = 0
-        if get_server_args().disable_shared_experts_fusion:
+        if get_exec().moe.disable_shared_experts_fusion:
             return
 
         num_shared_experts = getattr(self.config, "num_shared_experts", 0)

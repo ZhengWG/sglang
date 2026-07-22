@@ -50,7 +50,7 @@ from sglang.srt.mem_cache.multi_ended_allocator import (
 )
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.utils import split_node_hash_value
-from sglang.srt.runtime_context import get_server_args
+from sglang.srt.runtime_context import get_exec, get_server_args
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -1145,7 +1145,7 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
         # does not have a mamba value.
         if (
             len(value) > best_value_len
-            and not get_server_args().mamba_extra_buffer_no_aligned
+            and not get_exec().mamba.mamba_extra_buffer_no_aligned
         ):
             chunk_aligned_seqlen = (
                 sum(len(v) for v in value) // self.mamba_cache_chunk_size

@@ -100,7 +100,11 @@ def get_batch_sizes_to_capture(
         if get_flags().capture.enable_torch_compile
         else []
     )
-    server_args.cuda_graph_bs = capture_bs
+    # This is runtime state, not startup configuration. ServerArgs is read-only
+    # after resolution, so retain the effective buckets on the owning runner.
+    # Draft runners have their own instance and cannot overwrite the target's
+    # value reported by Scheduler.get_internal_state().
+    model_runner.cuda_graph_bs = capture_bs
     return capture_bs, compile_bs
 
 
