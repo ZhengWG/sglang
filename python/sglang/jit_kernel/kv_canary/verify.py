@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Final
 import torch
 
 from sglang.jit_kernel.kv_canary import consts
-from sglang.jit_kernel.utils import cache_once, load_jit, make_cpp_args
+from sglang.kernels.jit.utils import cache_once, load_jit, make_cpp_args
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -198,7 +198,7 @@ class VerifyPlan:
     enable: torch.Tensor
 
     @classmethod
-    def allocate(cls, *, verify_capacity: int, device: torch.device) -> "VerifyPlan":
+    def allocate(cls, *, verify_capacity: int, device: torch.device) -> VerifyPlan:
         if verify_capacity <= 0:
             raise ValueError(
                 f"kv-canary: VerifyPlan verify_capacity must be positive, got {verify_capacity}"
@@ -223,7 +223,7 @@ class VerifyPlan:
             enable=torch.ones(1, dtype=torch.int32, device=device),
         )
 
-    def zero_for_testing_(self) -> "VerifyPlan":
+    def zero_for_testing_(self) -> VerifyPlan:
         """WARN: ONLY use it when testing plan kernel. Do not use it when testing verify or
         write kernel to avoid hiding bugs."""
         self.verify_slot_indices.zero_()
@@ -352,7 +352,7 @@ def launch_canary_verify_kernel(
 
 
 @cache_once
-def _jit_canary_verify_module(check_verify_expected_token: bool) -> "Module":
+def _jit_canary_verify_module(check_verify_expected_token: bool) -> Module:
     args = make_cpp_args(check_verify_expected_token)
     return load_jit(
         "kv_canary_verify",
