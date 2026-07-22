@@ -82,7 +82,7 @@ try:
 except ImportError:
     pass
 
-from sglang.jit_kernel.dsv4 import mask_topk_ids
+from sglang.kernels.ops.attention.dsv4 import mask_topk_ids
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
@@ -180,7 +180,7 @@ if _is_cuda or _is_hip or _is_xpu:
         from sglang.kernels.ops.moe import topk_softmax
 
         try:
-            from sglang.jit_kernel.moe_topk_sigmoid import topk_sigmoid
+            from sglang.kernels.ops.moe.moe_topk_sigmoid import topk_sigmoid
         except ImportError:
             pass
 if _use_aiter:
@@ -812,7 +812,7 @@ def fused_topk(
         elif packed_out is not None:
             # Fused gating + routed pack (SGLANG_OPT_LORA_FUSED_TOPK_PACK): one JIT kernel
             # writes topk_weights/topk_ids AND the FlashInfer packed topk in one launch.
-            from sglang.jit_kernel.trtllm_lora_temp.topk_softmax_pack import (
+            from sglang.kernels.ops.moe.trtllm_lora_temp.topk_softmax_pack import (
                 topk_softmax_pack,
             )
 
@@ -827,7 +827,7 @@ def fused_topk(
         # ===== END TO BE REFACTORED ====
         elif _is_cuda and envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK.get():
             # Unified Triton router (subsumes the AOT topk_softmax CUDA kernel).
-            from sglang.jit_kernel.moe_fused_gate import (
+            from sglang.kernels.ops.moe.moe_fused_gate import (
                 moe_fused_gate as _jit_moe_fused_gate,
             )
 
@@ -867,7 +867,7 @@ def fused_topk(
                 )
         elif _is_cuda and envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK.get():
             # Unified Triton router (subsumes the AOT topk_sigmoid CUDA kernel).
-            from sglang.jit_kernel.moe_fused_gate import (
+            from sglang.kernels.ops.moe.moe_fused_gate import (
                 moe_fused_gate as _jit_moe_fused_gate,
             )
 
@@ -1217,7 +1217,7 @@ def biased_topk_jit_kernel_impl(
         return topk_weights, topk_ids
 
     else:
-        from sglang.jit_kernel.moe_fused_gate import moe_fused_gate
+        from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate
 
         topk_weights, topk_ids = moe_fused_gate(
             gating_output,
@@ -1420,7 +1420,9 @@ def biased_grouped_topk_gpu(
         # Opt-in: unified Triton router for DeepSeek-V3 grouped routing. Bit-exact
         # with the flashinfer/AOT paths on DeepSeek-V3.2 e2e (validated); handles any
         # experts-per-group (no <=32 cap). Off by default — see the env-var comment.
-        from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_grouped_gate
+        from sglang.kernels.ops.moe.moe_fused_gate import (
+            moe_fused_gate as jit_grouped_gate,
+        )
 
         return jit_grouped_gate(
             gating_output.to(dtype=torch.float32),
@@ -1497,7 +1499,9 @@ def biased_grouped_topk_gpu(
         # CUDA grouped fallback (flashinfer unavailable / constraints unmet): the
         # unified Triton router replaces the retired AOT moe_fused_gate kernel. It
         # handles any experts-per-group (no MAX_VPT=32 cap) and any num_experts.
-        from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_grouped_gate
+        from sglang.kernels.ops.moe.moe_fused_gate import (
+            moe_fused_gate as jit_grouped_gate,
+        )
 
         return jit_grouped_gate(
             gating_output.to(dtype=torch.float32),
@@ -1565,7 +1569,7 @@ def biased_grouped_topk_gpu(
                     and lora_envs.SGLANG_OPT_KIMI_GATE_BF16_INPUT.get()
                 )
             if _use_jit_bf16_gate:
-                from sglang.jit_kernel.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
+                from sglang.kernels.ops.moe.trtllm_lora_temp.kimi_k2_moe_fused_gate import (
                     kimi_k2_moe_fused_gate as _kimi_k2_moe_fused_gate,
                 )
 
@@ -1579,7 +1583,7 @@ def biased_grouped_topk_gpu(
                     apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
                 )
             # ===== END TO BE REFACTORED ====
-            from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_gate
+            from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
 
             return jit_gate(
                 gating_output.to(dtype=torch.float32),
@@ -1603,7 +1607,7 @@ def biased_grouped_topk_gpu(
         ):
             # Ungrouped sigmoid (num_expert_group == 1): use the unified Triton
             # router, which subsumes the jit grouped_topk.cuh kernel here.
-            from sglang.jit_kernel.moe_fused_gate import moe_fused_gate as jit_gate
+            from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate as jit_gate
 
             return jit_gate(
                 gating_output,
