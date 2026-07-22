@@ -1815,10 +1815,7 @@ class MMEncoder:
                 f"(shape={mm_data.shape}, element_size={self._element_size})"
             )
 
-            # RDMA reads a flat address range; keep the source contiguous and
-            # cache it so sibling /send calls reuse the same tensor and MR.
-            if not embedding.is_contiguous():
-                embedding = embedding.contiguous()
+            # Cache so sibling-TP /send calls reuse the same tensor and MR.
             mm_data.cached_embedding = embedding
 
             # Request-level shared MR, registered lazily on the first /send;
@@ -1826,13 +1823,7 @@ class MMEncoder:
             fwd_state = self._forward_results.setdefault(req_id, {})
             mr_shared = fwd_state.get("mr_ptr") == embedding.data_ptr()
             if not mr_shared:
-                reg_ret = self.engine.register(embedding.data_ptr(), embedding.nbytes)
-                if reg_ret != 0:
-                    raise InternalError(
-                        f"Mooncake MR registration failed for {req_id} "
-                        f"(ptr={embedding.data_ptr()}, nbytes={embedding.nbytes}, "
-                        f"ret={reg_ret})"
-                    )
+                self.engine.register(embedding.data_ptr(), embedding.nbytes)
                 fwd_state["mr_ptr"] = embedding.data_ptr()
             _t_xfer_start = time.monotonic()
             xfer_ret = await asyncio.to_thread(
@@ -2105,14 +2096,13 @@ class MMEncoder:
                             torch.cuda.current_stream(emb.device).synchronize()
                     if self.rank == 0:
                         # Register the MR exactly once here so all sibling-TP /send coroutines share a single registration.
-                        reg_ret = self.engine.register(emb.data_ptr(), emb.nbytes)
-                        if reg_ret == 0:
+                        try:
+                            self.engine.register(emb.data_ptr(), emb.nbytes)
                             self._forward_results[req_id]["mr_ptr"] = emb.data_ptr()
-                        else:
+                        except Exception as reg_err:
                             logger.warning(
-                                f"Shared-MR register failed for {req_id} "
-                                f"(ret={reg_ret}), falling back to lazy "
-                                f"register on first /send"
+                                f"Shared-MR register failed for {req_id}, "
+                                f"falling back to per-/send register: {reg_err}"
                             )
                             self._forward_results[req_id]["mr_ptr"] = None
                         self._forward_results[req_id]["embedding"] = emb
