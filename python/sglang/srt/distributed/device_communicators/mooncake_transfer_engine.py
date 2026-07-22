@@ -137,7 +137,7 @@ class MooncakeTransferEngine:
             self.hostname, self.engine.get_rpc_port()
         ).to_host_port_str()
 
-    def register(self, ptr, length):
+    def register(self, ptr, length) -> int:
         try:
             ret_value = self.engine.register_memory(ptr, length)
         except Exception:
@@ -145,9 +145,10 @@ class MooncakeTransferEngine:
             ret_value = -1
 
         if ret_value != 0:
-            logger.debug("Mooncake memory registration %s failed.", ptr)
+            logger.warning("Mooncake memory registration %s failed.", ptr)
+        return ret_value
 
-    def deregister(self, ptr):
+    def deregister(self, ptr) -> int:
         try:
             ret_value = self.engine.unregister_memory(ptr)
         except Exception:
@@ -155,7 +156,8 @@ class MooncakeTransferEngine:
             ret_value = -1
 
         if ret_value != 0:
-            logger.debug("Mooncake memory deregistration %s failed.", ptr)
+            logger.warning("Mooncake memory deregistration %s failed.", ptr)
+        return ret_value
 
     def batch_register(self, ptrs: List[int], lengths: List[int]) -> int:
         """Batch register multiple memory regions."""
@@ -224,7 +226,7 @@ class MooncakeTransferEngine:
             ret = -1
 
         if ret < 0:
-            logger.debug(
+            logger.warning(
                 "Failed to transfer data from %s to %s - %s.",
                 buffer,
                 session_id,
