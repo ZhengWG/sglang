@@ -71,26 +71,33 @@ class TestViTPosEmbedInterpolate(CustomTestCase):
         except Exception as e:  # heavy optional deps (flashinfer, ...) unavailable
             self.skipTest(f"cannot import Qwen3VLMoeVisionModel: {e}")
 
-        for device in _devices():
-            for dtype in (torch.bfloat16, torch.float32):
-                stub = SimpleNamespace(
-                    num_grid_per_side=int(NUM_POS**0.5),
-                    spatial_merge_size=MERGE,
-                    num_position_embeddings=NUM_POS,
-                    pos_embed=nn.Embedding(NUM_POS, HIDDEN).to(
-                        device=device, dtype=dtype
-                    ),
-                    dtype=dtype,
-                    device=device,
-                )
-                for name, grid in GRID_CASES.items():
-                    self._check(
-                        stub,
-                        M.fast_pos_embed_interpolate_from_list,
-                        M.fast_pos_embed_interpolate_vectorized,
-                        grid,
-                        f"qwen3_vl/{name}/{dtype}/{device.type}",
+        original_default_dtype = torch.get_default_dtype()
+        try:
+            # The interpolation coordinates must not depend on process-global
+            # state left behind by another test or application code.
+            torch.set_default_dtype(torch.bfloat16)
+            for device in _devices():
+                for dtype in (torch.bfloat16, torch.float32):
+                    stub = SimpleNamespace(
+                        num_grid_per_side=int(NUM_POS**0.5),
+                        spatial_merge_size=MERGE,
+                        num_position_embeddings=NUM_POS,
+                        pos_embed=nn.Embedding(NUM_POS, HIDDEN).to(
+                            device=device, dtype=dtype
+                        ),
+                        dtype=dtype,
+                        device=device,
                     )
+                    for name, grid in GRID_CASES.items():
+                        self._check(
+                            stub,
+                            M.fast_pos_embed_interpolate_from_list,
+                            M.fast_pos_embed_interpolate_vectorized,
+                            grid,
+                            f"qwen3_vl/{name}/{dtype}/{device.type}",
+                        )
+        finally:
+            torch.set_default_dtype(original_default_dtype)
 
     def test_moss_vl_vectorized_matches_loop(self):
         try:
