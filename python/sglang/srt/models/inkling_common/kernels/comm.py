@@ -240,7 +240,8 @@ def ar_sconv_norm_fusable(
     """True when a decode {all-reduce -> sconv -> add+RMSNorm} chain
     (attn-side: wo_ud AR -> attn_sconv -> mlp_norm; MoE-side: MoE AR ->
     mlp_sconv -> next attn_norm)
-    can run as the single fused kernel (jit_kernel/inkling_ar_fused.py). Must be
+    can run as the single fused kernel
+    (kernels/ops/model/inkling/inkling_ar_fused.py). Must be
     evaluated identically by the producing layer (MoE ``reduce=False``) and the
     consuming layer/tail -- it is a pure function of per-forward state."""
     if not is_cuda():
