@@ -382,7 +382,6 @@ FROM torch_deps AS hpc_ops_builder
 # RoPE kernels from the Tencent Hunyuan AI Infra team, consumed by the opt-in
 # hpc_ops attention and MoE runner backends.
 ARG HPC_OPS_COMMIT=2404f09766269d9533b66709f705c8eeb01421fc
-ARG HPC_OPS_BUILD_PARALLEL=4
 ARG GITHUB_ARTIFACTORY
 
 WORKDIR /build
@@ -391,7 +390,32 @@ WORKDIR /build
 # setup.py derives the version from `git rev-parse`, so keep the .git directory.
 # Bound each clone attempt so a stalled GitHub proxy can trigger the retry loop.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/hpc_ccache,id=hcp_ccache,sharing=locked \
+    mkdir -p /wheels && \
     if [ "$(uname -m)" = "x86_64" ]; then \
+        mkdir -p /tmp/cmake_hook/bin; \
+        cmake --version; \
+        ccache --version; \
+        REAL_CMAKE=$(which cmake) ; \
+        echo -e "#!/bin/sh\n\
+for arg in \"\$@\"; do\n\
+  case \"\$arg\" in\n\
+    --build|--install|--open|-E|-P|--find-package|--workflow|--version|--help|--help-*|--system-information)\n\
+      exec "$REAL_CMAKE" \"\$@\"\n\
+      ;;\n\
+  esac\n\
+done\n\
+exec $REAL_CMAKE -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \"\$@\" \n\
+" > /tmp/cmake_hook/bin/cmake; \
+        chmod +x /tmp/cmake_hook/bin/cmake; \
+        cat /tmp/cmake_hook/bin/cmake; \
+        export PATH=/tmp/cmake_hook/bin:$PATH; \
+        export CCACHE_DIR=/root/.cache/hpc_ccache; \
+        export CCACHE_MAXSIZE=4G; \
+        export CCACHE_COMPILERCHECK=content; \
+        export CCACHE_BASEDIR=/build/hpc-ops; \
+        export CCACHE_NOHASHDIR=true; \
+        ccache -z || true; \
         git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
@@ -420,13 +444,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         done; \
         kill "${mem_check_pid}" || true ; \
         wait || true; \
+        ccache -s || true; \
         [ "${success}" -eq 1 ]; \
     fi
 
 ########################################################
 # PARALLEL STAGE 4: FlashInfer Cache (needs torch_deps)
 ########################################################
-FROM torch_deps AS flashinfer_cache
+# no need to from torch_deps as torch_deps will be updated when sglang/python/project.toml updated.
+FROM base AS flashinfer_cache
 
 ARG CUDA_VERSION
 ARG INSTALL_FLASHINFER_JIT_CACHE
@@ -661,27 +687,33 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Install MSCCL++ Python dependencies and package (builds extension via CMake through pip)
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache,id=mscclpp_cache,sharing=locked \
     ln -sv /usr/lib/x86_64-linux-gnu/libibverbs.so.1 /usr/lib/x86_64-linux-gnu/libibverbs.so && \
-    git config --global url."https://gitee.com/mirrors/dlpack".insteadOf "https://github.com/dmlc/dlpack.git" && \
+    export CCACHE_DIR=/root/.cache/ccache; \
+    export CCACHE_MAXSIZE=4G; \
+    export CCACHE_COMPILERCHECK=content; \
+    export CCACHE_BASEDIR=/tmp/mscclpp; \
+    export CCACHE_NOHASHDIR=true; \
+    ccache -z || true; \
     git config --global url."https://gitee.com/mirrors/dlpack".insteadOf "https://github.com/dmlc/dlpack" && \
-    git config --global url."https://gitee.com/mirrors/nlohmann-json".insteadOf "https://github.com/nlohmann/json.git" && \
     git config --global url."https://gitee.com/mirrors/nlohmann-json".insteadOf "https://github.com/nlohmann/json" && \
-    git config --global url."https://gitee.com/staugust/nanobind".insteadOf "https://github.com/wjakob/nanobind.git" && \
     git config --global url."https://gitee.com/staugust/nanobind".insteadOf "https://github.com/wjakob/nanobind" && \
+    git config --global url."https://${GITHUB_ARTIFACTORY}/Tessil/robin-map".insteadOf "https://github.com/Tessil/robin-map" && \
     git clone --depth=1 --branch ${MSCCLPP_VERSION} https://${GITHUB_ARTIFACTORY}/microsoft/mscclpp.git /tmp/mscclpp \
     && case "${CUDA_VERSION}" in \
            12.*) \
-               CMAKE_ARGS="-DMSCCLPP_BYPASS_GPU_CHECK=ON -DMSCCLPP_USE_CUDA=ON -DMSCCLPP_GPU_ARCHS=80,90,100,100a,103,103a" \
+               CMAKE_ARGS="-DMSCCLPP_BYPASS_GPU_CHECK=ON -DMSCCLPP_USE_CUDA=ON -DMSCCLPP_GPU_ARCHS=80,90,100,100a,103,103a -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache" \
                python3 -m pip install "/tmp/mscclpp[cuda12]"; \
                ;; \
            13.*) \
-               CMAKE_ARGS="-DMSCCLPP_BYPASS_GPU_CHECK=ON -DMSCCLPP_USE_CUDA=ON -DMSCCLPP_GPU_ARCHS=80,90,100,100a,103,103a" \
+               CMAKE_ARGS="-DMSCCLPP_BYPASS_GPU_CHECK=ON -DMSCCLPP_USE_CUDA=ON -DMSCCLPP_GPU_ARCHS=80,90,100,100a,103,103a -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache" \
                python3 -m pip install "/tmp/mscclpp[cuda13]"; \
                ;; \
            *) \
                echo "Unsupported CUDA version for MSCCL++: ${CUDA_VERSION}" && exit 1; \
                ;; \
        esac \
+    && (ccache -s || true) \
     && rm -rf /tmp/mscclpp
 
 # Install essential Python packages (use constraints to prevent conflicts)
