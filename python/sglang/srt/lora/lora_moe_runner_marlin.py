@@ -24,11 +24,11 @@ _is_cuda = is_cuda()
 
 if _is_cuda:
     from sglang.jit_kernel.moe_wna16_marlin import moe_wna16_marlin_gemm
-    from sglang.kernels.ops.activation import silu_and_mul
     from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
         moe_sum_reduce_triton,
     )
     from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+        apply_marlin_swiglu,
         get_scalar_type,
     )
     from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
@@ -44,7 +44,7 @@ class MarlinLoraRunnerCore:
     Pipeline:
       1. moe_wna16_marlin_gemm (gate_up)
       1.5. hooks.after_gate_up
-      2. silu_and_mul
+      2. configured SwiGLU activation
       3. moe_wna16_marlin_gemm (down)
       3.5. hooks.after_down
       4. moe_sum_reduce
@@ -157,7 +157,13 @@ class MarlinLoraRunnerCore:
         intermediate_cache2 = torch.empty(
             (M * topk, N), device=hidden_states.device, dtype=hidden_states.dtype
         )
-        silu_and_mul(intermediate_cache1.view(-1, 2 * N), intermediate_cache2)
+        apply_marlin_swiglu(
+            intermediate_cache2,
+            intermediate_cache1.view(-1, 2 * N),
+            gemm1_alpha=runner_config.gemm1_alpha,
+            gemm1_clamp_limit=runner_config.gemm1_clamp_limit,
+            swiglu_limit=runner_config.swiglu_limit,
+        )
 
         # Stage 3: Down (Marlin)
         intermediate_cache3 = torch.empty(

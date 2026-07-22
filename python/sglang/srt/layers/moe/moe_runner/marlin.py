@@ -194,12 +194,9 @@ def fused_experts_none_to_marlin(
         is_k_full=quant_info.is_k_full,
         inplace=marlin_inplace,
         routed_scaling_factor=runner_config.routed_scaling_factor,
-        clamp_limit=(
-            runner_config.gemm1_clamp_limit
-            if runner_config.gemm1_alpha is not None
-            else runner_config.swiglu_limit
-        ),
+        clamp_limit=runner_config.swiglu_limit,
         gemm1_alpha=runner_config.gemm1_alpha,
+        gemm1_clamp_limit=runner_config.gemm1_clamp_limit,
         activation=runner_config.activation,
         is_gated=runner_config.is_gated,
     ).to(hidden_states.dtype)

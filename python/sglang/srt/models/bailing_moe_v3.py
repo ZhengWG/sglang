@@ -452,6 +452,18 @@ class BailingMoE(nn.Module):
         except Exception:
             return None
 
+    @classmethod
+    def _swiglu_limits_match_for_fusion(cls, config: PretrainedConfig) -> bool:
+        """Whether routed/shared experts can share one per-layer clamp value."""
+        expert_limits = getattr(config, "expert_swiglu_limit_list", None)
+        shared_limits = getattr(config, "share_expert_swiglu_limit_list", None)
+        first_moe_layer = getattr(config, "first_k_dense_replace", 0)
+        return all(
+            cls._get_swiglu_limit(expert_limits, layer_id)
+            == cls._get_swiglu_limit(shared_limits, layer_id)
+            for layer_id in range(first_moe_layer, config.num_hidden_layers)
+        )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1381,6 +1393,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         2. Model config doesn't match the expected architecture
         3. Hardware doesn't support it (requires CUDA with capability >= 80 or AMD with capability >= gfx942)
         4. Using W4AFP8 quantization (different quant methods for routed and shared experts)
+        5. Routed/shared experts use different per-layer SwiGLU clamp limits
 
         NOTE: This optimization requires that shared_experts and routed experts have the same
         intermediate_size. For BailingMoE V3, this is guaranteed by the model architecture:
@@ -1418,6 +1431,14 @@ class BailingMoeV3ForCausalLM(nn.Module):
         # Check architecture
         elif self.config.architectures[0] != architecture:
             disable_reason = "Config does not support fused shared expert(s)."
+        # The fused runner carries one scalar clamp per layer, so the routed
+        # and shared expert can only be fused when their normalized limits
+        # (where config value 0 means no clamp) are identical.
+        elif not BailingMoE._swiglu_limits_match_for_fusion(self.config):
+            disable_reason = (
+                "Routed and shared experts use different per-layer SwiGLU clamp "
+                "limits, but fused shared experts support only one clamp per layer."
+            )
         # Check hardware capability
         elif (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
             not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)

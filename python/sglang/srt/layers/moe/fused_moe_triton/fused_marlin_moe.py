@@ -53,6 +53,17 @@ def swiglu_limit_func(
     output.copy_(F.silu(gate) * up)
 
 
+def swiglu_silu_clamp_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    gemm1_limit: float,
+) -> None:
+    d = input.shape[1] // 2
+    gate = F.silu(input[:, :d]).clamp(max=gemm1_limit)
+    up = input[:, d:].clamp(min=-gemm1_limit, max=gemm1_limit)
+    output.copy_(gate * up)
+
+
 def swiglu_gpt_oss_sigmoid_alpha_contiguous(
     output: torch.Tensor,
     input: torch.Tensor,  # first half is gate, second half is up
@@ -63,6 +74,37 @@ def swiglu_gpt_oss_sigmoid_alpha_contiguous(
     gate = input[:, :d].clamp(max=gemm1_limit)
     up = input[:, d:].clamp(min=-gemm1_limit, max=gemm1_limit)
     output.copy_(gate * torch.sigmoid(gate * gemm1_alpha) * (up + 1))
+
+
+def apply_marlin_swiglu(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    *,
+    gemm1_alpha: Optional[float] = None,
+    gemm1_clamp_limit: Optional[float] = None,
+    swiglu_limit: Optional[float] = None,
+) -> None:
+    """Apply the configured gated-SiLU variant to Marlin GEMM1 output."""
+    if gemm1_clamp_limit is not None and swiglu_limit is not None:
+        raise ValueError(
+            "gemm1_clamp_limit and swiglu_limit use different SwiGLU clamp semantics"
+        )
+
+    if gemm1_alpha is not None:
+        if gemm1_clamp_limit is None:
+            raise ValueError("Marlin alpha activation requires gemm1_clamp_limit.")
+        swiglu_gpt_oss_sigmoid_alpha_contiguous(
+            output,
+            input,
+            gemm1_alpha,
+            gemm1_clamp_limit,
+        )
+    elif gemm1_clamp_limit is not None:
+        swiglu_silu_clamp_func(output, input, gemm1_clamp_limit)
+    elif swiglu_limit is not None:
+        swiglu_limit_func(output, input, swiglu_limit)
+    else:
+        silu_and_mul(input, output)
 
 
 @register_custom_op(out_shape="hidden_states")
@@ -96,6 +138,7 @@ def fused_marlin_moe(
     gemm1_alpha: Optional[float] = None,
     activation: str = "silu",
     is_gated: bool = True,
+    gemm1_clamp_limit: Optional[float] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -249,23 +292,21 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    if activation == "silu" and is_gated and gemm1_alpha is not None:
-        if clamp_limit is None:
-            raise ValueError("GPT-OSS Marlin activation requires clamp_limit.")
-        swiglu_gpt_oss_sigmoid_alpha_contiguous(
+    # Backward compatibility for existing alpha callers that supplied their
+    # GEMM1 limit through clamp_limit. Without alpha, clamp_limit keeps its
+    # historical DeepSeek-V4 raw-gate semantics.
+    if gemm1_alpha is not None and gemm1_clamp_limit is None:
+        gemm1_clamp_limit = clamp_limit
+        clamp_limit = None
+
+    if activation == "silu" and is_gated:
+        apply_marlin_swiglu(
             intermediate_cache2,
             intermediate_cache1.view(-1, gemm1_n),
-            gemm1_alpha,
-            clamp_limit,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+            swiglu_limit=clamp_limit,
         )
-    elif activation == "silu" and is_gated and clamp_limit is not None:
-        swiglu_limit_func(
-            intermediate_cache2,
-            intermediate_cache1.view(-1, gemm1_n),
-            clamp_limit,
-        )
-    elif activation == "silu" and is_gated:
-        silu_and_mul(intermediate_cache1.view(-1, gemm1_n), intermediate_cache2)
     elif activation == "silu" and not is_gated:
         intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
     elif activation == "relu2" and not is_gated:
