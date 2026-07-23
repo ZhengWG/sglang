@@ -99,7 +99,6 @@ from sglang.srt.observability.trace import process_tracing_init, trace_set_threa
 from sglang.srt.parser.template_detection import resolve_auto_parsers
 from sglang.srt.parser.template_manager import TemplateManager
 from sglang.srt.plugins import load_plugins
-from sglang.srt.runtime_context import get_parallel
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
@@ -260,7 +259,7 @@ class Engine(EngineScoreMixin, EngineBase):
 
         # Initialize ZMQ sockets
         context = zmq.Context(2)
-        if server_args.node_rank == 0:
+        if self.server_args.node_rank == 0:
             self.send_to_rpc = get_zmq_socket(
                 context, zmq.DEALER, self.port_args.rpc_ipc_name, True
             )
@@ -308,7 +307,7 @@ class Engine(EngineScoreMixin, EngineBase):
                 routed_dp_rank = data_parallel_rank
 
         if routed_dp_rank is not None:
-            dp_size = get_parallel().dp_size
+            dp_size = self.server_args.dp_size
             if dp_size <= 1 and routed_dp_rank == 0:
                 logger.debug(
                     f"routed_dp_rank={routed_dp_rank} is ignored because dp_size={dp_size}"
@@ -885,14 +884,7 @@ class Engine(EngineScoreMixin, EngineBase):
                 server_args, port_args
             )
         else:
-            # Launch multi-tokenizer router. Unlike TokenizerManager, the router
-            # does not publish; but it runs in this parent process and reads
-            # resolved config through the namespace accessors (e.g. get_parallel()
-            # for routed_dp_rank), so publish here. The child TokenizerWorkers
-            # publish independently in their own processes.
-            from sglang.srt.runtime_context import publish
-
-            publish(server_args, role="tokenizer")
+            # Launch multi-tokenizer router
             tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
             template_manager = None
 
@@ -1012,18 +1004,12 @@ class Engine(EngineScoreMixin, EngineBase):
         )
 
     def get_server_info(self):
-        from sglang.srt.runtime_context import get_context
-
         internal_states = self.loop.run_until_complete(
             self.tokenizer_manager.get_internal_state()
         )
         return msgspec_to_builtins(
             {
-                # Overlay post-publish overrides so the report reflects current
-                # config (weight version, model path, runtime tunables).
-                **get_context().resolved_server_args_dict(
-                    base=dataclasses.asdict(self.tokenizer_manager.server_args)
-                ),
+                **dataclasses.asdict(self.tokenizer_manager.server_args),
                 **self._scheduler_init_result.scheduler_infos[0],
                 "internal_states": internal_states,
                 "version": __version__,
@@ -1325,7 +1311,7 @@ def _set_envs_and_config(server_args: ServerArgs):
         if server_args.attention_backend == "flashinfer":
             assert_pkg_version(
                 "flashinfer_python",
-                "0.6.14",
+                "0.6.15.post1",
                 "Please uninstall the old version and "
                 "reinstall the latest version by following the instructions "
                 "at https://docs.flashinfer.ai/installation.html.",

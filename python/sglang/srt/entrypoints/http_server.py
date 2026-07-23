@@ -714,19 +714,18 @@ async def get_model_info():
 @app.get("/model_info")
 async def model_info():
     """Get the model information."""
-    from sglang.srt.runtime_context import get_serving
-
     model_config = _global_state.tokenizer_manager.model_config
     result = {
         "model_path": _global_state.tokenizer_manager.model_path,
         "tokenizer_path": _global_state.tokenizer_manager.server_args.tokenizer_path,
         "is_generation": _global_state.tokenizer_manager.is_generation,
         "preferred_sampling_params": _global_state.tokenizer_manager.server_args.preferred_sampling_params,
-        "weight_version": get_serving().weight_version,
+        "weight_version": _global_state.tokenizer_manager.server_args.weight_version,
         "has_image_understanding": model_config.is_image_understandable_model,
         "has_audio_understanding": model_config.is_audio_understandable_model,
         "model_type": getattr(model_config.hf_config, "model_type", None),
         "architectures": getattr(model_config.hf_config, "architectures", None),
+        "weight_version": _global_state.tokenizer_manager.server_args.weight_version,
         # "hf_config": model_config.hf_config.to_dict(),
     }
     return result
@@ -814,20 +813,14 @@ async def server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
-    from sglang.srt.runtime_context import get_context
-
     server_args = _global_state.tokenizer_manager.server_args
 
     # server_args.model_config is not serializable but should be excluded by asdict.
-    # Overlay post-publish overrides so runtime updates (weight version, model
-    # path/load format) are reported, not the startup record.
     return msgspec_to_builtins(
         {
-            **get_context().resolved_server_args_dict(
-                base=dataclasses.asdict(
-                    server_args,
-                    dict_factory=_custom_dict_factory,
-                )
+            **dataclasses.asdict(
+                server_args,
+                dict_factory=_custom_dict_factory,
             ),
             **_global_state.scheduler_info,
             "internal_states": internal_states,
@@ -1453,9 +1446,7 @@ async def update_weight_version(
     # since weight_version update is a simple operation that doesn't affect model weights
     try:
         # Update the weight version in server args (the single source of truth)
-        from sglang.srt.runtime_context import get_context
-
-        get_context().override(
+        _global_state.tokenizer_manager.server_args.override(
             "http.update_weight_version", weight_version=obj.new_version
         )
 
