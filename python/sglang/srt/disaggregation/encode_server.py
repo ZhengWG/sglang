@@ -109,6 +109,9 @@ cond_dict_lock = asyncio.Lock()
 rid_to_cond: Dict[str, asyncio.Condition] = {}
 # mooncake: /send completions per part; release GPU embedding once receive_count reached.
 mooncake_send_done_count: Dict[str, int] = dict()
+# mooncake: /send calls currently executing per part; early release must wait
+# for them (a straggler /send must not lose the shared MR mid-transfer).
+mooncake_send_inflight: Dict[str, int] = dict()
 
 use_image_processor_gpu = envs.SGLANG_ENCODER_IMAGE_PROCESSOR_USE_GPU.get()
 
@@ -1804,6 +1807,12 @@ class MMEncoder:
             if embedding is None:
                 embedding = mm_data.cached_embedding
             if embedding is None:
+                # Surface the original encode error instead of a generic
+                # "no embedding" message when this req failed to encode.
+                if mm_data.error_msg is not None:
+                    raise InternalError(
+                        f"Encode failed for {req_id}: {mm_data.error_msg}"
+                    )
                 raise InternalError(
                     f"No embedding available for Mooncake GPU-direct transfer: {req_id}"
                 )
@@ -1824,7 +1833,17 @@ class MMEncoder:
             fwd_state = self._forward_results.setdefault(req_id, {})
             mr_already_registered = fwd_state.get("mr_ptr") == embedding.data_ptr()
             if not mr_already_registered:
-                self.engine.register(embedding.data_ptr(), embedding.nbytes)
+                reg_ret = self.engine.register(embedding.data_ptr(), embedding.nbytes)
+                if reg_ret != 0:
+                    # Do NOT record mr_ptr on failure: recording it would make
+                    # cleanup deregister a never-registered address (silently
+                    # failing) while the MR actually covering this memory
+                    # stays behind, cascading overlap errors across requests.
+                    raise InternalError(
+                        f"Mooncake MR registration failed for {req_id} "
+                        f"(ptr={embedding.data_ptr()}, nbytes={embedding.nbytes}, "
+                        f"ret={reg_ret})"
+                    )
                 self._forward_results[req_id]["mr_ptr"] = embedding.data_ptr()
             _t_xfer_start = time.monotonic()
             xfer_ret = await asyncio.to_thread(
@@ -2097,13 +2116,16 @@ class MMEncoder:
                             torch.cuda.current_stream(emb.device).synchronize()
                     if self.rank == 0:
                         # Register the MR exactly once here so all sibling-TP /send coroutines share a single registration.
-                        try:
-                            self.engine.register(emb.data_ptr(), emb.nbytes)
+                        reg_ret = self.engine.register(emb.data_ptr(), emb.nbytes)
+                        if reg_ret == 0:
                             self._forward_results[req_id]["mr_ptr"] = emb.data_ptr()
-                        except Exception as reg_err:
+                        else:
+                            # Leave mr_ptr unset so the first /send retries the
+                            # register (and fails the request if it still fails).
                             logger.warning(
-                                f"Shared-MR register failed for {req_id}, "
-                                f"falling back to per-/send register: {reg_err}"
+                                f"Shared-MR register failed for {req_id} "
+                                f"(ret={reg_ret}), falling back to lazy register "
+                                f"on first /send"
                             )
                             self._forward_results[req_id]["mr_ptr"] = None
                         self._forward_results[req_id]["embedding"] = emb
@@ -2226,6 +2248,13 @@ class MMEncoder:
                 slices = final_slices[offset : offset + n]
                 emb = slices[0] if n == 1 else torch.cat(slices, dim=0)
                 if self.rank == 0:
+                    # In a multi-request batch the per-request slices are views
+                    # into one shared storage; adjacent slices can share memory
+                    # pages, so registering them as separate mooncake MRs fails
+                    # with overlapped-memory-region. Clone to give each request
+                    # its own standalone storage.
+                    if len(requests) > 1:
+                        emb = emb.clone()
                     self.embedding_to_send[req["req_id"]] = EmbeddingData(
                         req["req_id"],
                         req["num_parts"],
@@ -4074,23 +4103,34 @@ async def handle_send_request(request: dict):
                 status_code=status_code,
             )
         return ORJSONResponse(content=result.get("content"))
-    await encoder.send(
-        req_id=request["req_id"],
-        prefill_host=request["prefill_host"],
-        embedding_port=request["embedding_port"],
-        session_id=request["session_id"],
-        buffer_address=request["buffer_address"],
-    )
     req_id = request["req_id"]
-    # Keep embedding until all ranks have /send'd; release early when receive_count is met.
-    expected_sends = request.get("receive_count")
-    if expected_sends:
-        done = mooncake_send_done_count.get(req_id, 0) + 1
-        if done >= expected_sends:
-            mooncake_send_done_count.pop(req_id, None)
-            await encoder._cleanup_inflight_encode_state(req_id)
+    mooncake_send_inflight[req_id] = mooncake_send_inflight.get(req_id, 0) + 1
+    try:
+        await encoder.send(
+            req_id=req_id,
+            prefill_host=request["prefill_host"],
+            embedding_port=request["embedding_port"],
+            session_id=request["session_id"],
+            buffer_address=request["buffer_address"],
+        )
+        mooncake_send_done_count[req_id] = mooncake_send_done_count.get(req_id, 0) + 1
+    finally:
+        remaining = mooncake_send_inflight.get(req_id, 1) - 1
+        if remaining > 0:
+            mooncake_send_inflight[req_id] = remaining
         else:
-            mooncake_send_done_count[req_id] = done
+            mooncake_send_inflight.pop(req_id, None)
+    # Keep embedding until all ranks have /send'd; release early when
+    # receive_count is met AND no sibling /send is still executing
+    # (excess sends from retries must not lose the MR mid-transfer).
+    expected_sends = request.get("receive_count")
+    if (
+        expected_sends
+        and mooncake_send_done_count.get(req_id, 0) >= expected_sends
+        and req_id not in mooncake_send_inflight
+    ):
+        mooncake_send_done_count.pop(req_id, None)
+        await encoder._cleanup_inflight_encode_state(req_id)
     return ORJSONResponse(content=None)
 
 
