@@ -405,7 +405,7 @@ class TraceReqContext:
             thread_name += f" [DP {thread_info.dp_rank}] "
         thread_name += f"(host:{thread_info.host_id[:8]} | pid:{self.pid})"
 
-        if self.tracing_enable == 1:
+        if self.trace_level == NORMAL_TRACE_LEVEL:
             return thread_context
 
         thread_context.thread_span = tracer.start_span(
