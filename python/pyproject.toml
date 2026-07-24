@@ -245,7 +245,7 @@ fallback_version = "0.0.0.dev0"
 # Keep this assignment on one line because setup.py reads it without a TOML
 # parser.
 [tool.sglang]
-rust-extensions = ["server"]
+rust-extensions = []
 
 [tool.kernels.dependencies]
 "kernels-community/sgl-flash-attn3" = 1
