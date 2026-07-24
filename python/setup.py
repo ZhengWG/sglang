@@ -175,6 +175,14 @@ def _declared_rust_extensions():
     # (e.g. from an sdist) still work.
     if (os.environ.get(_BUILD_RUST_EXTS_ENV) or "").strip().lower() == "none":
         return []
+    # An explicitly empty pyproject allowlist also means "build no Rust
+    # extensions". Check it before cargo metadata so source distributions and
+    # Python-only builds do not require a Rust toolchain just to discover
+    # extensions that will immediately be discarded.
+    pyproject_text = (_PYTHON_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    match = _ALLOWLIST_RE.search(pyproject_text)
+    if match is not None and not re.findall(r'"([^"]*)"', match.group(1)):
+        return []
     return _pyproject_rust_extensions(_discovered_rust_extensions())
 
 
