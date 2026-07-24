@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
 from sglang.srt.utils import get_int_env_var
 
@@ -619,34 +619,74 @@ class TraceReqContext:
         if self.trace_level > 1 and self.bootstrap_room and str(self.bootstrap_room) in remote_trace_contexts:
             self.last_span_context = remote_trace_contexts[str(self.bootstrap_room)].prev_span_context
 
+    @staticmethod
+    def _safe_span_operation(
+        operation: Callable[[], None],
+        warning_message: str,
+    ) -> None:
+        try:
+            operation()
+        except Exception:
+            logger.warning(warning_message, exc_info=True)
+
+    def _cleanup_bootstrap_room(self, ts: int) -> None:
+        if self.trace_level <= NORMAL_TRACE_LEVEL:
+            return
+
+        bootstrap_room_key = str(self.bootstrap_room)
+        if self.bootstrap_room and bootstrap_room_key in remote_trace_contexts:
+            remote_trace_contexts.pop(bootstrap_room_key, None)
+        elif self.bootstrap_room_span:
+            self._safe_span_operation(
+                lambda: self.bootstrap_room_span.end(end_time=ts),
+                "Failed to end the bootstrap room trace span.",
+            )
+
+    def _finish_root_span(
+        self,
+        root_span: trace.span.Span,
+        ts: int,
+        attrs: Optional[Dict[str, Any]],
+    ) -> None:
+        try:
+            if attrs:
+                self._safe_span_operation(
+                    lambda: root_span.set_attributes(attrs),
+                    "Failed to set request trace span attributes.",
+                )
+
+            root_status = Status(StatusCode.OK)
+            self._safe_span_operation(
+                lambda: root_span.set_status(root_status),
+                "Failed to set request trace span status.",
+            )
+            self._safe_span_operation(
+                lambda: root_span.end(end_time=ts),
+                "Failed to end the request trace span.",
+            )
+            self._cleanup_bootstrap_room(ts)
+        finally:
+            self.root_span = None
+
     def trace_req_finish(
         self, ts: Optional[int] = None, attrs: Optional[Dict[str, Any]] = None
     ):
         if not self.tracing_enable:
             return
 
-        if not self.root_span:
-            return
-
         ts = ts or get_cur_time_ns()
 
-        # End all unclosed thread spans.
-        self.abort()
+        if not self.root_span:
+            # A rootless context may still own thread-level tracing resources.
+            self.abort(ts)
+            return
 
-        if attrs:
-            self.root_span.set_attributes(attrs)
-
-        self.root_span.set_status(Status(StatusCode.OK))
-        self.root_span.end(end_time=ts)
-
-        # Clean up multispan resources
-        if self.trace_level > 1:
-            if self.bootstrap_room and str(self.bootstrap_room) in remote_trace_contexts:
-                del remote_trace_contexts[str(self.bootstrap_room)]
-            elif self.bootstrap_room_span:
-                self.bootstrap_room_span.end(end_time=ts)
-
-        self.root_span = None
+        root_span = self.root_span
+        try:
+            # End all unclosed thread spans.
+            self.abort(ts)
+        finally:
+            self._finish_root_span(root_span, ts, attrs)
 
     def __check_fast_return(self, level=None):
         if not self.tracing_enable:
@@ -861,34 +901,80 @@ class TraceReqContext:
         if self.__check_fast_return():
             return
 
+        thread_context = self.thread_context
+        thread_span = thread_context.thread_span
+
         # close all slice spans (unlikely, except error API usage)
         ts = ts or get_cur_time_ns()
-        while len(self.thread_context.cur_slice_stack) > 0:
-            if self.thread_context.cur_slice_stack[-1].span:
-                self.thread_context.cur_slice_stack[-1].span.end(end_time=ts)
-            self.thread_context.cur_slice_stack.pop()
+        try:
+            while thread_context.cur_slice_stack:
+                slice_span = thread_context.cur_slice_stack.pop().span
+                if slice_span:
+                    try:
+                        slice_span.end(end_time=ts)
+                    except Exception:
+                        logger.warning(
+                            "Failed to end an unclosed slice trace span.",
+                            exc_info=True,
+                        )
 
-        # set abort info into thread span
-        if self.thread_context.thread_span:
-            if abort_info:
+            # set abort info into thread span
+            if thread_span and abort_info:
                 from sglang.srt.managers.schedule_batch import BaseFinishReason
 
                 if isinstance(abort_info, BaseFinishReason):
-                    abort_info = abort_info.to_json()
-                self.thread_context.thread_span.set_status(Status(StatusCode.ERROR))
-                self.thread_context.thread_span.set_attributes(abort_info)
-
-            if self.events_cache:
-                for event in self.events_cache:
-                    self.thread_context.thread_span.add_event(
-                        name=event.event_name,
-                        timestamp=event.ts,
-                        attributes=event.attrs,
+                    try:
+                        abort_info = abort_info.to_json()
+                    except Exception:
+                        logger.warning(
+                            "Failed to serialize trace abort info.",
+                            exc_info=True,
+                        )
+                        abort_info = {
+                            "reason": "abort_info_serialization_failed",
+                            "abort_info_type": type(abort_info).__name__,
+                        }
+                try:
+                    thread_span.set_status(Status(StatusCode.ERROR))
+                except Exception:
+                    logger.warning(
+                        "Failed to set aborted thread trace span status.",
+                        exc_info=True,
                     )
-                self.events_cache = []
+                try:
+                    thread_span.set_attributes(abort_info)
+                except Exception:
+                    logger.warning(
+                        "Failed to set aborted thread trace span attributes.",
+                        exc_info=True,
+                    )
 
-            self.thread_context.thread_span.end(end_time=ts)
-        self.thread_context = None
+            if thread_span:
+                for event in self.events_cache:
+                    try:
+                        thread_span.add_event(
+                            name=event.event_name,
+                            timestamp=event.ts,
+                            attributes=event.attrs,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to add a cached trace event during abort.",
+                            exc_info=True,
+                        )
+        finally:
+            try:
+                if thread_span:
+                    try:
+                        thread_span.end(end_time=ts)
+                    except Exception:
+                        logger.warning(
+                            "Failed to end the thread trace span.",
+                            exc_info=True,
+                        )
+            finally:
+                self.events_cache = []
+                self.thread_context = None
 
     def __del__(self):
         self.abort(abort_info={"reason": "have unclosed span, auto closed"})
