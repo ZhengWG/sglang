@@ -70,8 +70,10 @@ class TestTraceFunctions(unittest.TestCase):
             with patch.dict(os.environ, {"SGLANG_TRACE_LEVEL": "2"}):
                 get_resources().trace_level = None
                 self.assertEqual(get_global_trace_level(), 2)
-            get_resources().trace_level = None  # SGLANG_TRACE_LEVEL unset → 3
-            self.assertEqual(get_global_trace_level(), 3)
+            with patch.dict(os.environ):
+                os.environ.pop("SGLANG_TRACE_LEVEL", None)
+                get_resources().trace_level = None
+                self.assertEqual(get_global_trace_level(), NORMAL_TRACE_LEVEL)
         finally:
             get_resources().trace_level = orig
 
