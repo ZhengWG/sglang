@@ -1556,6 +1556,24 @@ def load_audio(
     else:
         raise ValueError(f"Invalid audio format: {audio_file}")
 
+    from sglang.srt.multimodal.audio_from_video import (
+        decode_audio_container,
+        is_audio_container,
+    )
+
+    if isinstance(source, bytes):
+        header = source[:16]
+    else:
+        with open(source, "rb") as audio_stream:
+            header = audio_stream.read(16)
+
+    if is_audio_container(header):
+        return decode_audio_container(
+            source,
+            target_sr=sr,
+            mono=mono,
+        )
+
     # Audio decoding is independent from the video decoder backend. `_BACKEND`
     # is the legacy video backend selector and is normally set to "decord", so
     # using it here made the TorchCodec branch unreachable even when
@@ -1868,7 +1886,50 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
     raise NotImplementedError(f"Invalid image: {image_file}")
 
 
-def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
+def _normalize_video_input(
+    video_file: Union[str, bytes, VideoData],
+) -> Union[str, bytes, None]:
+    """Normalize a video input to a local path or encoded bytes.
+
+    ``VideoData.preprocess_kwargs`` belongs to the model processor; this
+    low-level helper only unwraps its URL.
+    """
+    if isinstance(video_file, VideoData):
+        video_file = video_file.url
+    if isinstance(video_file, bytes):
+        return video_file
+    if not isinstance(video_file, str):
+        return None
+    if video_file.startswith(("http://", "https://")):
+        timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+        with get_mm_http_session().get(
+            video_file, stream=True, timeout=timeout
+        ) as response:
+            response.raise_for_status()
+            return response.content
+    if video_file.startswith("data:"):
+        _, encoded = video_file.split(",", 1)
+        return pybase64.b64decode(encoded, validate=True)
+    if video_file.startswith("file://"):
+        return unquote(urlparse(video_file).path)
+    local_path = unquote(urlparse(video_file).path)
+    if os.path.isfile(local_path):
+        return local_path
+    return pybase64.b64decode(video_file, validate=True)
+
+
+def get_video_bytes(video_file: Union[str, bytes, VideoData]) -> bytes:
+    """Normalize a video input and return its encoded bytes."""
+    source = _normalize_video_input(video_file)
+    if isinstance(source, bytes):
+        return source
+    if isinstance(source, str):
+        with open(source, "rb") as f:
+            return f.read()
+    raise ValueError(f"Unsupported video input type: {type(video_file)}")
+
+
+def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
 
@@ -1883,59 +1944,61 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
     tmp_file = None
     vr = None
     try:
-        if isinstance(video_file, bytes):
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tmp_file.write(video_file)
+        if isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
+            return video_file
+
+        raw_video_file = (
+            video_file.url if isinstance(video_file, VideoData) else video_file
+        )
+
+        # This branch-specific format stores a comma-separated sequence of
+        # base64 JPEG frames rather than an encoded video container.
+        if isinstance(raw_video_file, str) and raw_video_file.startswith(
+            "data:video/jpeg;"
+        ):
+            _, encoded = raw_video_file.split(",", 1)
+
+            def load_video_frame(frame_data):
+                image_frame = pybase64.b64decode(frame_data, validate=True)
+                image = Image.open(BytesIO(image_frame))
+                image.load()
+                return image.convert("RGB")
+
+            return np.stack(
+                [
+                    np.asarray(load_video_frame(frame_data))
+                    for frame_data in encoded.split(",")
+                ]
+            )
+
+        if isinstance(raw_video_file, str) and raw_video_file.startswith(
+            ("http://", "https://")
+        ):
+            # Keep Decord's existing streamed download behavior for large
+            # remote videos instead of materializing the entire file in RAM.
+            timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+            with get_mm_http_session().get(
+                raw_video_file, stream=True, timeout=timeout
+            ) as response:
+                response.raise_for_status()
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp_file.write(chunk)
             tmp_file.close()
             vr = VideoReader(tmp_file.name, ctx=ctx)
-        elif isinstance(video_file, str):
-            if video_file.startswith(("http://", "https://")):
-                timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-                with get_mm_http_session().get(
-                    video_file, stream=True, timeout=timeout
-                ) as response:
-                    response.raise_for_status()
-                    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                    for chunk in response.iter_content(chunk_size=8192):
-                        tmp_file.write(chunk)
-                tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
-            elif video_file.startswith("data:"):
-                media_type, encoded = video_file.split(",", 1)
-                if media_type.startswith("data:video/jpeg;"):
-
-                    def load_video_frame(frame_data):
-                        image_frame = pybase64.b64decode(frame_data, validate=True)
-                        image = Image.open(BytesIO(image_frame))
-                        image.load()
-                        return image.convert("RGB")
-
-                    return np.stack(
-                        [
-                            np.asarray(load_video_frame(frame_data))
-                            for frame_data in encoded.split(",")
-                        ]
-                    )
-                video_bytes = pybase64.b64decode(encoded, validate=True)
-                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tmp_file.write(video_bytes)
-                tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
-            elif video_file.startswith("file://"):
-                video_file = unquote(urlparse(video_file).path)
-                vr = VideoReader(video_file, ctx=ctx)
-            # `urlparse` supports file:// paths, and so does VideoReader
-            elif os.path.isfile(unquote(urlparse(video_file).path)):
-                vr = VideoReader(video_file, ctx=ctx)
-            else:
-                video_bytes = pybase64.b64decode(video_file, validate=True)
-                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tmp_file.write(video_bytes)
-                tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
-        elif isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
-            vr = video_file
         else:
+            source = _normalize_video_input(video_file)
+            if isinstance(source, bytes):
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(source)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+            elif isinstance(source, str):
+                vr = VideoReader(source, ctx=ctx)
+            else:
+                raise ValueError(f"Unsupported video input type: {type(video_file)}")
+
+        if vr is None:
             raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
         return vr

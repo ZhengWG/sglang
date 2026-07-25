@@ -96,6 +96,7 @@ def maybe_register_hicache_draft(
         MHATokenToKVPool,
         MLATokenToKVPool,
     )
+    from sglang.srt.mem_cache.pool_host.common import get_allocator_type
     from sglang.srt.mem_cache.pool_host.mha import get_mha_host_pool_cls
     from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
 
@@ -111,7 +112,7 @@ def maybe_register_hicache_draft(
         host_size=0,
         page_size=page_size,
         layout=server_args.hicache_mem_layout,
-        allocator_type=server_args.hicache_storage_backend,
+        allocator_type=get_allocator_type(server_args),
     )
     if isinstance(pool, MHATokenToKVPool):
         draft_host_pool = get_mha_host_pool_cls(pool)(pool, **kw)

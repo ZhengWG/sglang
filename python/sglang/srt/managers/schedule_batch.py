@@ -1990,6 +1990,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     dp_cooperation_info: Optional[DPCooperationInfo] = None
     prefill_stats: Optional[PrefillStats] = None
     forward_iter: Optional[int] = None
+    launch_ts: Optional[float] = None
 
     # === GPU tensors crossing to ForwardBatch (clone targets for stream isolation) ===
     # Batched arguments to model runner
@@ -2166,6 +2167,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     def mark_start_time(self):
         self.create_time = time.time()
+
+    def grammar_needs_sync(self) -> bool:
+        """Whether grammar forces this batch onto the synchronous path, i.e. the
+        previous batch's result is resolved before this forward."""
+        return self.has_grammar and not self.spec_algorithm.supports_grammar_overlap()
 
     def prepare_encoder_info_extend(
         self, input_ids: List[array[int]], seq_lens: List[int]
@@ -3212,6 +3218,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             prefill_stats=self.prefill_stats,
             fpm_start_time=self.fpm_start_time,
             forward_iter=self.forward_iter,
+            launch_ts=self.launch_ts,
+            extend_num_tokens=self.extend_num_tokens,
             waiting_size=self.waiting_size,
             create_time=self.create_time,
         )

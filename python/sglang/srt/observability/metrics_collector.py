@@ -21,7 +21,7 @@ import os
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TYPE_CHECKING, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
@@ -33,7 +33,8 @@ from sglang.srt.utils.gauge_histogram import GaugeHistogram
 
 if TYPE_CHECKING:
     from prometheus_client import Gauge
-    from sglang.srt.managers.schedule_batch import Req, Modality, MultimodalDataItem
+
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, Req
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 
@@ -1636,7 +1637,8 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self.histogram_time_to_first_token = Histogram(
             name="sglang:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            labelnames=self.labels.keys(),
+            # "stream" splits streaming vs non-streaming requests.
+            labelnames=[*self.labels.keys(), "stream"],
             buckets=bucket_time_to_first_token,
         )
 
@@ -1829,11 +1831,15 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
             float(generation_tokens)
         )
 
-    def observe_time_to_first_token(self, labels: Dict[str, str], value: float):
-        self.histogram_time_to_first_token.labels(**labels).observe(value)
+    def observe_time_to_first_token(
+        self, labels: Dict[str, str], value: float, *, stream: bool
+    ):
+        self.histogram_time_to_first_token.labels(
+            **labels, stream="true" if stream else "false"
+        ).observe(value)
 
     def check_time_to_first_token_straggler(self, value: float) -> bool:
-        his = self.histogram_time_to_first_token.labels(**self.labels)
+        his = self.histogram_time_to_first_token.labels(**self.labels, stream="true")
         total_observations = sum(bucket._value for bucket in his._buckets)
         if total_observations < 100:
             return False

@@ -1,8 +1,11 @@
+import base64
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
-from sglang.srt.utils import sample_video_frames
+from sglang.srt.utils import VideoData, get_video_bytes, sample_video_frames
+from sglang.srt.utils.common import _normalize_video_input
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=7, suite="base-a-test-cpu")
@@ -58,6 +61,23 @@ def test_sample_video_frames_lengths(case: Case):
     video = DummyVideo(case.frames, case.avg_fps)
     result = sample_video_frames(video, desired_fps=case.desired_fps, max_frames=case.max_frames)
     assert result == case.expected_frames
+
+
+def test_normalize_video_input_unwraps_video_data():
+    payload = b"encoded-video"
+    data_url = "data:video/mp4;base64," + base64.b64encode(payload).decode()
+
+    assert _normalize_video_input(VideoData(url=data_url)) == payload
+
+
+def test_get_video_bytes_supports_local_paths(tmp_path: Path):
+    payload = b"encoded-video"
+    video_path = tmp_path / "video with spaces.mp4"
+    video_path.write_bytes(payload)
+
+    assert get_video_bytes(str(video_path)) == payload
+    assert get_video_bytes(VideoData(url=video_path.as_uri())) == payload
+
 
 if __name__ == "__main__":
     import sys

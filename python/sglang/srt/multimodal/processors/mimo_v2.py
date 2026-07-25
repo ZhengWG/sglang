@@ -531,19 +531,14 @@ class MiMoProcessor:
     def _load_video_for_encoder(self, video_data):
         # Normalise once to bytes-or-path; reused by frame decode, audio
         # detection, and audio preprocessing without re-downloading.
-        from sglang.srt.utils.common import VideoData, _normalize_video_input
+        from sglang.srt.utils.common import _normalize_video_input
         from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
-        if isinstance(video_data, VideoData):
-            video_data = video_data.url
-        if isinstance(video_data, bytes):
-            video_blob = video_data
-        else:
-            video_blob = _normalize_video_input(video_data)
-            if video_blob is None:
-                raise ValueError(
-                    f"Unsupported video input type for EPD encoder: {type(video_data)}"
-                )
+        video_blob = _normalize_video_input(video_data)
+        if video_blob is None:
+            raise ValueError(
+                f"Unsupported video input type for EPD encoder: {type(video_data)}"
+            )
 
         vdw = VideoDecoderWrapper(
             video_blob,
