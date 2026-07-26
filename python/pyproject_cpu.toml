@@ -70,6 +70,7 @@ dependencies = [
   "triton==3.7.0",
   "uvicorn",
   "uvloop",
+  "xxhash",
   "xgrammar==0.2.1",
   "zstandard",
   "opentelemetry-sdk>=1.26.0", # required by tracing
