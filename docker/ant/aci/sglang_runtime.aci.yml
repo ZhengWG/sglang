@@ -40,7 +40,7 @@ parameters:
   kvpool_whl_url: "" # 蚂蚁内部的kvpool whl包，默认不安装，同上，--no-deps模式，避免破坏sglang依赖的包版本
   runtime_base_image:  "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc" # runtime基础镜像，社区是ubuntu，蚂蚁内部有更适合的基础镜像，使用这个文档里的ngc镜像：https://yuque.antfin.com/antos/linux/fcia0gilxedyiuy9#s0g2S "registry.cn-hangzhou.aliyuncs.com/augusto/cuda" "reg.docker.alibaba-inc.com/antos/ubuntu-ai-x86_64-ngc"
   ubuntu_mirror: "http://mirrors.cloud.aliyuncs.com" # 构建过程中使用的ubuntu镜像源，默认使用阿里云镜像源, 非ECS网络可选 https://mirrors.aliyun.com，其他可选项还有：mirrors.tuna.tsinghua.edu.cn、mirrors.ustc.edu.cn、mirrors.cloud.tencent.com等
-  rustup_dist_mirror: "https://mirrors.aliyun.com/rustup" # 构建过程中使用的rustup安装源，默认使用ustc镜像源, 其他可选项还有：https://mirrors.tuna.tsinghua.edu.cn/rustup、https://mirrors.aliyun.com/rustup等
+  rustup_dist_mirror: "https://mirrors.ustc.edu.cn/rust-static" # 构建过程中使用的rustup安装源，默认使用ustc镜像源, 其他可选项还有：https://mirrors.tuna.tsinghua.edu.cn/rustup、https://mirrors.aliyun.com/rustup等
   pip_default_index: "https://pypi.antfin-inc.com/simple" # 构建过程中使用的pip安装源，默认使用蚂蚁内部镜像源，其他可选项还有：https://pypi.tuna.tsinghua.edu.cn/simple、https://mirrors.aliyun.com/pypi/simple等
   github_artifactory: "github.ednovas.xyz/https://github.com" # 由于github在国内访问不稳定，构建过程中访问github的地址可以替换成这个镜像地址，默认不替换，如果需要替换，在dockerfile里访问github的地方需要替换成这个地址
   install_flashinfer_jit_cache: "1"
