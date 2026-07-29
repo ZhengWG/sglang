@@ -56,7 +56,7 @@ from sglang.srt.utils.common import BumpAllocator, add_prefix, set_weight_attrs
 def _get_kda_local_num_heads(num_heads: int, tp_size: int) -> int:
     if num_heads % tp_size != 0:
         raise ValueError(
-            f"KDA num_heads ({num_heads}) must be divisible by global tp_size ({tp_size})"
+            f"KDA num_heads ({num_heads}) must be divisible by tp_size ({tp_size})"
         )
     return num_heads // tp_size
 
@@ -212,7 +212,11 @@ class KimiDeltaAttention(nn.Module):
         self.lower_bound = lower_bound
         if not self.safe_gate:
             self.lower_bound = None
-        self.local_num_heads = _get_kda_local_num_heads(self.num_heads, self.tp_size)
+        # KDA projections and recurrent state are sharded over attention TP.
+        # This can be smaller than global TP when attention DP is enabled.
+        self.local_num_heads = _get_kda_local_num_heads(
+            self.num_heads, self.attn_tp_size
+        )
 
         projection_size = self.head_dim * self.num_heads
         self.conv_size = config.linear_attn_config["short_conv_kernel_size"]
@@ -393,9 +397,15 @@ class KimiDeltaAttention(nn.Module):
 
         self.attn = RadixLinearAttention(
             layer_id=self.layer_idx,
-            num_q_heads=_get_kda_local_num_heads(self.num_k_heads, self.tp_size),
-            num_k_heads=_get_kda_local_num_heads(self.num_k_heads, self.tp_size),
-            num_v_heads=_get_kda_local_num_heads(self.num_v_heads, self.tp_size),
+            num_q_heads=_get_kda_local_num_heads(
+                self.num_k_heads, self.attn_tp_size
+            ),
+            num_k_heads=_get_kda_local_num_heads(
+                self.num_k_heads, self.attn_tp_size
+            ),
+            num_v_heads=_get_kda_local_num_heads(
+                self.num_v_heads, self.attn_tp_size
+            ),
             head_q_dim=self.head_k_dim,
             head_k_dim=self.head_k_dim,
             head_v_dim=self.head_v_dim,
