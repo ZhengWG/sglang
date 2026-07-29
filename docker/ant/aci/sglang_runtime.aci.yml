@@ -82,8 +82,8 @@ jobs:
         
         export RUNTIME_BASE_IMAGE_TAG=${RUNTIME_BASE_IMAGE_TAG}
         # check DEPS_TAG with Dockerfile version
-        #DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile  ./sgl-kernel/build.sh)
-        DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./sgl-kernel/Dockerfile)
+        #DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./python/sglang/kernels/aot/Dockerfile  ./python/sglang/kernels/aot/build.sh)
+        DEPS_SHORT_COMMIT=$(git log --pretty=format:%h   -n 1 -- ./python/sglang/kernels/aot/Dockerfile)
         # ---- Step 1: Build deps image (layer cached, fast on repeat) ----
         DEPS_TAG="cuda${CUDA_VERSION}-${PY_TAG}-${DEPS_SHORT_COMMIT}-${ARCH}"
 
@@ -105,7 +105,7 @@ jobs:
     inputs:
       imageName: reg.docker.alibaba-inc.com/sglang/theta_sglang_build # 构建产物镜像名称(不含tag), 如: reg.docker.alibaba-inc.com/antcodebuild/test-image-build
       imageTag: ${{jobs.verify_params.outputs.output.deps_tag}} # 构建产物镜像 tag
-      dockerfile: ./sgl-kernel/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
+      dockerfile: ./python/sglang/kernels/aot/Dockerfile # dockerfile 路径，不传默认为 ./Dockerfile (即: ${ACB_BUILD_DIR}/code-repo/Dockerfile)
       contextDir: ./ # docker build 的 context 目录，不传默认为 ./ (即: ${ACB_BUILD_DIR}/code-repo 目录)
       buildArgs: BASE_IMG=${{jobs.verify_params.outputs.output.base_img}},CUDA_VERSION=${{jobs.verify_params.outputs.output.cuda_version}},ARCH=${{jobs.verify_params.outputs.output.arch}},PYTHON_VERSION=${{parameters.python_version}},PYTHON_TAG=${{jobs.verify_params.outputs.output.py_tag}},GITHUB_ARTIFACTORY=${{parameters.github_artifactory}},PIP_DEFAULT_INDEX=${{parameters.pip_default_index}},YUM_MIRROR=${{parameters.yum_mirror}} # 构建参数，格式为 KEY=VALUE, 多个参数用逗号分隔
       compression: uncompressed # 为新创建和缓存的镜像层选择压缩类型，默认值为未压缩uncompressed
@@ -146,7 +146,7 @@ jobs:
         export ACI_VAR_OSS_AI="${{secrets.OSS_AI}}"
         export ACI_VAR_OSS_AK="${{secrets.OSS_AK}}"
         export ACI_COMMIT_SHA="${{parameters.ACI_COMMIT_SHA}}"
-        # create a softlink, 'sgl-kernel/build.sh' exports CCACHE_DIR=/ccache
+        # create a softlink, 'python/sglang/kernels/aot/build.sh' exports CCACHE_DIR=/ccache
         ln -sf "/.cache/daily/cuda-${{jobs.verify_params.outputs.output.cuda_version}}" /ccache
         export CCACHE_BACKEND=""
         export CCACHE_KEEP_LOCAL_STORAGE="TRUE"
@@ -217,7 +217,7 @@ jobs:
 
         cat ~/.gitconfig
 
-        cd ./sgl-kernel
+        cd ./python/sglang/kernels/aot
         git diff
         for i in {1..100}
         do
@@ -244,7 +244,7 @@ jobs:
 
         # 构建sglang whl
         # 参考 .github/workflows/release-pypi.yml
-        cd ../python
+        cd ../../..
         cp ../README.md ../LICENSE .
         ${PYTHON_ROOT_PATH}/bin/pip install build wheel "setuptools-scm>=8.0" "setuptools-rust>=1.10" -i https://pypi.antfin-inc.com/simple
         ${PYTHON_ROOT_PATH}/bin/python -m build --wheel --no-isolation
