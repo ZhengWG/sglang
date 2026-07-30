@@ -983,7 +983,8 @@
                   {
                     "group": "Thinking Machines",
                     "pages": [
-                      "cookbook/autoregressive/ThinkingMachines/Inkling"
+                      "cookbook/autoregressive/ThinkingMachines/Inkling",
+                      "cookbook/autoregressive/ThinkingMachines/Inkling-Small"
                     ]
                   },
                   {
