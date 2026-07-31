@@ -947,7 +947,7 @@ class SchedulerBatchResultProcessor:
             req.update_finish_state(new_accept_len)
 
             if not req.finished():
-                rep_tokens = next_token_id if batch.is_spec_v2 else None
+                rep_tokens = next_token_id if is_spec else None
                 self._check_repetition(req, rep_tokens)
 
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
