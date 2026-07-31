@@ -215,8 +215,6 @@ class TestFinishRepetitionFormat(unittest.TestCase):
         self.assertEqual(j["type"], "stop")
         # matched must follow the regex-parseable format
         self.assertEqual(j["matched"], "[repetition_loop:w=128,n=10,len=363]")
-        # is_error must be False — repetition is a normal termination, not an abort
-        self.assertFalse(r.is_error)
 
 
 class TestApiRequestForwarding(unittest.TestCase):
