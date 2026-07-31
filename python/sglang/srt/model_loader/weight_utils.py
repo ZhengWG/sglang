@@ -1036,6 +1036,8 @@ def _mmap_single_file(st_file: str) -> None:
 
 def fastsafetensors_weights_iterator(
     hf_weights_files: List[str],
+    enable_gds: bool = True,
+    drop_cache_after_load: bool = False,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the weights in the model safetensor files
@@ -1073,7 +1075,7 @@ def fastsafetensors_weights_iterator(
         disable=False,
         bar_format=_BAR_FORMAT,
     ):
-        loader = SafeTensorsFileLoader(pg, device)
+        loader = SafeTensorsFileLoader(pg, device, nogds=not enable_gds)
         rank_file_map = {i: [f] for i, f in enumerate(f_list)}
         loader.add_filenames(rank_file_map)
         try:
@@ -1087,6 +1089,9 @@ def fastsafetensors_weights_iterator(
                 pass
         finally:
             loader.close()
+        if drop_cache_after_load:
+            for loaded_file in rank_file_map.get(rank, []):
+                _drop_file_cache_after_load(loaded_file)
 
 
 def multi_thread_safetensors_weights_iterator(

@@ -400,6 +400,14 @@ class DefaultModelLoader(BaseModelLoader):
         super().__init__(load_config)
         extra_config = load_config.model_loader_extra_config
         allowed_keys = {"disable_multithread_load", "num_threads"}
+        if load_config.load_format == LoadFormat.FASTSAFETENSORS:
+            allowed_keys.add("enable_gds")
+            if "enable_gds" in extra_config and not isinstance(
+                extra_config["enable_gds"], bool
+            ):
+                raise ValueError(
+                    "enable_gds in --model-loader-extra-config must be a boolean"
+                )
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -550,7 +558,13 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
-        # use_multithread = extra_config.get("enable_multithread_load", True)
+        # use_multithread defaults to enabled unless "disable_multithread_load" is set.
+        # Kept for the prefetch fall-back block below (which reads it), while the
+        # actual multi-thread dispatch uses ``disable_multithread_load`` directly.
+        use_multithread = extra_config.get(
+            "enable_multithread_load",
+            not extra_config.get("disable_multithread_load", False),
+        )
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt
         )
@@ -610,8 +624,11 @@ class DefaultModelLoader(BaseModelLoader):
                 use_multithread = False
 
             if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+                enable_gds = extra_config.get("enable_gds", True)
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
+                    enable_gds=enable_gds,
+                    drop_cache_after_load=weight_loader_drop_cache_after_load,
                 )
             elif not extra_config.get("disable_multithread_load"):
                 weights_iterator = buffered_multi_thread_safetensors_weights_iterator(
