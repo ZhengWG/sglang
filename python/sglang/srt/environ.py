@@ -978,6 +978,9 @@ class Envs:
     # (see sanitize_nan_logits).
     SGLANG_SANITIZE_NAN_LOGITS = EnvBool(False)
 
+    # Repetition detection
+    SGLANG_ENABLE_REPETITION_DETECTION = EnvBool(False)
+
     # VLM
     SGLANG_VLM_CACHE_SIZE_MB = EnvInt(100)
     SGLANG_IMAGE_MAX_PIXELS = EnvInt(16384 * 28 * 28)

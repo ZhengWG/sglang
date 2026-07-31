@@ -272,6 +272,22 @@ class FINISH_ABORT(BaseFinishReason):
         }
 
 
+class FINISH_REPETITION(BaseFinishReason):
+    """Output terminated due to detected repetition loop."""
+
+    def __init__(self, window: int, threshold: int, output_len: int):
+        super().__init__(is_error=False)
+        self.window = window
+        self.threshold = threshold
+        self.output_len = output_len
+
+    def to_json(self):
+        return {
+            "type": "stop",
+            "matched": f"[repetition_loop:w={self.window},n={self.threshold},len={self.output_len}]",
+        }
+
+
 class Modality(Enum):
     IMAGE = auto()
     VIDEO = auto()

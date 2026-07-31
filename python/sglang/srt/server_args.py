@@ -1630,6 +1630,24 @@ class ServerArgs:
         "Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
         NS("observability"),
     ] = "localhost:4317"
+
+    # Repetition detection
+    enable_repetition_detection: A[
+        bool,
+        "Enable rolling hash based repetition loop detection. Terminates requests that produce deterministic repeating output. Can also be enabled via SGLANG_ENABLE_REPETITION_DETECTION=1.",
+    ] = False
+    repetition_window: A[
+        int,
+        "Window size (number of tokens) for repetition detection rolling hash.",
+    ] = 128
+    repetition_threshold: A[
+        int,
+        "Number of times a window hash must repeat to trigger detection.",
+    ] = 10
+    repetition_min_tokens: A[
+        int,
+        "Minimum output tokens before repetition detection starts checking. Outputs shorter than this are never terminated by repetition detection.",
+    ] = 5000
     # RequestMetricsExporter configuration
     export_metrics_to_file: A[
         bool,
@@ -7900,6 +7918,10 @@ class ServerArgs:
                 )
             if not supported:
                 envs.SGLANG_OPT_FP8_WO_A_GEMM.set(False)
+
+        # Env var override for repetition detection
+        if envs.SGLANG_ENABLE_REPETITION_DETECTION.get():
+            self.enable_repetition_detection = True
 
     def _handle_cache_compatibility(self):
         if self.enable_hierarchical_cache and self.disable_radix_cache:

@@ -80,6 +80,11 @@ class SamplingParams(msgspec.Struct, kw_only=True, array_like=True):
     logit_bias: Optional[Dict[str, float]] = None
     sampling_seed: Optional[int] = None
     custom_params: Optional[Dict[str, CustomParamValue]] = None
+    # Repetition loop detection: detect and early-stop deterministic output loops.
+    # Set window > 0 to enable per-request. None = use server default.
+    repetition_detection_window: Optional[int] = None
+    repetition_detection_threshold: Optional[int] = None
+    repetition_detection_min_tokens: Optional[int] = None
 
     # --- Internal fields (populated by __post_init__ or normalize(), not API-facing) ---
     stop_strs: Optional[Union[str, List[str]]] = None  # from stop

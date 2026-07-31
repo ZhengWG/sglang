@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -19,6 +19,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
     FINISH_MATCHED_TOKEN,
+    FINISH_REPETITION,
     Req,
     ScheduleBatch,
     mamba_lazy_spec_in_window,
@@ -32,6 +33,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     get_required_capture_hidden_mode,
     get_server_return_hidden_states_mode,
 )
+from sglang.srt.repetition_detector import RollingHashDetector
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
@@ -92,6 +94,73 @@ class SchedulerBatchResultProcessor:
     logprob_result_processor: SchedulerLogprobResultProcessor
     output_streamer: SchedulerOutputStreamer
     abort_request: Callable
+    repetition_detectors: dict = field(default_factory=dict)
+
+    def _check_repetition(self, req: Req, new_token_ids=None) -> bool:
+        """Check if a request has entered a repetition loop."""
+        sp = req.sampling_params
+        window = (
+            sp.repetition_detection_window
+            if sp.repetition_detection_window is not None
+            else self.server_args.repetition_window
+        )
+        threshold = (
+            sp.repetition_detection_threshold
+            if sp.repetition_detection_threshold is not None
+            else self.server_args.repetition_threshold
+        )
+        min_tokens = (
+            sp.repetition_detection_min_tokens
+            if sp.repetition_detection_min_tokens is not None
+            else self.server_args.repetition_min_tokens
+        )
+
+        per_request_enabled = (
+            sp.repetition_detection_window is not None
+            and sp.repetition_detection_window > 0
+        )
+        if not self.server_args.enable_repetition_detection and not per_request_enabled:
+            return False
+        if window < 1 or threshold < 2:
+            return False
+        if len(req.output_ids) < min_tokens:
+            return False
+
+        rid = req.rid
+        if rid not in self.repetition_detectors:
+            self.repetition_detectors[rid] = RollingHashDetector(
+                window_size=window,
+                max_repeat=threshold,
+            )
+
+        detector = self.repetition_detectors[rid]
+        if new_token_ids is None:
+            tokens = [req.output_ids[-1]]
+        elif isinstance(new_token_ids, int):
+            tokens = [new_token_ids]
+        else:
+            tokens = new_token_ids
+
+        for token_id in tokens:
+            if detector.check(token_id):
+                req.finished_reason = FINISH_REPETITION(
+                    window=window,
+                    threshold=threshold,
+                    output_len=len(req.output_ids),
+                )
+                logger.warning(
+                    "Repetition loop detected: rid=%s, output_len=%d, "
+                    "window=%d, threshold=%d",
+                    rid,
+                    len(req.output_ids),
+                    window,
+                    threshold,
+                )
+                return True
+        return False
+
+    def _cleanup_repetition_detector(self, req: Req):
+        self.repetition_detectors.pop(req.rid, None)
 
     def process_batch_result_prebuilt(self, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
@@ -877,6 +946,10 @@ class SchedulerBatchResultProcessor:
             req.time_stats.set_last_decode_finish_time()
             req.update_finish_state(new_accept_len)
 
+            if not req.finished():
+                rep_tokens = next_token_id if batch.is_spec_v2 else None
+                self._check_repetition(req, rep_tokens)
+
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
 
             if req.return_logprob:
@@ -1103,6 +1176,7 @@ class SchedulerBatchResultProcessor:
                 release_kv_cache(req, self.tree_cache, is_insert=is_insert)
 
             req.time_stats.set_completion_time()
+            self._cleanup_repetition_detector(req)
 
         self._maybe_collect_customized_info(i, req, logits_output)
 

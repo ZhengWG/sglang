@@ -203,6 +203,9 @@ class OpenAIServingCompletion(OpenAIServingBase):
             "logit_bias": request.logit_bias,
             "custom_params": request.custom_params,
             "sampling_seed": request.seed,
+            "repetition_detection_window": request.repetition_detection_window,
+            "repetition_detection_threshold": request.repetition_detection_threshold,
+            "repetition_detection_min_tokens": request.repetition_detection_min_tokens,
         }
 
         # Handle response_format constraints

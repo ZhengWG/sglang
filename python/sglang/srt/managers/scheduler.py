@@ -440,6 +440,13 @@ class Scheduler(
         self.enable_dp_attention = server_args.enable_dp_attention
         self.enable_unified_memory = server_args.enable_unified_memory
 
+        # Repetition detection
+        self.enable_repetition_detection = server_args.enable_repetition_detection
+        self.repetition_window = server_args.repetition_window
+        self.repetition_threshold = server_args.repetition_threshold
+        self.repetition_min_tokens = server_args.repetition_min_tokens
+        self.repetition_detectors: dict = {}
+
         # Distributed rank info
         attn_tp_rank, attn_tp_size, attn_dp_rank, attn_dp_size = (
             compute_dp_attention_world_info(

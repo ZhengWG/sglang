@@ -408,6 +408,11 @@ class CompletionRequest(BaseModel):
 
     images_config: Optional[Dict] = None
 
+    # Repetition loop detection (per-request override, None = use server default)
+    repetition_detection_window: Optional[int] = None
+    repetition_detection_threshold: Optional[int] = None
+    repetition_detection_min_tokens: Optional[int] = None
+
     # For PD disaggregation
     bootstrap_host: Optional[Union[List[str], str]] = None
     bootstrap_port: Optional[Union[List[Optional[int]], int]] = None
@@ -890,6 +895,11 @@ class ChatCompletionRequest(BaseModel):
     # and tool_call_constraint.
     input_ids: Optional[List[int]] = None
 
+    # Repetition loop detection (per-request override, None = use server default)
+    repetition_detection_window: Optional[int] = None
+    repetition_detection_threshold: Optional[int] = None
+    repetition_detection_min_tokens: Optional[int] = None
+
     # For request id
     rid: Optional[Union[List[str], str]] = None
     # Extra key for classifying the request (e.g. cache_salt)
@@ -1101,6 +1111,9 @@ class ChatCompletionRequest(BaseModel):
             "sampling_seed": self.seed,
             "spaces_between_special_tokens": spaces_between_special_tokens,
             "stream_interval": self.stream_interval,
+            "repetition_detection_window": self.repetition_detection_window,
+            "repetition_detection_threshold": self.repetition_detection_threshold,
+            "repetition_detection_min_tokens": self.repetition_detection_min_tokens,
         }
 
         if self.response_format and self.response_format.type == "json_schema":
