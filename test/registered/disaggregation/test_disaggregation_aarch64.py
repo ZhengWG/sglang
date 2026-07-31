@@ -8,12 +8,16 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
 from sglang.test.test_utils import (
+    DEFAULT_PORT_FOR_SRT_TEST_RUNNER,
     DEFAULT_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     popen_launch_pd_server,
 )
 
 register_cuda_ci(est_time=300, stage="base-c", runner_config="4-gpu-gb200")
+
+# Keep rendezvous ports below the ephemeral range on the 4-GPU GB300 runner.
+NCCL_PORT_BASE = DEFAULT_PORT_FOR_SRT_TEST_RUNNER + 120
 
 
 class TestDisaggregationMooncakeAARCH64Accuracy(PDDisaggregationServerBase):
@@ -50,6 +54,8 @@ class TestDisaggregationMooncakeAARCH64Accuracy(PDDisaggregationServerBase):
             cls.bootstrap_port,
             "--tp",
             "2",
+            "--nccl-port",
+            str(NCCL_PORT_BASE),
         ]
         prefill_args += cls.transfer_backend + cls.rdma_devices
         cls.process_prefill = popen_launch_pd_server(
@@ -71,6 +77,8 @@ class TestDisaggregationMooncakeAARCH64Accuracy(PDDisaggregationServerBase):
             "2",
             "--base-gpu-id",
             "2",
+            "--nccl-port",
+            str(NCCL_PORT_BASE + 1),
         ]
         decode_args += cls.transfer_backend + cls.rdma_devices
         cls.process_decode = popen_launch_pd_server(
