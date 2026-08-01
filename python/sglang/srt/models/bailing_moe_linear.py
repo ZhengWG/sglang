@@ -59,6 +59,7 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP, _is_hip
 from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.runtime_context import (
+    get_device,
     get_forward,
     get_parallel,
     get_server_args,
@@ -528,7 +529,7 @@ class BailingMoELinearAttention(nn.Module):
             base=config.rope_parameters.get("rope_theta", 600000),
             rope_scaling=config.rope_parameters,
             is_neox_style=True,
-            device=get_server_args().device,
+            device=get_device().device,
             dtype=torch.float32,
         )
 
@@ -688,7 +689,7 @@ class BailingMoEAttention(nn.Module):
             max_position=self.max_position_embeddings,
             base=config.rope_parameters.get("rope_theta", 600000),
             rope_scaling=config.rope_parameters,
-            device=get_server_args().device,
+            device=get_device().device,
         )
         self.attn = RadixAttention(
             self.num_heads,
