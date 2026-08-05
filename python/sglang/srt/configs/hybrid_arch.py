@@ -104,6 +104,9 @@ def kimi_linear_config(model_config: ModelConfig):
         return config
     if isinstance(config, BailingHybridConfig) and config.use_kda:
         return config
+    text_config = getattr(config, "text_config", None)
+    if isinstance(text_config, KimiLinearConfig):
+        return text_config
     return None
 
 

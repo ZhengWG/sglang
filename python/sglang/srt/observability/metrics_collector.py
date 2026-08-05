@@ -21,7 +21,7 @@ import os
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
@@ -995,21 +995,33 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
+        self.max_total_num_tokens_swa = Gauge(
+            name="sglang:max_total_num_tokens_swa",
+            documentation="Maximum total number of tokens in the SWA KV cache pool.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.weight_memory_usage_gb = Gauge(
+            name="sglang:weight_memory_usage_gb",
+            documentation="Memory used by model weights in GB.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.kv_cache_memory_usage_gb = Gauge(
+            name="sglang:kv_cache_memory_usage_gb",
+            documentation="Memory used by the KV cache pools in GB.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
+        self.graph_memory_usage_gb = Gauge(
+            name="sglang:graph_memory_usage_gb",
+            documentation="Memory used by captured device graphs in GB.",
+            labelnames=list(labels.keys()) + ["phase"],
+            multiprocess_mode="mostrecent",
+        )
         self.max_running_requests_under_SLO = Gauge(
             name="sglang:max_running_requests_under_SLO",
             documentation="The maximum number of running requests under SLO.",
-            labelnames=labels.keys(),
-            multiprocess_mode="mostrecent",
-        )
-        self.engine_startup_time = Gauge(
-            name="sglang:engine_startup_time",
-            documentation="The time taken for the engine to start up.",
-            labelnames=labels.keys(),
-            multiprocess_mode="mostrecent",
-        )
-        self.engine_load_weights_time = Gauge(
-            name="sglang:engine_load_weights_time",
-            documentation="The time taken for the engine to load weights.",
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
@@ -1401,21 +1413,30 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
     def emit_constants(
         self,
         max_total_num_tokens: int,
+        max_total_num_tokens_swa: Optional[int],
+        weight_memory_usage_gb: float,
+        kv_cache_memory_usage_gb: float,
+        graph_memory_usage_gb: Mapping[str, float],
         max_running_requests_under_SLO: Optional[int],
-        engine_startup_time: float,
-        engine_load_weights_time: float,
         page_size: int,
         num_pages: int,
         context_len: int,
         startup_available_gpu_memory_gb: float,
     ) -> None:
         self._log_gauge(self.max_total_num_tokens, max_total_num_tokens)
+        if max_total_num_tokens_swa is not None:
+            self._log_gauge(self.max_total_num_tokens_swa, max_total_num_tokens_swa)
+        self._log_gauge(self.weight_memory_usage_gb, weight_memory_usage_gb)
+        self._log_gauge(self.kv_cache_memory_usage_gb, kv_cache_memory_usage_gb)
+        for phase, memory_usage_gb in graph_memory_usage_gb.items():
+            self.graph_memory_usage_gb.labels(
+                **self.labels,
+                phase=phase,
+            ).set(memory_usage_gb)
         if max_running_requests_under_SLO is not None:
             self._log_gauge(
                 self.max_running_requests_under_SLO, max_running_requests_under_SLO
             )
-        self._log_gauge(self.engine_startup_time, engine_startup_time)
-        self._log_gauge(self.engine_load_weights_time, engine_load_weights_time)
         self._log_gauge(self.page_size, page_size)
         self._log_gauge(self.num_pages, num_pages)
         self._log_gauge(self.context_len, context_len)
@@ -1435,28 +1456,43 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
     ) -> None:
         # We need to import prometheus_client after setting the env variable `PROMETHEUS_MULTIPROC_DIR`
         from prometheus_client import Counter as _PromCounter
+        from prometheus_client import Gauge as _PromGauge
         from prometheus_client import Histogram as _PromHistogram
 
         Counter = self._counter_cls or _PromCounter
+        Gauge = self._gauge_cls or _PromGauge
         Histogram = self._histogram_cls or _PromHistogram
 
-        self.labels = labels or {}
+        self.labels = dict(labels or {})
         self.labels["lora_adapter"] = "base"
+
+        self.startup_time_seconds = Gauge(
+            name="sglang:startup_time_seconds",
+            documentation="Engine startup duration by phase in seconds.",
+            labelnames=[*self.labels.keys(), "phase"],
+            multiprocess_mode="mostrecent",
+        )
+        self.startup_cuda_graph_time_seconds = Gauge(
+            name="sglang:startup_cuda_graph_time_seconds",
+            documentation="CUDA graph capture duration by phase in seconds.",
+            labelnames=[*self.labels.keys(), "phase"],
+            multiprocess_mode="mostrecent",
+        )
 
         self.prompt_tokens_total = Counter(
             name="sglang:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
-            labelnames=self.labels.keys(),
+            labelnames=[*self.labels.keys(), "is_streaming"],
         )
         self.generation_tokens_total = Counter(
             name="sglang:generation_tokens_total",
             documentation="Number of generation tokens processed.",
-            labelnames=self.labels.keys(),
+            labelnames=[*self.labels.keys(), "is_streaming"],
         )
         self.spec_verify_calls_total = Counter(
             name="sglang:spec_verify_calls_total",
             documentation="Number of speculative decoding verification calls.",
-            labelnames=labels.keys(),
+            labelnames=self.labels.keys(),
         )
 
         default_bucket_prompt_tokens = [
@@ -1507,7 +1543,7 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self.uncached_prompt_tokens_histogram = Histogram(
             name="sglang:uncached_prompt_tokens_histogram",
             documentation="Histogram of uncached (compute) prompt token length.",
-            labelnames=labels.keys(),
+            labelnames=self.labels.keys(),
             buckets=generate_buckets(
                 server_args.prompt_tokens_buckets, default_bucket_prompt_tokens
             ),
@@ -1531,13 +1567,13 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self.num_requests_total = Counter(
             name="sglang:num_requests_total",
             documentation="Number of requests processed.",
-            labelnames=self.labels.keys(),
+            labelnames=[*self.labels.keys(), "is_streaming"],
         )
 
         self.get_loads_duration_seconds = Histogram(
             name="sglang:get_loads_duration_seconds",
             documentation="Time spent serving /v1/loads requests (seconds).",
-            labelnames=labels.keys(),
+            labelnames=self.labels.keys(),
             buckets=(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
         )
 
@@ -1637,8 +1673,10 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self.histogram_time_to_first_token = Histogram(
             name="sglang:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            # "stream" splits streaming vs non-streaming requests.
-            labelnames=[*self.labels.keys(), "stream"],
+            # "is_streaming" splits streaming vs non-streaming requests (named to
+            # match downstream storage dimensions exactly - "stream" is a
+            # reserved thrift keyword, so schema columns cannot carry it).
+            labelnames=[*self.labels.keys(), "is_streaming"],
             buckets=bucket_time_to_first_token,
         )
 
@@ -1652,12 +1690,12 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self.histogram_e2e_request_latency = Histogram(
             name="sglang:e2e_request_latency_seconds",
             documentation="Histogram of End-to-end request latency in seconds",
-            labelnames=self.labels.keys(),
+            labelnames=[*self.labels.keys(), "is_streaming"],
             buckets=bucket_e2e_request_latency,
         )
 
         # Multimodal metrics (initialized optionally)
-        self._init_multimodal_metrics(labels)
+        self._init_multimodal_metrics(self.labels)
 
     def _init_multimodal_metrics(
         self,
@@ -1774,6 +1812,24 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
             buckets=bucket_request_mm_tokens,
         )
 
+    def emit_startup_time(self, startup_time: Mapping[str, Any]) -> None:
+        for phase in (
+            "load_weight",
+            "kv_cache_allocation",
+            "scheduler_e2e",
+            "tokenizer_e2e",
+        ):
+            self.startup_time_seconds.labels(
+                **self.labels,
+                phase=phase,
+            ).set(float(startup_time[phase]))
+
+        for phase, duration in startup_time["cuda_graph"].items():
+            self.startup_cuda_graph_time_seconds.labels(
+                **self.labels,
+                phase=phase,
+            ).set(float(duration))
+
     def observe_one_finished_request(
         self,
         labels: Dict[str, str],
@@ -1785,9 +1841,14 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         finished_reason: str,
         cached_tokens_details: Optional[Dict[str, Any]] = None,
         spec_verify_ct: int = 0,
+        is_streaming: bool = False,
     ):
-        self.prompt_tokens_total.labels(**labels).inc(prompt_tokens)
-        self.generation_tokens_total.labels(**labels).inc(generation_tokens)
+        stream_labels = {
+            **labels,
+            "is_streaming": "true" if is_streaming else "false",
+        }
+        self.prompt_tokens_total.labels(**stream_labels).inc(prompt_tokens)
+        self.generation_tokens_total.labels(**stream_labels).inc(generation_tokens)
         if spec_verify_ct > 0:
             self.spec_verify_calls_total.labels(**labels).inc(spec_verify_ct)
 
@@ -1816,13 +1877,15 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
                 labels_total = {**labels, "cache_source": "total"}
                 self.cached_tokens_total.labels(**labels_total).inc(cached_tokens)
 
-        self.num_requests_total.labels(**labels).inc(1)
+        self.num_requests_total.labels(**stream_labels).inc(1)
         if has_grammar:
             self.num_so_requests_total.labels(**labels).inc(1)
         self.counter_request_success.labels(
             **labels, finished_reason=finished_reason
         ).inc(1)
-        self.histogram_e2e_request_latency.labels(**labels).observe(float(e2e_latency))
+        self.histogram_e2e_request_latency.labels(**stream_labels).observe(
+            float(e2e_latency)
+        )
         self.prompt_tokens_histogram.labels(**labels).observe(float(prompt_tokens))
         self.uncached_prompt_tokens_histogram.labels(**labels).observe(
             float(prompt_tokens - cached_tokens)
@@ -1835,11 +1898,13 @@ class TokenizerMetricsCollector(_StatLoggerDIMixin):
         self, labels: Dict[str, str], value: float, *, stream: bool
     ):
         self.histogram_time_to_first_token.labels(
-            **labels, stream="true" if stream else "false"
+            **labels, is_streaming="true" if stream else "false"
         ).observe(value)
 
     def check_time_to_first_token_straggler(self, value: float) -> bool:
-        his = self.histogram_time_to_first_token.labels(**self.labels, stream="true")
+        his = self.histogram_time_to_first_token.labels(
+            **self.labels, is_streaming="true"
+        )
         total_observations = sum(bucket._value for bucket in his._buckets)
         if total_observations < 100:
             return False
