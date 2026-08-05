@@ -250,9 +250,8 @@ fallback_version = "0.0.0.dev0"
 
 # Rust extension modules are auto-discovered by setup.py from the cargo
 # workspace in ../rust ([package.metadata.sglang] python-module in each crate).
-# The Theta CUDA build keeps the server extension but intentionally skips the
-# optional grpc and multimodal native modules that were previously commented
-# out here; platform-specific pyprojects can opt into a different subset.
+# The Theta CUDA build intentionally disables all native Rust modules;
+# platform-specific pyprojects can opt into a different subset.
 # Keep this assignment on one line because setup.py reads it without a TOML
 # parser.
 [tool.sglang]

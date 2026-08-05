@@ -187,7 +187,6 @@ ENV LANG=en_US.UTF-8 \
 #     |                  \-> hpc_ops_builder (cmake-only build)
 #     |
 #     +-- devtools_builder (independent)
-#     +-- gateway_builder  (independent, only needs gateway source)
 #     |
 #     v
 #   framework (combines all artifacts)
@@ -202,32 +201,8 @@ ARG CUDA_VERSION
 ARG BUILD_TYPE
 ARG SGL_KERNEL_VERSION
 ARG GITHUB_ARTIFACTORY
-ARG RUSTUP_DIST_MIRROR
 
 WORKDIR /sgl-workspace
-
-# Rust toolchain for setuptools-rust extensions (e.g. sglang-grpc).
-# Requires >= 1.85 (edition 2024). Inherited by framework via FROM torch_deps.
-ENV PATH="/root/.cargo/bin:${PATH}"
-ENV RUSTUP_UPDATE_ROOT="${RUSTUP_DIST_MIRROR}/rustup"
-ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_MIRROR}"
-
-RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
-        | sh -s -- -y --no-modify-path --profile minimal \
-    && rustc --version && cargo --version
-
-# 配置rust crates.io
-COPY <<EOF /root/.cargo/config.toml
-[source.crates-io]
-replace-with = 'mirror'
-
-[source.mirror]
-registry = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
-
-[registries.mirror]
-index = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
-
-EOF
 
 # Install sgl-kernel (from pre-built wheel)
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -254,19 +229,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     ; \
     fi
 
-# Copy dep spec + Rust crate source + proto files. setuptools-rust compiles the
-# Rust extension during the stub wheel build; the crate's build.rs references
-# ../../proto for tonic_build. Split from the pip install so source changes to
-# these paths invalidate the dep-install layer, but Python source changes don't.
+# Copy only the dependency spec. This CUDA build explicitly sets
+# `rust-extensions = []`, so the dependency stub does not need Rust sources.
 COPY python/pyproject.toml /tmp/sglang_deps/python/pyproject.toml
-COPY rust/sglang-grpc      /tmp/sglang_deps/rust/sglang-grpc
-COPY rust/sglang-mm        /tmp/sglang_deps/rust/sglang-mm
-COPY proto                 /tmp/sglang_deps/proto
 
 # Install sglang dependencies (torch, transformers, etc.)
 # Generate constraints.txt to prevent reinstalling these deps in later stages
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cargo/registry \
     case "$CUDA_VERSION" in \
         12.6.1) CUINDEX=126 ;; \
         12.8.1) CUINDEX=128 ;; \
@@ -529,58 +498,6 @@ RUN sh -c "export REMOTE=https://${GITHUB_ARTIFACTORY}/ohmyzsh/ohmyzsh.git; $(cu
     && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
 ########################################################
-# PARALLEL STAGE 5: Gateway Builder (starts from base)
-########################################################
-# Builds sgl-model-gateway in isolation so Python-only changes
-# don't trigger a full Rust recompilation.
-FROM base AS gateway_builder
-
-ARG GITHUB_ARTIFACTORY
-ARG BRANCH_TYPE
-ARG SGL_VERSION
-ARG USE_LATEST_SGLANG
-ARG RUSTUP_DIST_MIRROR
-
-WORKDIR /build
-
-# Copy ONLY the gateway source (not the full repo)
-COPY sgl-model-gateway /build/sgl-model-gateway
-
-ENV PATH="/root/.cargo/bin:${PATH}"
-# Install Rust, build gateway binary and Python bindings, then clean up Rust toolchain
-ENV RUSTUP_UPDATE_ROOT="${RUSTUP_DIST_MIRROR}/rustup"
-ENV RUSTUP_DIST_SERVER="${RUSTUP_DIST_MIRROR}"
-
-RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://mirrors.aliyun.com/repo/rust/rustup-init.sh \
-        | sh -s -- -y \
-    && rustc --version && cargo --version
-
-# 配置rust crates.io
-COPY <<EOF /root/.cargo/config.toml
-[source.crates-io]
-replace-with = 'mirror'
-
-[source.mirror]
-registry = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
-
-[registries.mirror]
-index = "sparse+https://mirrors.bfsu.edu.cn/crates.io-index/"
-[net]
-git-fetch-with-cli = true
-EOF
-
-RUN git config --global url."https://gitee.com/staugust/harmony.git".insteadOf "https://github.com/openai/harmony.git" && \
-    git config --global url."https://gitee.com/staugust/harmony".insteadOf "https://github.com/openai/harmony"
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install maturin \
-    && cd /build/sgl-model-gateway/bindings/python \
-    && ulimit -n 65536 && maturin build --release --features vendored-openssl --out /build/gateway_wheels -j 4\
-    && cd /build/sgl-model-gateway \
-    && cargo build --release --bin sgl-model-gateway --features vendored-openssl -j 4 \
-    && cp target/release/sgl-model-gateway /build/sgl-model-gateway-bin \
-    && rm -rf /root/.cargo /root/.rustup /build/sgl-model-gateway/target /build/sgl-model-gateway/bindings/python/target
-
-########################################################
 ########## Final Framework Image ######################
 ########################################################
 #
@@ -815,6 +732,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     else \
         git clone --depth=1 --branch v${SGL_VERSION} https://${GITHUB_ARTIFACTORY}/sgl-project/sglang.git /sgl-workspace/sglang; \
     fi \
+    && rm -rf /sgl-workspace/sglang/sgl-model-gateway \
     && rm -rf /tmp/local_src
 ENV HF_ENDPOINT="https://hf-mirror.com"
 # Editable install (fast - dependencies already installed via constraints)
@@ -862,13 +780,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && mkdir -p /root/.cache/huggingface /root/.cache/sglang \
     && ( if [ -f python/kernels.lock ]; then mv python/kernels.lock /root/.cache/sglang/; fi ) \
     && ( find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true )
-
-# Install pre-built gateway artifacts from parallel builder
-COPY --from=gateway_builder /build/sgl-model-gateway-bin /usr/local/bin/sgl-model-gateway
-COPY --from=gateway_builder /build/gateway_wheels /tmp/gateway_wheels
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --force-reinstall /tmp/gateway_wheels/*.whl \
-    && rm -rf /tmp/gateway_wheels
 
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
@@ -1104,9 +1015,6 @@ COPY --from=framework_final /usr/local/lib/python3.12/dist-packages /usr/local/l
 
 # Copy SGLang workspace
 COPY --from=framework_final /sgl-workspace /sgl-workspace
-
-# Copy sgl-model-gateway binary
-# COPY --from=framework_final /usr/local/bin/sgl-model-gateway /usr/local/bin/sgl-model-gateway
 
 # Copy sglang binary
 COPY --from=framework_final /usr/local/bin/sglang /usr/local/bin/sglang
