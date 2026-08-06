@@ -145,7 +145,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt,sharing=locked \
     libsubunit0 \
     libsubunit-dev \
     # have to remove python3-jwt to avoid conflicts with python3.12 as when installing sglang package, python3-jwt can not be removed by pip
-    && (apt remove -y python3-jwt || true)\
+    && (apt remove -y python3-jwt python3-blinker python3-cryptography || true)\
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
@@ -254,11 +254,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
            sed -i 's/flashinfer_python\[cu13\]/flashinfer_python[cu12]/' pyproject.toml && \
            sed -i 's/nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' pyproject.toml; \
        fi \
-    && python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
+    && python3 -m pip install --extra-index-url https://mirrors.nju.edu.cn/pytorch/whl/cu${CUINDEX} ".[${BUILD_TYPE}]" \
     && if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
            pip list --format=freeze | awk -F'==' '/-cu13(==|$)/ {print $1}' \
                | xargs -r python3 -m pip uninstall -y && \
-           python3 -m pip install --index-url https://download.pytorch.org/whl/cu${CUINDEX} \
+           python3 -m pip install --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu${CUINDEX} \
                torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --force-reinstall; \
            python3 -m pip install https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_DEEP_GEMM_VERSION}/sgl_deep_gemm-${SGL_DEEP_GEMM_VERSION}+cu129-py3-none-manylinux2014_$(uname -m).whl --force-reinstall; \
        fi \
@@ -978,7 +978,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt,sharing=locked \
     gnupg2 \
     linux-libc-dev \
     # have to remove python3-jwt to avoid conflicts with python3.12 as when installing sglang package, python3-jwt can not be removed by pip
-    && (apt remove -y python3-jwt || true)\
+    && (apt remove -y python3-jwt python3-blinker python3-cryptography || true)\
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
     && update-alternatives --set python3 /usr/bin/python3.12 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
