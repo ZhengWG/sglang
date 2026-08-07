@@ -195,6 +195,7 @@ class SchedulerBatchResultProcessor:
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
         skip_stream_req = None
+        self.token_to_kv_pool_allocator.free_group_begin()
 
         if self.is_generation:
             if result.copy_done is not None:
@@ -372,6 +373,7 @@ class SchedulerBatchResultProcessor:
                     len(batch.reqs), total_tokens, batch.create_time, batch.waiting_size
                 )
 
+        self.token_to_kv_pool_allocator.free_group_end()
         self.output_streamer.stream_output(
             batch.reqs, batch.return_logprob, skip_stream_req
         )
