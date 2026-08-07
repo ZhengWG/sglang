@@ -28,7 +28,7 @@ parameters:
   build_whl_only: "true"
   build_sglang_whl_only: "false"
   skip_build_stage: "false"
-  cuda_version_full: "13.0.1" # 12.9.1 or 13.0.1
+  cuda_version_full: "13.0.3" # 12.9.2 or 13.0.3
   torch_version: "2.11.0" # 改成2.9.1之外的版本时，需要同时配置 cu_tag
   python_version: "3.10" # 3.10默认安装了torch,uv 等组件，构建比较快, 社区的sglang-kernel包也是用python3.10编译的, 和runtime里python版本没关系
   max_jobs: 24 # ninja编译并发度, 一般不用修改
@@ -75,8 +75,8 @@ jobs:
         fi
 
         case "$CUDA_VERSION_FULL" in \
-          12.9.1) RUNTIME_BASE_IMAGE_TAG=25.06 ;; \
-          13.0.1) RUNTIME_BASE_IMAGE_TAG=25.08 ;; \
+          12.9.2) RUNTIME_BASE_IMAGE_TAG=25.06 ;; \
+          13.0.3) RUNTIME_BASE_IMAGE_TAG=25.08 ;; \
           *) echo "Unsupported CUDA version: $CUDA_VERSION_FULL" && exit 1 ;; \
         esac
         

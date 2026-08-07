@@ -772,5 +772,25 @@ class TestEmbeddingReqInputNormalization(CustomTestCase):
             req.normalize_batch_and_arguments()
 
 
+class TestEmbeddingReqInputGetItem(CustomTestCase):
+    """Test EmbeddingReqInput.__getitem__."""
+
+    def test_priority_is_preserved(self):
+        """Priority must survive the batch split, in both __getitem__ branches."""
+        req = EmbeddingReqInput(text=["Hello", "World"], priority=7)
+        req.normalize_batch_and_arguments()
+        self.assertEqual([req[0].priority, req[1].priority], [7, 7])
+
+        cross_encoder_req = EmbeddingReqInput(
+            text=[["query 1", "doc 1"], ["query 2", "doc 2"]],
+            is_cross_encoder_request=True,
+            priority=3,
+        )
+        cross_encoder_req.normalize_batch_and_arguments()
+        self.assertEqual(
+            [cross_encoder_req[0].priority, cross_encoder_req[1].priority], [3, 3]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

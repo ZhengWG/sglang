@@ -81,7 +81,7 @@ build_sglang_whl_only: "true"
 
 | 参数名 | 默认值 | 说明 | 可选项 |
 |--------|--------|------|--------|
-| `cuda_version_full` | `13.0.1` | 完整 CUDA 版本，需与 `torch_version` 兼容 | `12.9.1`, `13.0.1` |
+| `cuda_version_full` | `13.0.3` | 完整 CUDA 版本，需与 `torch_version` 兼容 | `12.9.2`, `13.0.3` |
 | `torch_version` | `2.11.0` | PyTorch 版本，需与 `cuda_version_full` 兼容，改为 2.9.1 之外的版本时需要同时配置 cu_tag | - |
 | `python_version` | `3.12` | Python 版本，3.12 默认安装了 torch、uv 等组件，构建比较快，且社区 runtime 也使用 Python 3.12 | `3.8`, `3.9`, `3.10`, `3.11`, `3.12`, `3.13`, `3.14` |
 | `enable_below_sm90` | `ON` | 是否支持 SM90 以下 GPU（Hopper 以下架构），默认支持 | `ON`, `OFF` |
