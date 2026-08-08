@@ -949,7 +949,8 @@ def _resolve_test_spec(test_spec):
         print(
             f"Resolved: file={resolved_path}, selector={test_selector}, "
             f"suite={info['suite']}, mode={mode}, runs_on={info['runner_label']}, "
-            f"install={info['install_script']}, rdma={info['rdma_devices']}, "
+            f"install={info['install_script']}, "
+            f"rdma={info['rdma_devices']}, "
             f"command='{test_command}'"
         )
         out.append(
