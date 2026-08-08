@@ -11,12 +11,6 @@ FROM ${RUNTIME_BASE_IMAGE} AS base
 ARG TARGETARCH
 ARG BUILD_TYPE=all
 ARG BRANCH_TYPE=local
-ARG GRACE_BLACKWELL=0
-ARG HOPPER_SBO=0
-
-ARG HOPPER_SBO_DEEPEP_COMMIT=9f2fc4b3182a51044ae7ecb6610f7c9c3258c4d6
-ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
-ARG BUILD_AND_DOWNLOAD_PARALLEL=8
 ARG SGL_KERNEL_VERSION=0.4.6.post1
 ARG SGL_VERSION
 ARG SGL_DEEP_GEMM_VERSION=0.1.5.post2
@@ -27,7 +21,8 @@ ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
 ARG FLASHINFER_VERSION=0.6.15.post1
-ARG TRTLLM_GEN_MOE_CUBIN_URL="https://github.com/sgl-project/whl/releases/download/trtllm_gen_moe_cubin_20260617/trtllm_gen_moe_cubin_pool_20260617_v0613rc1.zip"
+# Leave empty to download through GITHUB_ARTIFACTORY; set a full URL to override.
+ARG TRTLLM_GEN_MOE_CUBIN_URL
 ARG TRTLLM_GEN_MOE_CUBIN_SHA256="4900501cbe782a76b08a5858f9f07152287b97cb68114466dac286366b66c192"
 ARG TRTLLM_GEN_MOE_CUBIN_ARCHIVE_ROOT="trtllm_gen_moe_cubin_pool_20260617_v0613rc1"
 ARG MOONCAKE_VERSION=0.3.12.post1
@@ -187,8 +182,7 @@ ENV LANG=en_US.UTF-8 \
 #
 #   base
 #     |
-#     +-- torch_deps ------> deepep_builder (needs torch)
-#     |                  |-> flashinfer_cache (needs flashinfer)
+#     +-- torch_deps ------> flashinfer_cache (needs flashinfer)
 #     |                  \-> hpc_ops_builder (cmake-only build)
 #     |
 #     +-- devtools_builder (independent)
@@ -238,8 +232,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # `rust-extensions = []`, so the dependency stub does not need Rust sources.
 COPY python/pyproject.toml /tmp/sglang_deps/python/pyproject.toml
 
-# Install sglang dependencies (torch, transformers, etc.)
-# Generate constraints.txt to prevent reinstalling these deps in later stages
+# Install sglang dependencies (torch, transformers, etc.). CUDA 12 DeepEP
+# wheels live only on the SGLang index, so preinstall the local-version wheel;
+# it satisfies the public-version pyproject pin during the full dependency solve.
+# Generate constraints.txt to prevent reinstalling these deps in later stages.
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$CUDA_VERSION" in \
         12.6.3) CUINDEX=126 ;; \
@@ -253,6 +249,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && echo '__version__ = "0.0.0"' > sglang/version.py \
     && touch README.md \
     && touch LICENSE \
+    && SGL_DEEP_EP_VERSION="$(sed -n 's/^[[:space:]]*"sgl-deep-ep==\([^"]*\)",/\1/p' pyproject.toml)" \
+    && test -n "${SGL_DEEP_EP_VERSION}" \
+    && if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
+           python3 -m pip install \
+               "sgl-deep-ep==${SGL_DEEP_EP_VERSION}+cu129" \
+               --index-url "https://docs.sglang.ai/whl/cu129/" \
+               --no-deps; \
+       fi \
     && if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
            sed -i 's/cuda-python>=13\.0/cuda-python>=12,<13/' pyproject.toml && \
            sed -i 's/flashinfer_python\[cu13\]/flashinfer_python[cu12]/' pyproject.toml && \
@@ -275,76 +279,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN python3 -m pip install --ignore-installed --no-deps distro
 
 ########################################################
-# PARALLEL STAGE 2: DeepEP Builder (needs torch_deps)
-########################################################
-FROM torch_deps AS deepep_builder
-
-ARG CUDA_VERSION
-ARG BUILD_AND_DOWNLOAD_PARALLEL
-ARG GRACE_BLACKWELL
-ARG HOPPER_SBO
-ARG HOPPER_SBO_DEEPEP_COMMIT
-ARG DEEPEP_COMMIT
-ARG GITHUB_ARTIFACTORY
-
-WORKDIR /build
-
-# Clone DeepEP
-RUN set -eux; \
-    if [ "$GRACE_BLACKWELL" = "1" ]; then \
-      if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
-        git clone https://github.com/fzyzcjy/DeepEP.git && \
-        cd DeepEP && \
-        git checkout gb200_blog_part_2 && \
-        sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-        sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-        cd .. ; \
-      else \
-        git clone https://github.com/deepseek-ai/DeepEP.git -b hybrid-ep && \
-        cd DeepEP && \
-        git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6 && \
-        sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-        sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-        cd .. ; \
-      fi; \
-    elif [ "$HOPPER_SBO" = "1" ]; then \
-      git clone https://${GITHUB_ARTIFACTORY}/deepseek-ai/DeepEP.git -b antgroup-opt && \
-      cd DeepEP && \
-      git checkout ${HOPPER_SBO_DEEPEP_COMMIT} && \
-      sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-      sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-      cd .. ; \
-    else \
-        curl --retry 3 --retry-delay 2 -fsSL -o ${DEEPEP_COMMIT}.zip \
-            https://${GITHUB_ARTIFACTORY}/deepseek-ai/DeepEP/archive/${DEEPEP_COMMIT}.zip && \
-        unzip -q ${DEEPEP_COMMIT}.zip && rm ${DEEPEP_COMMIT}.zip && mv DeepEP-${DEEPEP_COMMIT} DeepEP && cd DeepEP && \
-        sed -i 's/#define NUM_CPU_TIMEOUT_SECS 100/#define NUM_CPU_TIMEOUT_SECS 1000/' csrc/kernels/configs.cuh && \
-        sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh && \
-        cd .. ; \
-    fi
-
-# Build DeepEP wheel
-RUN --mount=type=cache,target=/root/.cache/pip \
-    cd /build/DeepEP && \
-    case "$CUDA_VERSION" in \
-        12.6.3) \
-            CHOSEN_TORCH_CUDA_ARCH_LIST='9.0' \
-            ;; \
-        12.9.2|13.0.3) \
-            CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0;10.3' \
-            ;; \
-        *) \
-            echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 \
-            ;; \
-    esac && \
-    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        sed -i "/^    include_dirs = \['csrc\/'\]/a\    include_dirs.append('${CUDA_HOME}/include/cccl')" setup.py; \
-    fi && \
-    TORCH_CUDA_ARCH_LIST="${CHOSEN_TORCH_CUDA_ARCH_LIST}" MAX_JOBS=${BUILD_AND_DOWNLOAD_PARALLEL} \
-        python3 setup.py bdist_wheel -d /wheels
-
-########################################################
-# PARALLEL STAGE 3: HPC-Ops Builder (needs torch_deps)
+# PARALLEL STAGE 2: HPC-Ops Builder (needs torch_deps)
 ########################################################
 FROM torch_deps AS hpc_ops_builder
 
@@ -419,7 +354,7 @@ exec $REAL_CMAKE -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHE
     fi
 
 ########################################################
-# PARALLEL STAGE 4: FlashInfer Cache (needs torch_deps)
+# PARALLEL STAGE 3: FlashInfer Cache (needs torch_deps)
 ########################################################
 # no need to from torch_deps as torch_deps will be updated when sglang/python/project.toml updated.
 FROM base AS flashinfer_cache
@@ -498,14 +433,15 @@ RUN sh -c "export REMOTE=https://${GITHUB_ARTIFACTORY}/ohmyzsh/ohmyzsh.git; $(cu
     && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-/root/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
 ########################################################
-# PARALLEL STAGE 6: TRT-LLM Generated-MoE Cubin Pool
+# PARALLEL STAGE 5: TRT-LLM Generated-MoE Cubin Pool
 ########################################################
 FROM base AS trtllm_cubin_builder
 
-RUN cubin_archive="/tmp/trtllm_gen_moe_cubin_pool.zip" && \
+RUN cubin_url="${TRTLLM_GEN_MOE_CUBIN_URL:-https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/trtllm_gen_moe_cubin_20260617/trtllm_gen_moe_cubin_pool_20260617_v0613rc1.zip}" && \
+    cubin_archive="/tmp/trtllm_gen_moe_cubin_pool.zip" && \
     cubin_extract_dir="/tmp/trtllm_gen_moe_cubin_extract" && \
     wget --no-verbose --output-document="${cubin_archive}" \
-      "${TRTLLM_GEN_MOE_CUBIN_URL}" && \
+      "${cubin_url}" && \
     echo "${TRTLLM_GEN_MOE_CUBIN_SHA256}  ${cubin_archive}" | \
       sha256sum --check --strict - && \
     mkdir -p "${cubin_extract_dir}" && \
@@ -529,7 +465,6 @@ FROM torch_deps AS framework
 ARG BRANCH_TYPE
 ARG BUILD_TYPE
 ARG CUDA_VERSION
-ARG BUILD_AND_DOWNLOAD_PARALLEL
 ARG SGL_VERSION
 ARG USE_LATEST_SGLANG
 ARG GITHUB_ARTIFACTORY
@@ -542,12 +477,6 @@ WORKDIR /sgl-workspace
 # =============================================================================
 # Copy artifacts from parallel builders
 # =============================================================================
-
-# Copy DeepEP wheel and install
-COPY --from=deepep_builder /wheels /tmp/wheels/deepep
-COPY --from=deepep_builder /build/DeepEP /sgl-workspace/DeepEP
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install /tmp/wheels/deepep/*.whl && rm -rf /tmp/wheels/deepep
 
 # Copy HPC-Ops wheel and install (empty on non-x86_64; kernels are sm90a-only)
 COPY --from=hpc_ops_builder /wheels /tmp/wheels/hpc-ops
@@ -923,7 +852,7 @@ LABEL org.opencontainers.image.source="https://github.com/sgl-project/sglang" \
 # PURPOSE: Production runtime environment with JIT support
 #
 # This stage creates a production-ready image containing:
-# - Pre-compiled SGLang and DeepEP components
+# - Pre-installed SGLang and CUDA dependencies
 # - Full CUDA toolchain for JIT compilation (DeepGEMM, Triton, FlashInfer)
 # - Optimized for inference workloads and deployment
 # - Smaller than framework (no dev tools like vim, tmux, nsight, etc.)
