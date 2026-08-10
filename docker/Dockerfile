@@ -324,6 +324,7 @@ exec $REAL_CMAKE -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHE
         git clone https://${GITHUB_ARTIFACTORY}/Tencent/hpc-ops.git && \
         cd hpc-ops && \
         git checkout ${HPC_OPS_COMMIT} && \
+        ((curl -OL https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/sglang_aci_pipeline/${HPC_OPS_COMMIT}.tar && tar -xpf ${HPC_OPS_COMMIT}.tar -C / ) || true) && \
         mem_check(){ \
           for i in $(seq 1 1000); do \
             _MEM_LIMIT=$(( 30 * 1024 * 1024 * 1024)); \
