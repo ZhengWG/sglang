@@ -822,7 +822,7 @@ class Envs:
     # Proactively free out-of-window SWA slots while caching unfinished requests.
     # Applies to both unified and legacy hybrid-SWA radix trees.
     SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS = EnvBoolWithAlias(
-        False,
+        True,
         deprecated_name="SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS",
     )
 
