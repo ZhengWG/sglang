@@ -12,12 +12,12 @@ import hashlib
 import itertools
 import json
 import logging
+import mmap
 import os
 import re
 import struct
 import tempfile
-import mmap
-import concurrent.futures
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -134,6 +134,8 @@ def probe_routed_expert_weight_dtype(model_path: str) -> Optional[str]:
 
 # Block size for sequential checkpoint prefetch reads (page cache warming).
 _PREFETCH_BLOCK_SIZE = None
+_PREFETCH_STOP_TIMEOUT_SECONDS = 60.0
+CAPTURE_SAFE_WEIGHT_SENTINEL = 1e-3
 
 
 def _get_prefetch_block_size() -> int:
@@ -859,21 +861,72 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
-def _prefetch_checkpoint_file(file_path: str) -> None:
+def _prefetch_checkpoint_file(
+    file_path: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
     Reads the file sequentially in 16 MB blocks so the kernel caches its pages
     before workers load the same file via mmap.
     """
     with open(file_path, "rb") as f:
-        while f.read(_get_prefetch_block_size()):
-            pass
+        while cancel_event is None or not cancel_event.is_set():
+            if not f.read(_get_prefetch_block_size()):
+                break
+
+
+class CheckpointFilePrefetchHandle:
+    """Lifecycle handle for background checkpoint page-cache prefetching."""
+
+    def __init__(
+        self,
+        *,
+        thread: threading.Thread,
+        cancel_event: threading.Event,
+        succeeded_event: threading.Event,
+        errors: List[Tuple[str, Exception]],
+    ) -> None:
+        self._thread = thread
+        self._cancel_event = cancel_event
+        self._succeeded_event = succeeded_event
+        self._errors = errors
+
+    def wait(self, timeout: Optional[float] = None) -> None:
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("Timed out waiting for checkpoint prefetching")
+
+    def cancel(self) -> None:
+        """Stop scheduling shards and interrupt reads at the next block."""
+        self._cancel_event.set()
+
+    def stop(self, timeout: Optional[float] = _PREFETCH_STOP_TIMEOUT_SECONDS) -> None:
+        """Cancel prefetching and wait for the background worker to finish."""
+        self.cancel()
+        self.wait(timeout)
+
+    @property
+    def done(self) -> bool:
+        return not self._thread.is_alive()
+
+    @property
+    def failed(self) -> bool:
+        return bool(self._errors) or (self.done and not self._succeeded_event.is_set())
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+    @property
+    def errors(self) -> Tuple[Tuple[str, Exception], ...]:
+        return tuple(self._errors)
 
 
 def _prefetch_all_checkpoints(
     sorted_files: List[str],
     num_threads: int = 4,
-) -> None:
+) -> CheckpointFilePrefetchHandle:
     """Start prefetching checkpoint files into page cache in a background thread.
 
     When multiple ranks on the same node load the same checkpoint (e.g.
@@ -889,7 +942,6 @@ def _prefetch_all_checkpoints(
     naturally adapts to any RAM size — even if the full checkpoint does
     not fit in page cache, the prefetch thread stays ahead of the loader.
     """
-    import threading
     import time
 
     if num_threads < 1:
@@ -908,6 +960,9 @@ def _prefetch_all_checkpoints(
 
     my_files = sorted_files[local_rank::local_world_size]
     total_for_rank = len(my_files)
+    cancel_event = threading.Event()
+    succeeded_event = threading.Event()
+    errors: List[Tuple[str, Exception]] = []
 
     logger.info(
         "Rank %d: prefetching %d/%d checkpoint shards into page cache "
@@ -944,7 +999,11 @@ def _prefetch_all_checkpoints(
             pending: Dict[concurrent.futures.Future, str] = {}
 
             for path in itertools.islice(file_iter, num_threads):
-                pending[executor.submit(_prefetch_checkpoint_file, path)] = path
+                if cancel_event.is_set():
+                    break
+                pending[
+                    executor.submit(_prefetch_checkpoint_file, path, cancel_event)
+                ] = path
 
             while pending:
                 done, _ = concurrent.futures.wait(
@@ -953,35 +1012,46 @@ def _prefetch_all_checkpoints(
                 )
                 for future in done:
                     path = pending.pop(future)
-                    try:
-                        future.result()
-                    except Exception:
+                    exc = future.exception()
+                    if exc is not None:
+                        errors.append((path, exc))
                         logger.warning(
-                            "Failed to prefetch checkpoint file %r.",
+                            "Failed to prefetch checkpoint file %r: %s",
                             path,
-                            exc_info=True,
+                            exc,
                         )
-                    finally:
-                        record_complete()
+                    record_complete()
 
-                    next_path = next(file_iter, None)
+                    next_path = None if cancel_event.is_set() else next(file_iter, None)
                     if next_path is not None:
                         pending[
-                            executor.submit(_prefetch_checkpoint_file, next_path)
+                            executor.submit(
+                                _prefetch_checkpoint_file,
+                                next_path,
+                                cancel_event,
+                            )
                         ] = next_path
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
         _prefetch_all()
-        elapsed = time.perf_counter() - start
+        succeeded_event.set()
         logger.info(
             "Rank %d: prefetching checkpoint files into page cache "
             "finished in %.2fs",
             local_rank,
-            elapsed,
+            time.perf_counter() - start,
         )
 
-    threading.Thread(target=_run_prefetch, daemon=True).start()
+    thread = threading.Thread(target=_run_prefetch, daemon=True)
+    handle = CheckpointFilePrefetchHandle(
+        thread=thread,
+        cancel_event=cancel_event,
+        succeeded_event=succeeded_event,
+        errors=errors,
+    )
+    thread.start()
+    return handle
 
 
 def _drop_file_cache_after_load(path: str) -> None:
@@ -1038,6 +1108,7 @@ def safetensors_weights_iterator(
         if drop_cache_after_load:
             _drop_file_cache_after_load(st_file)
 
+
 def prefetch_weight_files(hf_weights_files: List[str]) -> None:
     """Prefetch and mmap weight files in parallel for the current distributed rank."""
     world_size = 1
@@ -1052,6 +1123,7 @@ def prefetch_weight_files(hf_weights_files: List[str]) -> None:
     local_files = hf_weights_files[rank::world_size]
     mmap_files_concurrently(local_files)
 
+
 def mmap_files_concurrently(hf_weights_files: List[str]) -> None:
     if len(hf_weights_files) == 0:
         return
@@ -1060,7 +1132,11 @@ def mmap_files_concurrently(hf_weights_files: List[str]) -> None:
     logger.info(f"Mmaping {len(hf_weights_files)} files concurrently")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         list(executor.map(_mmap_single_file, hf_weights_files))
-    logger.info(f"Mmaped {len(hf_weights_files)} files, elapsed time: {time.time() - start_time:.2f}s")
+    logger.info(
+        f"Mmaped {len(hf_weights_files)} files, "
+        f"elapsed time: {time.time() - start_time:.2f}s"
+    )
+
 
 def _mmap_single_file(st_file: str) -> None:
     with open(st_file, "rb") as f:
@@ -1069,9 +1145,10 @@ def _mmap_single_file(st_file: str) -> None:
             fileno=f.fileno(),
             length=file_size,
             prot=mmap.PROT_READ,
-            flags=mmap.MAP_SHARED | mmap.MAP_POPULATE
+            flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
         )
         mm.close()
+
 
 def fastsafetensors_weights_iterator(
     hf_weights_files: List[str],
@@ -1585,6 +1662,21 @@ def set_runai_streamer_env(load_config: LoadConfig):
     aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL")
     if runai_streamer_s3_endpoint is None and aws_endpoint_url is not None:
         os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
+
+
+@torch.no_grad()
+def initialize_capture_safe_weights(
+    model: torch.nn.Module,
+    value: float = CAPTURE_SAFE_WEIGHT_SENTINEL,
+) -> None:
+    """Fill floating-point parameters with finite values for graph warmup.
+
+    Persistent buffers are intentionally left intact: unlike parameters, they
+    are not guaranteed to be replaced by ``model.load_weights()``.
+    """
+    for param in model.parameters():
+        if torch.is_floating_point(param):
+            param.fill_(value)
 
 
 def initialize_dummy_weights(
