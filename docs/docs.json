@@ -1465,8 +1465,10 @@
                   },
                   {
                     "group": "LTX",
+                    "tag": "NEW",
                     "pages": [
-                      "cookbook/diffusion/LTX/LTX2 & LTX2.3"
+                      "cookbook/diffusion/LTX/LTX2 & LTX2.3",
+                      "cookbook/diffusion/LTX/LTX2.5"
                     ]
                   },
                   {
