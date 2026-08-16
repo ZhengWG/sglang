@@ -386,20 +386,14 @@ class MultimodalDataItem:
             self._apply_model_vocab_offset()
             return
 
-        from sglang.srt.managers.mm_utils import hash_feature
+        from sglang.srt.multimodal.cache import resolve_multimodal_item_hash
 
-        if envs.SGLANG_MM_SKIP_COMPUTE_HASH.get():
-            import uuid
-
-            self.hash = uuid.uuid4().int
-        elif self.hash is None:
-            if self.feature is not None:
-                hashed_feature = self.feature
-            else:
-                hashed_feature = self.precomputed_embeddings
-            self.hash = hash_feature(hashed_feature)
-        assert self.hash is not None
-        self.pad_value = self.hash % (1 << 30)
+        self.hash = resolve_multimodal_item_hash(
+            existing_hash=self.hash,
+            feature=self.feature,
+            precomputed_embeddings=self.precomputed_embeddings,
+        )
+        self.pad_value = _compute_pad_value(self.hash)
         self._apply_model_vocab_offset()
 
     def _apply_model_vocab_offset(self) -> None:
