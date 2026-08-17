@@ -61,6 +61,7 @@ from sglang.srt.entrypoints.openai.utils import (
     should_include_usage,
     to_openai_style_logprobs,
 )
+from sglang.srt.entrypoints.request_headers import apply_header_overrides
 from sglang.srt.environ import envs
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
@@ -1052,6 +1053,11 @@ class OpenAIServingChat(OpenAIServingBase):
             or request.return_token_ids,
             mm_sampling_kwargs=(request.mm_sampling_kwargs if is_multimodal else None),
         )
+        if (
+            raw_request is not None
+            and envs.SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES.get()
+        ):
+            apply_header_overrides(adapted_request, raw_request.headers)
 
         return adapted_request, request
 
