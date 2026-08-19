@@ -28,6 +28,9 @@ ARG MSCCLPP_VERSION=sglang-v0.9.1
 ARG MOONCAKE_COMPILE_ARG="-DUSE_HTTP=ON -DUSE_MNNVL=ON -DUSE_CUDA=ON -DWITH_EP=ON"
 ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
 
+# override environment variable NCCL_VERSION from nvidia-ngc base image
+ENV NCCL_VERSION=${NCCL_VERSION}
+
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/ \
@@ -557,6 +560,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Install essential Python packages (use constraints to prevent conflicts)
 RUN --mount=type=cache,target=/root/.cache/pip \
     cat /sgl-workspace/constraints.txt  && \
+    sed -i '/^nvidia-nccl-cu13/d' /sgl-workspace/constraints.txt && \
     env |grep -i pip && \
     python3 -m pip config list && \
     python3 -m pip install -c /sgl-workspace/constraints.txt \
@@ -576,7 +580,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     matplotlib \
     tabulate \
     termplotlib \
-    "runai-model-streamer[s3,gcs,azure]>=0.15.7"
+    "runai-model-streamer[s3,gcs,azure]>=0.15.7" && \
+    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        python3 -m pip install --force-reinstall --no-deps \
+            "nvidia-nccl-cu13==${NCCL_VERSION}"; \
+    fi
 
 # Per-CUDA-major package installs. The `nixl` stub package is needed (it owns
 # the `nixl` import path) but unconditionally requires nixl-cu12, so we install
