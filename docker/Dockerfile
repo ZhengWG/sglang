@@ -52,11 +52,6 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt,sharing=locked \
         mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
         # touch an empty constraint.txt to avoid pip error about missing constraint file, since some pip install commands in later stages rely on this file existing
         touch /etc/pip/constraint.txt; \
-        if [ -d /usr/local/lib/python3.12/dist-packages ]; then \
-            pip3 list --exclude pip  --no-color | awk 'NR>2 { print $1 }' | xargs  pip3 uninstall -y ; \
-            pip3 uninstall -y pip && \
-            rm -rf /usr/local/lib/python3.12/dist-packages ; \
-        fi \
     fi && \
     apt update && apt install -y --no-install-recommends wget software-properties-common \
     && apt install -y --no-install-recommends python3.12-full python3.12-dev \
@@ -857,8 +852,6 @@ RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt,sharing=locked \
         mv /etc/pip/constraint.txt  /etc/pip/ngc_constraint.txt; \
         # touch an empty constraint.txt to avoid pip error about missing constraint file, since some pip install commands in later stages rely on this file existing
         touch /etc/pip/constraint.txt; \
-        # rm -rf /usr/local/lib/python3.12/dist-packages to make it clean
-        rm -rf /usr/local/lib/python3.12/dist-packages; \
     fi && \
     apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
     # Python runtime
