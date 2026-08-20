@@ -6,6 +6,10 @@
 # 如果cherry-pick社区commits发生冲突无法解决, 请联系 @霜林
 
 ARG RUNTIME_BASE_IMAGE
+# Global-scope ARG (declared before the first FROM): stages inherit the default
+# via a bare `ARG SGL_NCCL_VERSION` re-declaration. This is the same pattern the
+# community Dockerfile uses for ARG CUDA_VERSION.
+ARG SGL_NCCL_VERSION=2.30.7
 FROM ${RUNTIME_BASE_IMAGE} AS base
 
 ARG TARGETARCH
@@ -16,7 +20,6 @@ ARG SGL_VERSION
 ARG SGL_DEEP_GEMM_VERSION=0.1.5.post2
 ARG USE_LATEST_SGLANG=0
 ARG GDRCOPY_VERSION=2.5.1
-ARG SGL_NCCL_VERSION=2.30.7
 ARG PIP_DEFAULT_INDEX
 ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
@@ -27,9 +30,6 @@ ARG MSCCLPP_VERSION=sglang-v0.9.1
 #if need other arg please add in MOONCAKE_COMPILE_ARG
 ARG MOONCAKE_COMPILE_ARG="-DUSE_HTTP=ON -DUSE_MNNVL=ON -DUSE_CUDA=ON -DWITH_EP=ON"
 ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
-
-# override environment variable NCCL_VERSION from nvidia-ngc base image
-ENV NCCL_VERSION=${NCCL_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -449,6 +449,7 @@ ARG GITHUB_ARTIFACTORY
 ARG MOONCAKE_VERSION
 ARG MOONCAKE_COMPILE_ARG
 ARG MSCCLPP_VERSION
+ARG SGL_NCCL_VERSION
 
 WORKDIR /sgl-workspace
 
@@ -587,7 +588,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "runai-model-streamer[s3,gcs,azure]>=0.15.7" && \
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         python3 -m pip install --force-reinstall --no-deps \
-            "nvidia-nccl-cu13==${NCCL_VERSION}"; \
+            "nvidia-nccl-cu13==${SGL_NCCL_VERSION}"; \
     fi
 
 # Per-CUDA-major package installs. The `nixl` stub package is needed (it owns
