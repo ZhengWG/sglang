@@ -962,6 +962,7 @@ class ChatCompletionRequest(BaseModel):
     use_audio_in_video: bool = False
 
     images_config: Optional[Dict] = None
+    video_config: Optional[Dict] = None
 
     mm_sampling_kwargs: Optional[Dict] = None
 
