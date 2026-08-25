@@ -87,11 +87,38 @@ data = {
         }
     ],
     "max_tokens": 512,
+    "mm_sampling_kwargs": {
+        "base_size": 1024,
+        "image_size": 640,
+        "crop_mode": True,
+    },
 }
 
 response = requests.post(url, json=data)
 print(response.text)
 ```
+
+### 4.3 Image preprocessing controls
+
+Pass request-scoped image settings through `mm_sampling_kwargs`. DeepSeek-OCR
+uses the official Gundam defaults when this field is omitted: a 1024-pixel
+global view, 640-pixel local crops, dynamic cropping enabled, and at most nine
+local crops.
+
+The presets from the model card map to these values:
+
+| Preset | `base_size` | `image_size` | `crop_mode` |
+| --- | ---: | ---: | --- |
+| Tiny | 512 | 512 | `False` |
+| Small | 640 | 640 | `False` |
+| Base | 1024 | 1024 | `False` |
+| Large | 1280 | 1280 | `False` |
+| Gundam (default) | 1024 | 640 | `True` |
+
+`cropping` remains available as an alias for `crop_mode`. If you pass both,
+their values must match. Image sizes must be positive multiples of 64. For a
+request containing more than two images, SGLang disables local crops to keep
+the request's preprocessing memory bounded.
 
 ## 5. Benchmark
 
