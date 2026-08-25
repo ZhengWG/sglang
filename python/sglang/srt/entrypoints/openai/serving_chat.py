@@ -91,6 +91,7 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.parser.conversation import generate_chat_conv
 from sglang.srt.parser.jinja_template_utils import process_content_for_template_format
 from sglang.srt.parser.reasoning_parser import ReasoningParser
+from sglang.srt.utils.weight_versions import build_endpoint_weight_version_metadata
 
 if TYPE_CHECKING:
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
@@ -2121,6 +2122,9 @@ class OpenAIServingChat(OpenAIServingBase):
             metadata["total_pixels"] = ret[0]["meta_info"]["total_pixels"]
         if ret[0]["meta_info"].get("total_vision_tokens", None) is not None:
             metadata["total_vision_tokens"] = ret[0]["meta_info"]["total_vision_tokens"]
+        metadata.update(
+            build_endpoint_weight_version_metadata(ret[0]["meta_info"])
+        )
 
         return ChatCompletionResponse(
             id=ret[0]["meta_info"]["id"],
