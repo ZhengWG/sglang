@@ -213,11 +213,6 @@ def set_global_state(global_state: _GlobalState):
     global _global_state
     _global_state = global_state
 
-def _custom_dict_factory(field_list):
-    # 排除特定字段
-    exclude_fields = {"model_config"}
-    return {k: v for k, v in field_list if k not in exclude_fields}
-
 
 def get_global_state() -> _GlobalState:
     return _global_state
@@ -241,6 +236,8 @@ async def init_multi_tokenizer() -> ServerArgs:
     assert (
         server_args.api_key is None
     ), "API key is not supported in multi-tokenizer mode"
+
+    publish(server_args, role="tokenizer")
 
     # Create a new ipc name for the current process
     port_args.tokenizer_ipc_name = (
@@ -498,6 +495,7 @@ from sglang.srt.runtime_context import (
     get_model,
     get_parallel,
     get_serving,
+    publish,
 )
 
 elastic_ep_router.route_class = ORJSONRoute
@@ -820,20 +818,18 @@ async def get_simple_server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
-    # simple server info result
-    _simple_info = {
-        "sglang_version": __version__
-    }
+    server_args = _global_state.tokenizer_manager.server_args
 
-    # This field is not serializable.
-    if hasattr(_global_state.tokenizer_manager.server_args, "model_config"):
-        _simple_info["context_length"] = _global_state.tokenizer_manager.server_args.model_config.context_len
+    # simple server info result
+    _simple_info = {"sglang_version": __version__}
+
+    # model_config is a runtime memo outside resolved_dict; retain only the
+    # historical compact endpoint field derived from it.
+    if hasattr(server_args, "model_config"):
+        _simple_info["context_length"] = server_args.model_config.context_len
 
     server_info = {
-        **dataclasses.asdict(
-            _global_state.tokenizer_manager.server_args,
-            dict_factory=_custom_dict_factory
-        ),
+        **server_args.resolved_dict(),
         **_global_state.scheduler_info,
     }
 
@@ -842,7 +838,12 @@ async def get_simple_server_info():
 
     if internal_states and len(internal_states) > 0:
         _simple_info["cuda_graph_bs"] = internal_states[0].get("cuda_graph_bs", None)
-        _simple_info["last_gen_throughput"] = internal_states[0].get("last_gen_throughput", None)
+        _simple_info["last_gen_throughput"] = internal_states[0].get(
+            "last_gen_throughput", None
+        )
+        _simple_info["avg_spec_accept_length"] = internal_states[0].get(
+            "avg_spec_accept_length", None
+        )
         _simple_info["memory_usage"] = internal_states[0].get("memory_usage", {})
 
     return _simple_info
@@ -875,15 +876,9 @@ async def server_info():
 
     server_args = _global_state.tokenizer_manager.server_args
 
-    # server_args.model_config is not serializable but should be excluded by asdict.
     return msgspec_to_builtins(
         {
-            **_global_state.tokenizer_manager.resolved_config_dict(
-                dataclasses.asdict(
-                    server_args,
-                    dict_factory=_custom_dict_factory,
-                )
-            ),
+            **server_args.resolved_dict(),
             **_global_state.scheduler_info,
             "startup_time": _global_state.tokenizer_manager.startup_time,
             "internal_states": internal_states,
