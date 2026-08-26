@@ -210,6 +210,16 @@ class BailingMoeForCausalLMNextN(nn.Module):
         },
     )
 
+    @classmethod
+    def shared_experts_fusion_disable_reason(cls, hf_config, quant_config):
+        if not _is_bailing_moe_v3_config(hf_config):
+            return None
+        return BailingMoeV3ForCausalLM.shared_experts_fusion_disable_reason(
+            hf_config,
+            quant_config,
+            expected_architecture="BailingMoeForCausalLMNextN",
+        )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -223,14 +233,7 @@ class BailingMoeForCausalLMNextN(nn.Module):
         self.num_fused_shared_experts = 0
         is_bailing_moe_v3 = _is_bailing_moe_v3_config(config)
         if is_bailing_moe_v3:
-            # NOTE: architectures[0] is rewritten to "BailingMoeForCausalLMNextN"
-            # for the draft model in `configs/model_config.py` (search for that
-            # string). The architecture name passed here MUST match that rewrite,
-            # otherwise V3's determine_num_fused_shared_experts() will disable
-            # fusion via the `config.architectures[0] != architecture` check.
-            BailingMoeV3ForCausalLM.determine_num_fused_shared_experts(
-                self, "BailingMoeForCausalLMNextN"
-            )
+            BailingMoeV3ForCausalLM.determine_num_fused_shared_experts(self)
         elif hasattr(self, "determine_num_fused_shared_experts"):
             # Asystem has determine_num_fused_shared_experts but theta does not.
             self.determine_num_fused_shared_experts("BailingMoeForCausalLMNextN")
