@@ -38,6 +38,7 @@ from sglang.srt.runtime_context import (
     get_disagg,
     get_memory,
     get_observability,
+    get_serving,
     mamba_extra_buffer_lazy_enabled,
     mamba_track_grid,
     max_speculative_num_draft_tokens,
@@ -72,7 +73,6 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
     from sglang.srt.observability.metrics_collector import SchedulerMetricsCollector
     from sglang.srt.sampling.sampling_observer import HostAuxiliaryOutput
-    from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,6 @@ class SchedulerBatchResultProcessor:
     disaggregation_mode: DisaggregationMode
     enable_overlap: bool
     enable_overlap_mlx: bool
-    server_args: ServerArgs
     model_config: ModelConfig
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator
     tree_cache: BasePrefixCache
@@ -102,27 +101,28 @@ class SchedulerBatchResultProcessor:
     def _check_repetition(self, req: Req, new_token_ids=None) -> bool:
         """Check if a request has entered a repetition loop."""
         sp = req.sampling_params
+        serving = get_serving()
         window = (
             sp.repetition_detection_window
             if sp.repetition_detection_window is not None
-            else self.server_args.repetition_window
+            else serving.repetition_window
         )
         threshold = (
             sp.repetition_detection_threshold
             if sp.repetition_detection_threshold is not None
-            else self.server_args.repetition_threshold
+            else serving.repetition_threshold
         )
         min_tokens = (
             sp.repetition_detection_min_tokens
             if sp.repetition_detection_min_tokens is not None
-            else self.server_args.repetition_min_tokens
+            else serving.repetition_min_tokens
         )
 
         per_request_enabled = (
             sp.repetition_detection_window is not None
             and sp.repetition_detection_window > 0
         )
-        if not self.server_args.enable_repetition_detection and not per_request_enabled:
+        if not serving.enable_repetition_detection and not per_request_enabled:
             return False
         if window < 1 or threshold < 2:
             return False
@@ -349,7 +349,6 @@ class SchedulerBatchResultProcessor:
             hidden_state_offset = 0
             prefill_hidden_capture_mode = self._get_prefill_hidden_capture_mode(
                 batch,
-                self.server_args,
             )
 
             # Check finish conditions
@@ -698,10 +697,7 @@ class SchedulerBatchResultProcessor:
             )
 
     @staticmethod
-    def _get_prefill_hidden_capture_mode(
-        batch: ScheduleBatch,
-        server_args: ServerArgs,
-    ) -> CaptureHiddenMode:
+    def _get_prefill_hidden_capture_mode(batch: ScheduleBatch) -> CaptureHiddenMode:
         return get_required_capture_hidden_mode(
             max(
                 batch.return_hidden_states_mode,
