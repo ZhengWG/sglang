@@ -35,6 +35,7 @@ from sglang.srt.parser.code_completion_parser import (
     generate_completion_prompt_from_request,
 )
 from sglang.srt.utils import ImageData
+from sglang.srt.utils.weight_versions import build_endpoint_weight_version_metadata
 from sglang.utils import convert_json_schema_to_str
 
 if TYPE_CHECKING:
@@ -694,6 +695,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
         usage = UsageProcessor.calculate_response_usage(
             ret, n_choices=request.n, enable_cache_report=cache_report
         )
+        metadata = {
+            "weight_version": ret[0]["meta_info"].get("weight_version", ""),
+            "e2e_latency": ret[0]["meta_info"].get("e2e_latency", 0.0) * 1000,
+            "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
+            "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
+        }
+        metadata.update(build_endpoint_weight_version_metadata(ret[0]["meta_info"]))
 
         return CompletionResponse(
             id=ret[0]["meta_info"]["id"],
@@ -701,12 +709,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
             created=created,
             choices=choices,
             usage=usage,
-            metadata={
-                "weight_version": ret[0]["meta_info"].get("weight_version", ""),
-                "e2e_latency": ret[0]["meta_info"].get("e2e_latency", 0.0) * 1000,
-                "ttft_latency": ret[0]["meta_info"].get("ttft_latency", 0.0) * 1000,
-                "queue_latency": ret[0]["meta_info"].get("queue_time", 0.0) * 1000,
-            },
+            metadata=metadata,
             sglext=response_sglext,
         )
 

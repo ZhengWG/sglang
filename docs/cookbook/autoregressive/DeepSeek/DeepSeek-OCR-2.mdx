@@ -74,6 +74,11 @@ data = {
         }
     ],
     "max_tokens": 512,
+    "mm_sampling_kwargs": {
+        "base_size": 1024,
+        "image_size": 768,
+        "crop_mode": True,
+    },
 }
 
 response = requests.post(url, json=data)
@@ -100,6 +105,31 @@ The following prompts are recommended by the [official model card](https://huggi
 <image>
 Free OCR.
 ```
+
+### 4.3 Image preprocessing controls
+
+Pass request-scoped image settings through `mm_sampling_kwargs`. DeepSeek-OCR-2
+uses the model card's defaults when this field is omitted: a 1024-pixel global
+view, 768-pixel local crops, dynamic cropping enabled, and at most six local
+crops. These defaults differ from DeepSeek-OCR, which uses 640-pixel local
+crops and permits up to nine of them.
+
+For a single-view request, disable cropping and select one of the encoder's
+native visual sizes:
+
+```python Example
+data["mm_sampling_kwargs"] = {
+    "base_size": 768,
+    "image_size": 768,
+    "crop_mode": False,
+}
+```
+
+You can use 1024 for both sizes when you need the larger single view.
+`cropping` remains available as an alias for `crop_mode`. If you pass both,
+their values must match. Image sizes must be positive multiples of 64. For a
+request containing more than two images, SGLang disables local crops to keep
+the request's preprocessing memory bounded.
 
 ## 5. Benchmark
 
