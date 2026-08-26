@@ -489,8 +489,8 @@ class SchedulerBatchResultProcessor:
                     req.time_stats.set_last_chunked_prefill_finish_time()
 
         if (
-            self.server_args.enable_metrics
-            and self.server_args.enable_trace
+            get_observability().enable_metrics
+            and get_observability().enable_trace
             and batch
             and batch.reqs
         ):
@@ -1052,8 +1052,8 @@ class SchedulerBatchResultProcessor:
             )
 
         if (
-            self.server_args.enable_metrics
-            and self.server_args.enable_trace
+            get_observability().enable_metrics
+            and get_observability().enable_trace
             and batch
             and batch.reqs
         ):
