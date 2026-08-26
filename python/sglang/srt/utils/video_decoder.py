@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 # Backend selection. SGLANG_VIDEO_DECODE_BACKEND overrides auto-detection:
 #   unset/invalid -> torchcodec if importable, else decord
 #   "torchcodec"  -> force torchcodec (falls back to decord if unavailable)
-#   "decord"      -> force decord
+#   "decord"      -> force the original decord path
 _BACKEND = envs.SGLANG_VIDEO_DECODE_BACKEND.get()
+if isinstance(_BACKEND, str):
+    _BACKEND = _BACKEND.strip().lower() or None
 if _BACKEND not in (None, "torchcodec", "decord"):
     logger.warning(
         "Ignoring invalid SGLANG_VIDEO_DECODE_BACKEND=%r (expected 'torchcodec' or 'decord').",
@@ -35,7 +37,7 @@ if _BACKEND != "decord":
             )
         _BACKEND = "decord"
 
-logger.info(f"Video decode backend: {_BACKEND}.")
+logger.info("Video decode backend: %s.", _BACKEND)
 
 
 _cuda_backend_enabled: bool | None = None
@@ -70,6 +72,31 @@ class _FrameBatch:
 
     def asnumpy(self) -> np.ndarray:
         return self._data
+
+
+def _as_numpy(data) -> np.ndarray:
+    """Convert a torchcodec frame/batch tensor to CPU numpy.
+
+    CUDA tensors cannot call ``.numpy()`` directly.
+    """
+    if isinstance(data, np.ndarray):
+        return data
+    if hasattr(data, "detach"):
+        data = data.detach()
+    if getattr(data, "is_cuda", False):
+        data = data.cpu()
+    return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
+
+
+def _as_int_indices(indices) -> list[int]:
+    return [int(i) for i in indices]
+
+
+def _maybe_pin_memory(tensor):
+    """Pin CPU tensors; leave CUDA tensors on device."""
+    if getattr(tensor, "is_cuda", False):
+        return tensor
+    return tensor.pin_memory()
 
 
 class VideoDecoderWrapper:
@@ -128,7 +155,7 @@ class VideoDecoderWrapper:
     def __getitem__(self, idx):
         """Return single frame as numpy NHWC uint8."""
         if _BACKEND == "torchcodec":
-            return self._decoder[idx].numpy()
+            return _as_numpy(self._decoder[idx])
         else:
             frame = self._decoder[idx]
             return frame.asnumpy() if hasattr(frame, "asnumpy") else np.array(frame)
@@ -136,17 +163,19 @@ class VideoDecoderWrapper:
     @property
     def avg_fps(self) -> float:
         if _BACKEND == "torchcodec":
-            return self._decoder.metadata.average_fps
+            fps = self._decoder.metadata.average_fps
+            return float(fps) if fps else 0.0
         else:
-            return self._decoder.get_avg_fps()
+            return float(self._decoder.get_avg_fps())
 
     def get_frames_at(self, indices: list) -> np.ndarray:
         """Return frames at given indices as numpy array with shape (N, H, W, C)."""
+        idx = _as_int_indices(indices)
         if _BACKEND == "torchcodec":
-            batch = self._decoder.get_frames_at(indices)
-            return batch.data.numpy()
+            batch = self._decoder.get_frames_at(idx)
+            return _as_numpy(batch.data)
         else:
-            return self._decoder.get_batch(indices).asnumpy()
+            return self._decoder.get_batch(idx).asnumpy()
 
     # ---- decord-compatible shims ----
     # Let this wrapper stand in for a raw decord `VideoReader` so processors
@@ -155,29 +184,29 @@ class VideoDecoderWrapper:
         return self.avg_fps
 
     def get_batch(self, indices) -> "_FrameBatch":
-        return _FrameBatch(self.get_frames_at(list(indices)))
+        return _FrameBatch(self.get_frames_at(indices))
 
     def get_frames_as_tensor(self, indices: list):
-        """Return frames at given indices as a torch tensor (NHWC, uint8, pinned memory)."""
+        """Return frames at given indices as a torch tensor (NHWC, uint8).
+
+        CPU tensors are pinned; CUDA tensors are left on device.
+        """
         import torch
 
-        if (
-            _BACKEND == "torchcodec"
-            and self._num_decode_threads != 1
-            and len(indices) > 1
-        ):
+        idx = _as_int_indices(indices)
+        if _BACKEND == "torchcodec" and self._num_decode_threads != 1 and len(idx) > 1:
             num_threads = self._num_decode_threads
             if num_threads <= 0:
                 num_threads = min(os.cpu_count() or 8, 16)
-            num_threads = min(num_threads, len(indices))
+            num_threads = min(num_threads, len(idx))
             if num_threads > 1:
-                return self._parallel_decode(indices, num_threads)
+                return self._parallel_decode(idx, num_threads)
 
         if _BACKEND == "torchcodec":
-            batch = self._decoder.get_frames_at(indices)
-            return batch.data.pin_memory()
+            batch = self._decoder.get_frames_at(idx)
+            return _maybe_pin_memory(batch.data)
         else:
-            arr = self._decoder.get_batch(indices).asnumpy()
+            arr = self._decoder.get_batch(idx).asnumpy()
             return torch.from_numpy(arr).pin_memory()
 
     def _parallel_decode(self, indices, num_threads):
@@ -204,7 +233,7 @@ class VideoDecoderWrapper:
                 idx = future_to_idx[future]
                 results[idx] = future.result()
 
-        return torch.cat(results, dim=0).pin_memory()
+        return _maybe_pin_memory(torch.cat(results, dim=0))
 
     @property
     def source_bytes(self) -> bytes | None:

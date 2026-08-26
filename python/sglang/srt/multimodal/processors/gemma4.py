@@ -17,7 +17,6 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
-
 from decord import VideoReader
 
 from sglang.srt.managers.multimodal_processor import (
@@ -27,6 +26,7 @@ from sglang.srt.managers.schedule_batch import Modality, MultimodalProcessorOutp
 from sglang.srt.models.gemma4_audio import _SSCP_CONV_STRIDE_SIZES
 from sglang.srt.models.gemma4_mm import Gemma4ForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
+from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
 
 class Gemma4SGLangProcessor(SGLangBaseProcessor):
@@ -79,7 +79,9 @@ class Gemma4SGLangProcessor(SGLangBaseProcessor):
         first_stride = _SSCP_CONV_STRIDE_SIZES[0][0]
         return hop * first_stride
 
-    def _decord_video_decoder_to_tensor(self, vr: VideoReader) -> torch.Tensor:
+    def _video_decoder_to_tensor(
+        self, vdw: VideoReader | VideoDecoderWrapper
+    ) -> torch.Tensor:
         """Convert a VideoDecoderWrapper to a (sampled_frames, C, H, W) uint8 tensor.
 
         SGLang's load_video returns VideoDecoderWrapper which the HF
@@ -88,7 +90,7 @@ class Gemma4SGLangProcessor(SGLangBaseProcessor):
         avoid materialising the entire video in memory, then delegate the
         rest (resize, patchify, position IDs) to the HF video processor.
         """
-        total = len(vr)
+        total = len(vdw)
         num_frames = getattr(
             getattr(self._processor, "video_processor", None),
             "num_frames",
@@ -98,7 +100,7 @@ class Gemma4SGLangProcessor(SGLangBaseProcessor):
             indices = list(range(total))
         else:
             indices = torch.arange(0, total, total / num_frames).int().tolist()
-        frames_np = vr.get_batch(indices).asnumpy()  # (N, H, W, C)
+        frames_np = vdw.get_batch(indices).asnumpy()  # (N, H, W, C)
         return torch.from_numpy(frames_np).permute(0, 3, 1, 2).contiguous()
 
     def process_mm_data(
@@ -117,8 +119,8 @@ class Gemma4SGLangProcessor(SGLangBaseProcessor):
         if videos:
             videos = [
                 (
-                    self._decord_video_decoder_to_tensor(v)
-                    if isinstance(v, VideoReader)
+                    self._video_decoder_to_tensor(v)
+                    if isinstance(v, (VideoReader, VideoDecoderWrapper))
                     else v
                 )
                 for v in videos

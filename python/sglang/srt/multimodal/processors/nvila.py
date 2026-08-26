@@ -1,5 +1,6 @@
 from typing import Any
 
+import numpy as np
 import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.processing_utils import ProcessorMixin
@@ -63,7 +64,9 @@ class NVILAMultimodalProcessor(BaseMultimodalProcessor):
         )
 
         for i, video in enumerate(base_output.videos):  # type: ignore
-            base_output.videos[i] = [x.asnumpy() for x in video]  # type: ignore
+            base_output.videos[i] = [
+                x.asnumpy() if hasattr(x, "asnumpy") else np.asarray(x) for x in video
+            ]  # type: ignore
 
         mm_items, input_ids, _ = self.process_and_combine_mm_data(
             base_output,

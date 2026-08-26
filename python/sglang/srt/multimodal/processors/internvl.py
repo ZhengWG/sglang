@@ -22,6 +22,7 @@ from sglang.srt.multimodal.processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.utils import get_device
+from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +509,7 @@ class InternVLProcessor(BaseMultimodalProcessor):
             for video in base_output.videos:
                 vr = (
                     video
-                    if isinstance(video, VideoReader)
+                    if isinstance(video, (VideoReader, VideoDecoderWrapper))
                     else self._open_video_reader(str(video))
                 )
                 max_frame = len(vr) - 1

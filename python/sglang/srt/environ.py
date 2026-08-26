@@ -210,9 +210,9 @@ class Envs:
     SGLANG_ASYNC_MODEL_MOUNT = EnvBool(False)
 
     # Multimodal
-    # Override video decode backend selection. Unset = auto-detect (torchcodec
-    # if importable, else decord). Set to "torchcodec" or "decord" to force one;
-    # forcing "torchcodec" still falls back to decord if it is unavailable.
+    # Override video decode backend. Unset = torchcodec if importable, else
+    # decord. Set to "decord" to force the original decoder; "torchcodec"
+    # still falls back to decord if torchcodec is unavailable.
     SGLANG_VIDEO_DECODE_BACKEND = EnvStr(None)
 
     # Logging Options

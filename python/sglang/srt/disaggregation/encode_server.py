@@ -585,7 +585,7 @@ class MMEncoder:
                     img = img.convert("RGB")
                 return img
             elif modality == Modality.VIDEO:
-                return load_video(data, frame_count_limit)
+                return load_video(data)
             elif modality == Modality.AUDIO:
                 return load_audio(data, self.model_audio_sr)
 

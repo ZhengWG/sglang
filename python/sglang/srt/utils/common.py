@@ -1154,9 +1154,9 @@ def _normalize_video_input(
     elif isinstance(video_file, str):
         if video_file.startswith(("http://", "https://")):
             timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-            response = requests.get(video_file, stream=True, timeout=timeout)
-            response.raise_for_status()
-            return response.content
+            with get_mm_http_session().get(video_file, timeout=timeout) as response:
+                response.raise_for_status()
+                return response.content
         elif video_file.startswith("data:"):
             _, encoded = video_file.split(",", 1)
             return pybase64.b64decode(encoded, validate=True)
@@ -1199,15 +1199,20 @@ def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
                 ]
             )
 
-    # Default backend: torchcodec (decided at import time in video_decoder).
+    # Default: torchcodec via VideoDecoderWrapper (GPU when use_gpu and CUDA backend works).
     if _BACKEND == "torchcodec":
         source = _normalize_video_input(video_file)
         if source is None:
             raise ValueError(f"Unsupported video input type: {type(video_file)}")
         device = "cuda" if use_gpu else "cpu"
-        return VideoDecoderWrapper(source, device=device)
+        try:
+            return VideoDecoderWrapper(source, device=device)
+        except (ImportError, MemoryError):
+            raise
+        except Exception as e:
+            raise ValueError(f"Could not decode video: {e}") from e
 
-    # ===== Fallback: original decord path =====
+    # ===== Fallback: original decord path (unchanged) =====
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
 
@@ -1287,9 +1292,6 @@ def sample_video_frames(
 
 
 def encode_video(video_path, frame_count_limit=None):
-    # Lazy import because decord is not available on some arm platforms.
-    from decord import VideoReader, cpu
-
     if not os.path.exists(video_path):
         logger.error(f"Video {video_path} does not exist")
         return []
@@ -1301,6 +1303,24 @@ def encode_video(video_path, frame_count_limit=None):
         gap = len(l) / n
         idxs = [int(i * gap + gap / 2) for i in range(n)]
         return [l[i] for i in idxs]
+
+    if _BACKEND == "torchcodec":
+        decoder = VideoDecoderWrapper(video_path)
+        avg_fps = decoder.avg_fps
+        total_frames = len(decoder)
+        sample_fps = round(avg_fps / 1) if avg_fps > 0 else 1
+        if sample_fps == 0:
+            sample_fps = 1
+        frame_indices = [i for i in range(0, total_frames, sample_fps)]
+        if frame_count_limit is not None and len(frame_indices) > frame_count_limit:
+            frame_indices = uniform_sample(frame_indices, frame_count_limit)
+        if not frame_indices:
+            return []
+        frames_data = decoder.get_frames_at(frame_indices)
+        return [Image.fromarray(v.astype("uint8")) for v in frames_data]
+
+    # Fallback: original decord path (unchanged)
+    from decord import VideoReader, cpu
 
     vr = VideoReader(video_path, ctx=cpu(0))
     sample_fps = round(vr.get_avg_fps() / 1)  # FPS

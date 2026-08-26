@@ -2,7 +2,6 @@ import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
-import functools
 import multiprocessing as mp
 import os
 import re
@@ -568,7 +567,7 @@ class BaseMultimodalProcessor(ABC):
                             img = img.convert("RGB")
                 return img
             elif modality == Modality.VIDEO:
-                return load_video(data, frame_count_limit)
+                return load_video(data)
             elif modality == Modality.AUDIO:
                 return load_audio(data, audio_sample_rate)
 

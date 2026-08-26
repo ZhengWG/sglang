@@ -291,7 +291,7 @@ async def preprocess_video(
     default_fps_min_frames: int,
     default_fps_max_frames: int,
     mm_sampling_kwargs: dict = {},
-    # vr: VideoReader, image_factor: int = IMAGE_FACTOR
+    # vr: VideoDecoderWrapper, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     try:
         # preprocessed video
