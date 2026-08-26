@@ -24,8 +24,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
+from sglang.srt.environ import envs
 from sglang.srt.utils import get_int_env_var
 
 if TYPE_CHECKING:
@@ -38,8 +39,6 @@ opentelemetry_imported = False
 opentelemetry_initialized = False
 _trace_context_propagator = None
 tracer: Optional[trace.Tracer] = None
-
-global_trace_level = get_int_env_var("SGLANG_TRACE_LEVEL", 1)
 
 NORMAL_TRACE_LEVEL = 1
 ENHANCED_TRACE_LEVEL = 2
@@ -100,9 +99,19 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Optional[Dict]:
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
+def get_global_trace_level() -> int:
+    from sglang.srt.runtime_context import get_resources
+
+    resources = get_resources()
+    if resources.trace_level is None:
+        resources.trace_level = get_int_env_var("SGLANG_TRACE_LEVEL", 1)
+    return resources.trace_level
+
+
 def set_global_trace_level(level: int):
-    global global_trace_level
-    global_trace_level = level
+    from sglang.srt.runtime_context import get_resources
+
+    get_resources().trace_level = level
 
 
 @dataclass
@@ -145,10 +154,29 @@ class TraceThreadContext:
 
 
 class TraceCustomIdGenerator(id_generator.IdGenerator):
+    """Custom ID generator with support for pre-setting the next span ID.
+
+    Why custom IDs are needed:
+      The default IdGenerator may produce duplicate trace IDs across
+      multiple TP scheduler processes.
+
+    Preset mechanism (used by async tracing):
+      When SGLANG_TRACE_ASYNC=1, span creation is deferred to an exporter
+      process while the caller process needs to know span IDs in advance
+      for cross-process span linking.  The caller pre-generates a span ID
+      and sends it to the exporter.  Before calling tracer.start_span(),
+      the exporter calls preset_next_span_id(id) — the next
+      generate_span_id() call consumes it, then falls back to random
+      generation.  This avoids modifying the standard OTel start_span()
+      API while giving the caller full control over span IDs.
+
+      Thread-safety: _preset_local is a threading.local(), so concurrent
+      callers in different threads cannot interfere.  The exporter process
+      is single-threaded, so no additional locking is needed.
     """
-    The default IdGenerator may produce duplicate trace IDs across multiple TP scheduler processes,
-    hence a custom IdGenerator is implemented.
-    """
+
+    # Thread-local storage for the next span ID to use preset.
+    _preset_local = threading.local()
 
     def __init__(self):
         super().__init__()
@@ -159,12 +187,30 @@ class TraceCustomIdGenerator(id_generator.IdGenerator):
         return self.local_random.getrandbits(64)
 
     def generate_span_id(self) -> int:
+        # If a preset span ID was injected, consume it (one-shot).
+        preset = getattr(self._preset_local, "span_id", None)
+        if preset is not None:
+            self._preset_local.span_id = None
+            return preset
         return self.local_random.getrandbits(64)
+
+    @classmethod
+    def preset_next_span_id(cls, span_id: int):
+        """Inject a pre-generated span ID for the next start_span() call.
+
+        The ID is consumed exactly once by generate_span_id() and then
+        cleared.  Call this immediately before tracer.start_span().
+        """
+        cls._preset_local.span_id = span_id
 
 
 # global variables
 remote_trace_contexts: Dict[str, "TracePropagateContext"] = {}
 threads_info: Dict[int, TraceThreadInfo] = {}
+
+# Optional callback invoked when a new thread registers its trace info.
+# Used by trace_async to forward thread info to the exporter process.
+_on_thread_info_set = None
 
 get_cur_time_ns = lambda: int(time.time() * 1e9)
 if hasattr(time, "time_ns"):
@@ -221,12 +267,8 @@ def process_tracing_init(
             resource=resource, id_generator=TraceCustomIdGenerator()
         )
 
-        schedule_delay_millis = get_int_env_var(
-            "SGLANG_OTLP_EXPORTER_SCHEDULE_DELAY_MILLIS", 500
-        )
-        max_export_batch_size = get_int_env_var(
-            "SGLANG_OTLP_EXPORTER_MAX_EXPORT_BATCH_SIZE", 64
-        )
+        schedule_delay_millis = envs.SGLANG_OTLP_EXPORTER_SCHEDULE_DELAY_MILLIS.get()
+        max_export_batch_size = envs.SGLANG_OTLP_EXPORTER_MAX_EXPORT_BATCH_SIZE.get()
 
         processor = BatchSpanProcessor(
             span_exporter=get_otlp_span_exporter(otlp_endpoint),
@@ -243,6 +285,12 @@ def process_tracing_init(
 
     opentelemetry_initialized = True
     tracer = trace.get_tracer("sglang server")
+
+    # Auto-start async trace exporter when SGLANG_TRACE_ASYNC=1
+    if envs.SGLANG_TRACE_ASYNC.get():
+        from sglang.srt.observability.trace_async import start_trace_exporter
+
+        start_trace_exporter(otlp_endpoint, server_name, trace_modules=trace_modules)
 
 
 def get_global_tracing_enabled():
@@ -287,6 +335,9 @@ def trace_set_thread_info(
         dp_rank=dp_rank,
         pp_rank=pp_rank,
     )
+
+    if _on_thread_info_set is not None:
+        _on_thread_info_set(threads_info[pid])
 
 
 @dataclass
@@ -337,9 +388,12 @@ class TraceReqContext:
         role="unified",
         module_name="",
         external_trace_header: Optional[Dict[str, str]] = None,
+        trace_level: Optional[int] = None,
     ):
         self.rid: str = str(rid)
-        self.trace_level = global_trace_level
+        self.trace_level = (
+            trace_level if trace_level is not None else get_global_trace_level()
+        )
         self.tracing_enable: bool = opentelemetry_initialized and self.trace_level > 0
 
         # Filter by --trace-modules only for explicitly named modules; contexts
@@ -397,7 +451,7 @@ class TraceReqContext:
             thread_name += f" [DP {thread_info.dp_rank}] "
         thread_name += f"(host:{thread_info.host_id[:8]} | pid:{self.pid})"
 
-        if self.tracing_enable == 1:
+        if self.trace_level == NORMAL_TRACE_LEVEL:
             return thread_context
 
         thread_context.thread_span = tracer.start_span(
@@ -521,7 +575,7 @@ class TraceReqContext:
         copied.trace_level = self.trace_level
         copied.module_name = self.module_name
         copied.is_copy = True  # Mark as copy
-        copied.pid = self.pid
+        copied.pid = None
 
         # thread_context is None, will be rebuilt via rebuild_thread_context()
         copied.thread_context = None
@@ -544,11 +598,14 @@ class TraceReqContext:
 
         return copied
 
-    def rebuild_thread_context(self, ts: Optional[int] = None):
+    def rebuild_thread_context(
+        self, ts: Optional[int] = None, pid: Optional[int] = None
+    ):
         if not self.tracing_enable:
             return
 
         ts = ts or get_cur_time_ns()
+        self.pid = pid if pid is not None else threading.get_native_id()
         self.thread_context = self.__create_thread_context(ts)
 
     def trace_req_start(
@@ -611,34 +668,74 @@ class TraceReqContext:
         if self.trace_level > 1 and self.bootstrap_room and str(self.bootstrap_room) in remote_trace_contexts:
             self.last_span_context = remote_trace_contexts[str(self.bootstrap_room)].prev_span_context
 
+    @staticmethod
+    def _safe_span_operation(
+        operation: Callable[[], None],
+        warning_message: str,
+    ) -> None:
+        try:
+            operation()
+        except Exception:
+            logger.warning(warning_message, exc_info=True)
+
+    def _cleanup_bootstrap_room(self, ts: int) -> None:
+        if self.trace_level <= NORMAL_TRACE_LEVEL:
+            return
+
+        bootstrap_room_key = str(self.bootstrap_room)
+        if self.bootstrap_room and bootstrap_room_key in remote_trace_contexts:
+            remote_trace_contexts.pop(bootstrap_room_key, None)
+        elif self.bootstrap_room_span:
+            self._safe_span_operation(
+                lambda: self.bootstrap_room_span.end(end_time=ts),
+                "Failed to end the bootstrap room trace span.",
+            )
+
+    def _finish_root_span(
+        self,
+        root_span: trace.span.Span,
+        ts: int,
+        attrs: Optional[Dict[str, Any]],
+    ) -> None:
+        try:
+            if attrs:
+                self._safe_span_operation(
+                    lambda: root_span.set_attributes(attrs),
+                    "Failed to set request trace span attributes.",
+                )
+
+            root_status = Status(StatusCode.OK)
+            self._safe_span_operation(
+                lambda: root_span.set_status(root_status),
+                "Failed to set request trace span status.",
+            )
+            self._safe_span_operation(
+                lambda: root_span.end(end_time=ts),
+                "Failed to end the request trace span.",
+            )
+            self._cleanup_bootstrap_room(ts)
+        finally:
+            self.root_span = None
+
     def trace_req_finish(
         self, ts: Optional[int] = None, attrs: Optional[Dict[str, Any]] = None
     ):
         if not self.tracing_enable:
             return
 
-        if not self.root_span:
-            return
-
         ts = ts or get_cur_time_ns()
 
-        # End all unclosed thread spans.
-        self.abort()
+        if not self.root_span:
+            # A rootless context may still own thread-level tracing resources.
+            self.abort(ts)
+            return
 
-        if attrs:
-            self.root_span.set_attributes(attrs)
-
-        self.root_span.set_status(Status(StatusCode.OK))
-        self.root_span.end(end_time=ts)
-
-        # Clean up multispan resources
-        if self.trace_level > 1:
-            if self.bootstrap_room and str(self.bootstrap_room) in remote_trace_contexts:
-                del remote_trace_contexts[str(self.bootstrap_room)]
-            elif self.bootstrap_room_span:
-                self.bootstrap_room_span.end(end_time=ts)
-
-        self.root_span = None
+        root_span = self.root_span
+        try:
+            # End all unclosed thread spans.
+            self.abort(ts)
+        finally:
+            self._finish_root_span(root_span, ts, attrs)
 
     def __check_fast_return(self, level=None):
         if not self.tracing_enable:
@@ -853,34 +950,83 @@ class TraceReqContext:
         if self.__check_fast_return():
             return
 
+        thread_context = self.thread_context
+        thread_span = thread_context.thread_span
+
         # close all slice spans (unlikely, except error API usage)
         ts = ts or get_cur_time_ns()
-        while len(self.thread_context.cur_slice_stack) > 0:
-            if self.thread_context.cur_slice_stack[-1].span:
-                self.thread_context.cur_slice_stack[-1].span.end(end_time=ts)
-            self.thread_context.cur_slice_stack.pop()
+        try:
+            while thread_context.cur_slice_stack:
+                slice_span = thread_context.cur_slice_stack.pop().span
+                if slice_span:
+                    try:
+                        slice_span.end(end_time=ts)
+                    except Exception:
+                        logger.warning(
+                            "Failed to end an unclosed slice trace span.",
+                            exc_info=True,
+                        )
 
-        # set abort info into thread span
-        if self.thread_context.thread_span:
-            if abort_info:
+            # set abort info into thread span
+            if thread_span and abort_info:
                 from sglang.srt.managers.schedule_batch import BaseFinishReason
 
                 if isinstance(abort_info, BaseFinishReason):
-                    abort_info = abort_info.to_json()
-                self.thread_context.thread_span.set_status(Status(StatusCode.ERROR))
-                self.thread_context.thread_span.set_attributes(abort_info)
-
-            if self.events_cache:
-                for event in self.events_cache:
-                    self.thread_context.thread_span.add_event(
-                        name=event.event_name,
-                        timestamp=event.ts,
-                        attributes=event.attrs,
+                    try:
+                        abort_info = abort_info.to_json()
+                    except Exception:
+                        logger.warning(
+                            "Failed to serialize trace abort info.",
+                            exc_info=True,
+                        )
+                        abort_info = {
+                            "reason": "abort_info_serialization_failed",
+                            "abort_info_type": type(abort_info).__name__,
+                        }
+                try:
+                    thread_span.set_status(Status(StatusCode.ERROR))
+                except Exception:
+                    logger.warning(
+                        "Failed to set aborted thread trace span status.",
+                        exc_info=True,
                     )
-                self.events_cache = []
+                try:
+                    thread_span.set_attributes(abort_info)
+                except Exception:
+                    logger.warning(
+                        "Failed to set aborted thread trace span attributes.",
+                        exc_info=True,
+                    )
 
-            self.thread_context.thread_span.end(end_time=ts)
-        self.thread_context = None
+            if thread_span:
+                for event in self.events_cache:
+                    try:
+                        thread_span.add_event(
+                            name=event.event_name,
+                            timestamp=event.ts,
+                            attributes=event.attrs,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to add a cached trace event during abort.",
+                            exc_info=True,
+                        )
+        finally:
+            try:
+                if thread_span:
+                    try:
+                        thread_span.end(end_time=ts)
+                    except Exception:
+                        logger.warning(
+                            "Failed to end the thread trace span.",
+                            exc_info=True,
+                        )
+            finally:
+                self.events_cache = []
+                self.thread_context = None
+
+    def flush(self):
+        pass
 
     def __del__(self):
         self.abort(abort_info={"reason": "have unclosed span, auto closed"})

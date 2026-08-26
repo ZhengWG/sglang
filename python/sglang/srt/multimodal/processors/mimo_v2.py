@@ -5,6 +5,7 @@ import base64
 import copy
 import json
 import math
+import os
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,9 +14,9 @@ from io import BytesIO
 from typing import List, Literal, Optional, Union
 
 import numpy as np
-import requests
 import torch
 import torch.nn.functional as F
+from decord import VideoReader
 from fastapi import HTTPException
 from PIL import Image
 from torchcodec.decoders import AudioDecoder
@@ -39,7 +40,9 @@ from sglang.srt.multimodal.processors.mimo_audio import (
     MiMoAudioPipeline,
 )
 from sglang.srt.multimodal.processors.qwen_vl import smart_nframes
+from sglang.srt.runtime_context import get_device
 from sglang.srt.utils import ImageData, VideoData
+from sglang.srt.utils.common import download_remote_media
 from sglang.utils import logger
 
 
@@ -219,12 +222,31 @@ _QWEN2VL_PIXEL_STD = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
 _mean_std_cache = {}
 
 
-def _decode_frames_and_timestamps(vdw, ele):
+def _decode_frames_and_timestamps(video, ele, temporal_factor):
     # Shared E/D frame-sampling recipe: smart_nframes + linspace + permute.
-    total_frames, video_fps = len(vdw), vdw.avg_fps
-    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+    is_decord = isinstance(video, VideoReader)
+    total_frames = len(video)
+    video_fps = video.get_avg_fps() if is_decord else video.avg_fps
+
+    sampling_kwargs = {k: v for k, v in ele.items() if v is not None}
+    if "num_frames" in sampling_kwargs:
+        sampling_kwargs.pop("fps", None)
+        sampling_kwargs["nframes"] = sampling_kwargs.pop("num_frames")
+    nframes = smart_nframes(
+        sampling_kwargs,
+        total_frames=total_frames,
+        temporal_factor=temporal_factor,
+        video_fps=video_fps,
+        default_fps=sampling_kwargs.get("fps", 2),
+        default_fps_min_frames=sampling_kwargs.get("min_frames", 8),
+        default_fps_max_frames=sampling_kwargs.get("max_frames", 256),
+    )
     idx = list(np.unique(np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)))
-    video_tensor = vdw.get_frames_as_tensor(idx).permute(0, 3, 1, 2).float()
+    if is_decord:
+        video_tensor = torch.from_numpy(video.get_batch(idx).asnumpy()).pin_memory()
+    else:
+        video_tensor = video.get_frames_as_tensor(idx)
+    video_tensor = video_tensor.permute(0, 3, 1, 2).float()
     timestamps = torch.as_tensor(idx, dtype=torch.float32) / video_fps
     return video_tensor, timestamps
 
@@ -485,12 +507,14 @@ class MiMoProcessor:
 
     @staticmethod
     def has_audio_track(path_or_data) -> bool:
-        # In-process probe via torchcodec for bytes/path; ffprobe range
-        # request for HTTP URLs so we do not pre-download the blob here.
+        # Never hand a client-supplied URL to ffprobe: its internal HTTP client
+        # would bypass the shared domain and redirect policy. Resolve it through
+        # the guarded downloader first, then probe the resulting bytes in-process.
         if isinstance(path_or_data, str) and path_or_data.startswith(
             ("http://", "https://")
         ):
-            return _ffprobe_has_audio(path_or_data, stdin=None, label=path_or_data)
+            timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+            path_or_data = download_remote_media(path_or_data, timeout=timeout)
 
         if isinstance(path_or_data, bytes):
             source = BytesIO(path_or_data)
@@ -511,19 +535,14 @@ class MiMoProcessor:
     def _load_video_for_encoder(self, video_data):
         # Normalise once to bytes-or-path; reused by frame decode, audio
         # detection, and audio preprocessing without re-downloading.
-        from sglang.srt.utils.common import VideoData, _normalize_video_input
+        from sglang.srt.utils.common import _normalize_video_input
         from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
-        if isinstance(video_data, VideoData):
-            video_data = video_data.url
-        if isinstance(video_data, bytes):
-            video_blob = video_data
-        else:
-            video_blob = _normalize_video_input(video_data)
-            if video_blob is None:
-                raise ValueError(
-                    f"Unsupported video input type for EPD encoder: {type(video_data)}"
-                )
+        video_blob = _normalize_video_input(video_data)
+        if video_blob is None:
+            raise ValueError(
+                f"Unsupported video input type for EPD encoder: {type(video_data)}"
+            )
 
         vdw = VideoDecoderWrapper(
             video_blob,
@@ -532,7 +551,9 @@ class MiMoProcessor:
         )
         try:
             video_tuple = _decode_frames_and_timestamps(
-                vdw, self.default_video_processor_kwargs
+                vdw,
+                self.default_video_processor_kwargs,
+                temporal_factor=self.temporal_patch_size,
             )
         finally:
             if hasattr(vdw, "close"):
@@ -1446,10 +1467,8 @@ class MiMoProcessor:
             image_obj = image
         elif isinstance(image, str):
             if image.startswith("http://") or image.startswith("https://"):
-                with requests.get(image, stream=True) as response:
-                    response.raise_for_status()
-                    with BytesIO(response.content) as bio:
-                        image_obj = copy.deepcopy(Image.open(bio))
+                with BytesIO(download_remote_media(image, timeout=3)) as bio:
+                    image_obj = copy.deepcopy(Image.open(bio))
             elif image.startswith("file://"):
                 image_obj = Image.open(image[7:])
             elif image.startswith("data:image"):
@@ -1587,7 +1606,7 @@ class MiMoV2Processor(BaseMultimodalProcessor):
             processor_config, "video_end_token_id"
         )
         self.use_image_processor_gpu = envs.SGLANG_ENCODER_IMAGE_PROCESSOR_USE_GPU.get()
-        device = server_args.device if self.use_image_processor_gpu else None
+        device = get_device().device if self.use_image_processor_gpu else None
 
         self.mimo_processor = MiMoProcessor(
             tokenizer=self._processor.tokenizer,
@@ -1662,7 +1681,11 @@ class MiMoV2Processor(BaseMultimodalProcessor):
         }
         ele = {**default_kwargs, **(preprocess_kwargs or {})}
         try:
-            return _decode_frames_and_timestamps(vdw, ele)
+            return _decode_frames_and_timestamps(
+                vdw,
+                ele,
+                temporal_factor=self.mimo_processor.temporal_patch_size,
+            )
         except Exception as e:
             logger.error(f"Video decode failed in _preprocess_video_sync: {e}")
             raise HTTPException(
@@ -1684,40 +1707,7 @@ class MiMoV2Processor(BaseMultimodalProcessor):
 
         if videos:
             for video in videos:
-                preprocess_kwargs = {}
-                audio_source = None
-                raw_video_source = video
-                if isinstance(video, VideoData):
-                    preprocess_kwargs = getattr(video, "preprocess_kwargs", {}) or {}
-                    raw_video_source = video.url
-                    audio_source = video.url
-                    video = video.url
-                elif isinstance(video, dict):
-                    preprocess_kwargs = video.get("preprocess_kwargs", {}) or {}
-                    audio_source = video.get("audio") or video.get("url")
-                    video = video.get("url", video)
-                    raw_video_source = video
-                elif isinstance(video, str):
-                    raw_video_source = video
-                    audio_source = None
-
-                if "use_audio" in preprocess_kwargs:
-                    use_audio = preprocess_kwargs["use_audio"]
-                elif isinstance(raw_video_source, str):
-                    use_audio = self.mimo_processor.has_audio_track(raw_video_source)
-                else:
-                    use_audio = False
-
-                if (
-                    use_audio
-                    and audio_source is None
-                    and isinstance(raw_video_source, (str, bytes, torch.Tensor))
-                ):
-                    audio_source = raw_video_source
-
-                processed_videos.append(
-                    (raw_video_source, use_audio, audio_source, preprocess_kwargs)
-                )
+                processed_videos.append(self._resolve_video_audio_input(video))
 
         if audios:
             for audio in audios:
@@ -1861,6 +1851,47 @@ class MiMoV2Processor(BaseMultimodalProcessor):
 
         return ret
 
+    def _resolve_video_audio_input(self, video, force_audio: bool = False):
+        """Resolve a raw video item into video/audio processor inputs.
+
+        Per-item ``preprocess_kwargs.use_audio`` takes precedence. Otherwise,
+        ``force_audio`` (the OpenAI ``use_audio_in_video`` request flag) can
+        force the video container to be decoded as an audio source. Without an
+        override, MiMo keeps its existing automatic audio-track detection.
+        """
+        preprocess_kwargs = {}
+        audio_source = None
+        raw_video_source = video
+
+        if isinstance(video, VideoData):
+            preprocess_kwargs = getattr(video, "preprocess_kwargs", {}) or {}
+            raw_video_source = video.url
+            audio_source = video.url
+        elif isinstance(video, dict):
+            preprocess_kwargs = video.get("preprocess_kwargs", {}) or {}
+            raw_video_source = video.get("url", video)
+            audio_source = video.get("audio") or video.get("url")
+
+        probe_source = audio_source if audio_source is not None else raw_video_source
+        if "use_audio" in preprocess_kwargs:
+            use_audio = bool(preprocess_kwargs["use_audio"])
+        elif force_audio:
+            use_audio = True
+        elif isinstance(probe_source, (str, bytes)):
+            use_audio = self.mimo_processor.has_audio_track(probe_source)
+        else:
+            use_audio = False
+
+        if use_audio and audio_source is None:
+            if not isinstance(raw_video_source, (str, bytes, torch.Tensor)):
+                raise ValueError(
+                    "Video audio requires a string, bytes, or tensor audio source, "
+                    f"but got {type(raw_video_source).__name__}"
+                )
+            audio_source = raw_video_source
+
+        return raw_video_source, use_audio, audio_source, preprocess_kwargs
+
     async def process_mm_data_async(
         self,
         image_data: List[Union[str, bytes]],
@@ -1889,6 +1920,7 @@ class MiMoV2Processor(BaseMultimodalProcessor):
         raw_image_data = image_data or []
         raw_video_data = getattr(request_obj, "video_data", None) or []
         raw_audio_data = audio_data or []
+        force_video_audio = bool(getattr(request_obj, "use_audio_in_video", False))
 
         loaded_image_iter = iter(base_output.images)
         loaded_video_iter = iter(base_output.videos)
@@ -1937,25 +1969,21 @@ class MiMoV2Processor(BaseMultimodalProcessor):
                     loaded_video = next(loaded_video_iter)
                     raw_video_item = next(raw_video_iter)
 
-                    preprocess_kwargs = {}
-                    raw_video_item_audio = None
-                    use_audio = False
-                    if isinstance(raw_video_item, VideoData):
-                        preprocess_kwargs = (
-                            getattr(raw_video_item, "preprocess_kwargs", {}) or {}
-                        )
-                        use_audio = self.mimo_processor.has_audio_track(
-                            raw_video_item.url
-                        )
-                        raw_video_item_audio = raw_video_item.url
-                    elif isinstance(raw_video_item, dict):
-                        use_audio = self.mimo_processor.has_audio_track(
-                            raw_video_item.get("url", raw_video_item)
-                        )
-                        raw_video_item_audio = raw_video_item
-                    elif isinstance(raw_video_item, str):
-                        use_audio = self.mimo_processor.has_audio_track(raw_video_item)
-                        raw_video_item_audio = raw_video_item
+                    (
+                        _,
+                        use_audio,
+                        raw_video_item_audio,
+                        preprocess_kwargs,
+                    ) = self._resolve_video_audio_input(
+                        raw_video_item, force_audio=force_video_audio
+                    )
+                    logger.info(
+                        "MiMo video audio routing: use_audio=%s, forced=%s, "
+                        "source_type=%s",
+                        use_audio,
+                        force_video_audio,
+                        type(raw_video_item_audio).__name__,
+                    )
 
                     video_tuple = self._preprocess_video_sync(
                         loaded_video, preprocess_kwargs

@@ -24,7 +24,6 @@ from transformers.models.ernie4_5_moe.configuration_ernie4_5_moe import (
 )
 
 from sglang.srt.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.layers.communicator import enable_moe_dense_fully_dp
@@ -42,6 +41,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP as Ernie4MLP
 from sglang.srt.models.llama import LlamaAttention as Ernie4Attention
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, is_npu, make_layers
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
@@ -77,7 +77,7 @@ class Ernie4Moe(nn.Module):
     ):
         super().__init__()
         self.layer_id = layer_id
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_parallel().tp_size
         self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", 0)
 
         if config.hidden_act != "silu":
@@ -266,6 +266,9 @@ class Ernie4Model(nn.Module):
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
 
     @torch.no_grad()
     def forward(

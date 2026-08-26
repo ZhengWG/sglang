@@ -10,14 +10,10 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.kernels.ops.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
-    get_moe_expert_parallel_world_size,
-    get_moe_tensor_parallel_rank,
-    get_moe_tensor_parallel_world_size,
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
     moe_expert_parallel_all_reduce,
     moe_tensor_model_parallel_all_reduce,
 )
@@ -30,11 +26,7 @@ from sglang.srt.layers.communicator import (
     LayerScatterModes,
     enable_moe_dense_fully_dp,
 )
-from sglang.srt.layers.dp_attention import (
-    get_attention_tp_rank,
-    get_attention_tp_size,
-    is_dp_attention_enabled,
-)
+from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -51,9 +43,6 @@ from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.fp8_kernel import (
-    is_fp8_fnuz,
-)
 from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_dequant,
     block_quant_to_tensor_quant,
@@ -85,7 +74,12 @@ from sglang.srt.models.deepseek_common.utils import (
 )
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
-from sglang.srt.server_args import get_global_server_args
+from sglang.srt.runtime_context import (
+    get_exec,
+    get_forward,
+    get_parallel,
+    get_stream,
+)
 from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
@@ -109,7 +103,7 @@ if _is_cuda:
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
-    from sglang.srt.layers.quantization.awq_triton import (
+    from sglang.kernels.ops.quantization.awq_triton import (
         awq_dequantize_triton as awq_dequantize,
     )
 
@@ -164,8 +158,8 @@ class DsV3MLA(DeepseekV2AttentionMLA):
             alt_stream,
             skip_rope,
         )
-        attn_tp_rank = get_attention_tp_rank()
-        attn_tp_size = get_attention_tp_size()
+        attn_tp_rank = get_parallel().attn_tp_rank
+        attn_tp_size = get_parallel().attn_tp_size
         self.gated_attention_proj_granularity_type = getattr(
             config, "gated_attention_proj_granularity_type", None
         )
@@ -325,12 +319,8 @@ class BailingMLP(nn.Module):
 
         self.config = config
         self.swiglu_limit = swiglu_limit
-        self.tp_size = (
-            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
-        )
-        self.tp_rank = (
-            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
-        )
+        self.tp_size = tp_size if tp_size is not None else get_parallel().tp_size
+        self.tp_rank = tp_rank if tp_rank is not None else get_parallel().tp_rank
 
         # Store original and padded intermediate sizes
         self.intermediate_size = intermediate_size
@@ -375,8 +365,6 @@ class BailingMLP(nn.Module):
     def forward(
         self,
         x,
-        should_allreduce_fusion: bool = False,
-        use_reduce_scatter: bool = False,
         forward_batch: Optional[ForwardBatch] = None,
     ):
         x, _ = self.gate_up_proj(x)
@@ -414,10 +402,7 @@ class BailingMLP(nn.Module):
             else:
                 x = self.act_fn(x)
 
-        x, _ = self.down_proj(
-            x,
-            skip_all_reduce=use_reduce_scatter or should_allreduce_fusion,
-        )
+        x, _ = self.down_proj(x)
         return x
 
 
@@ -467,6 +452,18 @@ class BailingMoE(nn.Module):
         except Exception:
             return None
 
+    @classmethod
+    def _swiglu_limits_match_for_fusion(cls, config: PretrainedConfig) -> bool:
+        """Whether routed/shared experts can share one per-layer clamp value."""
+        expert_limits = getattr(config, "expert_swiglu_limit_list", None)
+        shared_limits = getattr(config, "share_expert_swiglu_limit_list", None)
+        first_moe_layer = getattr(config, "first_k_dense_replace", 0)
+        return all(
+            cls._get_swiglu_limit(expert_limits, layer_id)
+            == cls._get_swiglu_limit(shared_limits, layer_id)
+            for layer_id in range(first_moe_layer, config.num_hidden_layers)
+        )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -481,11 +478,11 @@ class BailingMoE(nn.Module):
         self.layer_id = layer_id
         self.alt_stream = alt_stream
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.moe_ep_size = get_moe_expert_parallel_world_size()
-        self.moe_tp_size = get_moe_tensor_parallel_world_size()
-        self.moe_tp_rank = get_moe_tensor_parallel_rank()
+        self.tp_size = get_parallel().tp_size
+        self.tp_rank = get_parallel().tp_rank
+        self.moe_ep_size = get_parallel().moe_ep_size
+        self.moe_tp_size = get_parallel().moe_tp_size
+        self.moe_tp_rank = get_parallel().moe_tp_rank
 
         self.top_k = config.num_experts_per_tok
         self.norm_expert_prob = getattr(config, "norm_topk_prob", False)
@@ -704,21 +701,15 @@ class BailingMoE(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        should_allreduce_fusion: bool = False,
-        use_reduce_scatter: bool = False,
         forward_batch: Optional[ForwardBatch] = None,
     ) -> torch.Tensor:
         if self._enable_a2a_moe:
             return self.forward_deepep(hidden_states, forward_batch)
-        return self.forward_normal(
-            hidden_states, should_allreduce_fusion, use_reduce_scatter
-        )
+        return self.forward_normal(hidden_states)
 
     def forward_normal(
         self,
         hidden_states: torch.Tensor,
-        should_allreduce_fusion: bool = False,
-        use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
@@ -745,15 +736,11 @@ class BailingMoE(nn.Module):
 
         if self.moe_ep_size > 1 and not should_skip_post_experts_all_reduce(
             is_tp_path=False,
-            use_reduce_scatter=use_reduce_scatter,
-            should_allreduce_fusion=should_allreduce_fusion,
         ):
             final_hidden_states = moe_expert_parallel_all_reduce(final_hidden_states)
 
         if self.moe_tp_size > 1 and not should_skip_post_experts_all_reduce(
             is_tp_path=True,
-            use_reduce_scatter=use_reduce_scatter,
-            should_allreduce_fusion=should_allreduce_fusion,
         ):
             final_hidden_states = moe_tensor_model_parallel_all_reduce(
                 final_hidden_states
@@ -880,7 +867,7 @@ class BailingMoEAttention(nn.Module):
         self.layer_id = layer_id
 
         self.hidden_size = config.hidden_size
-        tp_size = get_attention_tp_size()
+        tp_size = get_parallel().attn_tp_size
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -1167,29 +1154,31 @@ class BailingMoELinearDecoderLayer(nn.Module):
         )
 
         # Step 4: MLP
-        should_allreduce_fusion = (
+        fuse_mlp_allreduce = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
                 forward_batch
             )
         )
-        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
+        mlp_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
             forward_batch
         )
 
-        if not (
-            enable_moe_dense_fully_dp()
-            and (not self.is_layer_sparse)
-            and hidden_states.shape[0] == 0
+        with get_forward().scoped(
+            fuse_mlp_allreduce=fuse_mlp_allreduce,
+            mlp_reduce_scatter=mlp_reduce_scatter,
         ):
-            hidden_states = self.mlp(
-                hidden_states,
-                should_allreduce_fusion=should_allreduce_fusion,
-                use_reduce_scatter=use_reduce_scatter,
-                forward_batch=forward_batch,
-            )
+            if not (
+                enable_moe_dense_fully_dp()
+                and (not self.is_layer_sparse)
+                and hidden_states.shape[0] == 0
+            ):
+                hidden_states = self.mlp(
+                    hidden_states,
+                    forward_batch=forward_batch,
+                )
 
         # Step 5: postprocess_layer (dp_scatter for next layer)
-        if should_allreduce_fusion:
+        if fuse_mlp_allreduce:
             hidden_states._sglang_needs_allreduce_fusion = True
         else:
             hidden_states, residual = self.layer_communicator.postprocess_layer(
@@ -1248,7 +1237,7 @@ class BailingMoELinearModel(nn.Module):
         else:
             self.word_embeddings = PPMissingLayer()
 
-        self.alt_stream = torch.cuda.Stream() if _is_cuda else None
+        self.alt_stream = get_stream("alt") if _is_cuda else None
 
         def layer_fn(idx, prefix):
             layer_idx = idx
@@ -1354,7 +1343,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_parallel().tp_size
 
         # Determine num_fused_shared_experts
         self.determine_num_fused_shared_experts()
@@ -1375,7 +1364,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     config.hidden_size,
                     params_dtype=torch.float32,
                     quant_config=quant_config,
-                    use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
+                    use_attn_tp_group=get_parallel().enable_dp_lm_head,
                 )
             )
             self.logits_processor = LogitsProcessor(config)
@@ -1404,6 +1393,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         2. Model config doesn't match the expected architecture
         3. Hardware doesn't support it (requires CUDA with capability >= 80 or AMD with capability >= gfx942)
         4. Using W4AFP8 quantization (different quant methods for routed and shared experts)
+        5. Routed/shared experts use different per-layer SwiGLU clamp limits
 
         NOTE: This optimization requires that shared_experts and routed experts have the same
         intermediate_size. For BailingMoE V3, this is guaranteed by the model architecture:
@@ -1413,7 +1403,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
           moe_intermediate_size * num_shared_experts which would NOT be compatible with fusion.
         """
         self.num_fused_shared_experts = 0
-        if get_global_server_args().disable_shared_experts_fusion:
+        if get_exec().moe.disable_shared_experts_fusion:
             return
 
         num_shared_experts = getattr(self.config, "num_shared_experts", 0)
@@ -1441,6 +1431,14 @@ class BailingMoeV3ForCausalLM(nn.Module):
         # Check architecture
         elif self.config.architectures[0] != architecture:
             disable_reason = "Config does not support fused shared expert(s)."
+        # The fused runner carries one scalar clamp per layer, so the routed
+        # and shared expert can only be fused when their normalized limits
+        # (where config value 0 means no clamp) are identical.
+        elif not BailingMoE._swiglu_limits_match_for_fusion(self.config):
+            disable_reason = (
+                "Routed and shared experts use different per-layer SwiGLU clamp "
+                "limits, but fused shared experts support only one clamp per layer."
+            )
         # Check hardware capability
         elif (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
             not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)
@@ -1479,7 +1477,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     block_n = weight_block_size[0]
                     block_k = weight_block_size[1]
                     # Use moe_tp_size for alignment check (accounts for EP mode)
-                    moe_ep_size = get_moe_expert_parallel_world_size()
+                    moe_ep_size = get_parallel().moe_ep_size
                     moe_tp_size = (
                         self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
                     )
@@ -1499,7 +1497,12 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         )
 
         if disable_reason is not None:
-            get_global_server_args().disable_shared_experts_fusion = True
+            from sglang.srt.arg_groups.overrides import declare_load_time_override
+
+            declare_load_time_override(
+                "BailingMoeV3ForCausalLM.determine_num_fused_shared_experts",
+                {"disable_shared_experts_fusion": True},
+            )
             self.num_fused_shared_experts = 0
             log_info_on_rank0(
                 logger,
@@ -1521,7 +1524,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             )
 
         # Log EP mode info
-        moe_ep_size = get_moe_expert_parallel_world_size()
+        moe_ep_size = get_parallel().moe_ep_size
         if moe_ep_size > 1:
             log_info_on_rank0(
                 logger,

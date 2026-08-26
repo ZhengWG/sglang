@@ -13,6 +13,10 @@ from sglang.multimodal_gen.runtime.layers.quantization import (
     get_quantization_config,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.srt.layers.modelopt_utils import canonicalize_modelopt_quant_algo
+from sglang.srt.model_loader.checkpoint_quantization import (
+    resolve_checkpoint_quant_spec,
+)
 
 logger = init_logger(__name__)
 
@@ -103,7 +107,8 @@ def _resolve_quant_method_name(quant_cfg: dict) -> str:
     quant_method = quant_cfg.get("quant_method")
     if quant_method == "bitsandbytes":
         return "bitsandbytes"
-    if quant_method != "modelopt":
+    modelopt_methods = {"modelopt", "modelopt_fp8", "modelopt_fp4"}
+    if quant_method not in modelopt_methods:
         return quant_method
 
     quant_algo = (
@@ -111,14 +116,37 @@ def _resolve_quant_method_name(quant_cfg: dict) -> str:
         or quant_cfg.get("quantization", {}).get("quant_algo")
         or ""
     ).upper()
+    if quant_method != "modelopt" and not quant_algo:
+        # Preserve explicit legacy configs that select the backend directly.
+        # When an algorithm is present below, validate that it agrees.
+        return quant_method
     if quant_algo == "MIXED_PRECISION":
         raise ValueError(
             "ModelOpt mixed precision is not supported by the current SGLang diffusion runtime."
         )
-    if "FP8" in quant_algo:
-        return "modelopt_fp8"
-    if "FP4" in quant_algo or "NVFP4" in quant_algo:
-        return "modelopt_fp4"
+    canonical_method = canonicalize_modelopt_quant_algo(quant_algo)
+    if (
+        quant_method != "modelopt"
+        and canonical_method is not None
+        and quant_method != canonical_method
+    ):
+        raise ValueError(
+            f"ModelOpt config declares quant_method={quant_method!r}, but "
+            f"quant_algo={quant_algo!r} maps to {canonical_method!r}."
+        )
+    supported_algorithms = {
+        "FP8": "modelopt_fp8",
+        "NVFP4": "modelopt_fp4",
+    }
+    runtime_method = supported_algorithms.get(quant_algo)
+    if runtime_method is not None:
+        return runtime_method
+    if canonical_method is not None:
+        raise ValueError(
+            f"ModelOpt quant_algo={quant_algo!r} maps to {canonical_method!r}, but "
+            "that checkpoint algorithm is not supported by the SGLang diffusion runtime. "
+            "Supported ModelOpt checkpoint algorithms are FP8 and NVFP4."
+        )
     raise ValueError(f"Unsupported ModelOpt quant_algo for diffusion: {quant_algo}")
 
 
@@ -162,39 +190,38 @@ def get_quant_config(
     packed_modules_mapping: Dict[str, List[str]] = {},
     reverse_param_names_mapping: Dict[str, List[str]] = {},
     remap_prefix: Dict[str, str] | None = None,
+    quant_ignore_remap: Optional[Dict[str, str]] = None,
 ) -> QuantizationConfig:
     quant_cfg = find_quant_modelslim_config(model_config, component_model_path)
     if quant_cfg is not None:
         quant_cls = _load_quant_cls(quant_cfg)
         return quant_cls.from_config(quant_cfg, reverse_param_names_mapping)
 
-    if "quantization_config" not in model_config:
+    checkpoint_quant_spec = resolve_checkpoint_quant_spec(model_config)
+    if checkpoint_quant_spec is None:
         return None
 
-    hf_quant_config = normalize_flat_modelopt_quant_config(
-        model_config["quantization_config"]
-    )
-    if hf_quant_config is not None and not isinstance(hf_quant_config, dict):
-        hf_quant_config = hf_quant_config.to_dict()
+    hf_quant_config = normalize_flat_modelopt_quant_config(checkpoint_quant_spec.config)
     quant_cls = _load_quant_cls(hf_quant_config)
 
     # GGUF doesn't have config file
     if hf_quant_config["quant_method"] == "gguf":
         return quant_cls.from_config({})
 
-    # some vision model may keep quantization_config in their text_config
-    hf_text_config = getattr(model_config, "text_config", None)
-    if hf_quant_config is None and hf_text_config is not None:
-        hf_quant_config = getattr(hf_text_config, "quantization_config", None)
-    if hf_quant_config is None:
-        # compressed-tensors uses a compressions_config
-        hf_quant_config = getattr(model_config, "compression_config", None)
     if hf_quant_config is not None:
         hf_quant_config["packed_modules_mapping"] = packed_modules_mapping
-        return quant_cls.from_config(hf_quant_config)
+        is_modelopt_fp8 = (
+            hf_quant_config.get("quant_method") == "modelopt"
+            and "FP8" in str(hf_quant_config.get("quant_algo", "")).upper()
+        )
+        extra_kwargs = (
+            {"ignore_remap": quant_ignore_remap}
+            if quant_ignore_remap and is_modelopt_fp8
+            else {}
+        )
+        return quant_cls.from_config(hf_quant_config, **extra_kwargs)
 
     model_name_or_path = model_config["model_path"]
-    is_local = os.path.isdir(model_name_or_path)
     hf_folder = model_name_or_path
 
     possible_config_filenames = quant_cls.get_config_filenames()
@@ -299,6 +326,22 @@ def get_metadata_from_safetensors_file(file_path: str):
             return metadata
     except Exception as e:
         logger.warning(e)
+
+
+def _canonicalize_modulation_exclude(module_name: str) -> str:
+    """Map a serialized modulation weight's parent to the runtime linear prefix.
+
+    Qwen-Image wraps the modulation projection in ``nn.Sequential(SiLU, Linear)``,
+    so its weights serialize as ``...img_mod.1.weight`` while the runtime
+    ReplicatedLinear advertises ``...img_mod`` as its quant/exclusion prefix.
+    Strip the trailing Sequential index so a safetensors-inferred BF16 exclude
+    entry actually matches the linear (mirrors the ModelOpt FP8 converter, which
+    canonicalizes ``.img_mod.1``/``.txt_mod.1`` to ``.img_mod``/``.txt_mod``).
+    No-op for any other module name.
+    """
+    if module_name.endswith((".img_mod.1", ".txt_mod.1")):
+        return module_name.removesuffix(".1")
+    return module_name
 
 
 def _build_nvfp4_config_from_safetensors_files(
@@ -470,7 +513,9 @@ def _build_nvfp4_config_from_safetensors_files(
 
         exclude_modules.append(module_bfl)
 
-    exclude_modules = sorted(set(exclude_modules))
+    exclude_modules = sorted(
+        {_canonicalize_modulation_exclude(m) for m in exclude_modules}
+    )
 
     try:
         quant_cls = get_quantization_config("modelopt_fp4")

@@ -47,7 +47,7 @@ from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
 )
-from sglang.srt.utils.common import sample_video_frames
+from sglang.srt.utils.common import get_video_bytes, sample_video_frames
 
 if TYPE_CHECKING:
     from decord import VideoReader
@@ -214,10 +214,35 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
     async def process_mm_data_async(
         self, image_data, audio_data, input_text, request_obj, **kwargs
     ):
+        use_audio_in_video = getattr(request_obj, "use_audio_in_video", False)
+        video_bytes_for_audio: list[bytes] = []
+        video_data_for_loading = request_obj.video_data
+        if use_audio_in_video and not audio_data and self.audio_extractor is not None:
+            raw_video_data = video_data_for_loading or []
+            if not isinstance(raw_video_data, (list, tuple)):
+                raw_video_data = [raw_video_data]
+
+            # Native Decord readers do not expose their encoded source. When
+            # audio extraction is explicitly requested, normalize once and
+            # share the same bytes with both Decord and the audio extractor.
+            video_data_for_loading = []
+            for raw_video in raw_video_data:
+                try:
+                    video_bytes = get_video_bytes(raw_video)
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to read video input for optional audio extraction (%s).",
+                        type(exc).__name__,
+                    )
+                    video_data_for_loading.append(raw_video)
+                    continue
+                video_data_for_loading.append(video_bytes)
+                video_bytes_for_audio.append(video_bytes)
+
         base_output = await self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
-            video_data=request_obj.video_data,
+            video_data=video_data_for_loading,
             audio_data=audio_data if self.audio_extractor else None,
             multimodal_tokens=self.mm_tokens,
             discard_alpha_channel=True,
@@ -379,7 +404,6 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
             video_feature = torch.cat(preprocessed_videos, dim=0)
 
         # Extract audio from video if requested and no explicit audio provided
-        use_audio_in_video = getattr(request_obj, "use_audio_in_video", False)
         extracted_audios: list[np.ndarray] = []
         if (
             use_audio_in_video
@@ -387,16 +411,13 @@ class NanoNemotronVLImageProcessor(BaseMultimodalProcessor):
             and not base_output.audios
             and self.audio_extractor is not None
         ):
-            # TODO(yudian.zy): 修复这个功能
-            for video_wrapper in base_output.videos:
-                video_bytes = video_wrapper.source_bytes
-                if video_bytes is not None:
-                    audio_array = extract_audio_from_video_bytes(
-                        video_bytes,
-                        target_sr=self.audio_extractor.sampling_rate,
-                    )
-                    if audio_array is not None:
-                        extracted_audios.append(audio_array)
+            for video_bytes in video_bytes_for_audio:
+                audio_array = extract_audio_from_video_bytes(
+                    video_bytes,
+                    target_sr=self.audio_extractor.sampling_rate,
+                )
+                if audio_array is not None:
+                    extracted_audios.append(audio_array)
 
         all_audios: list[np.ndarray] = (
             list(base_output.audios) if base_output.audios else []

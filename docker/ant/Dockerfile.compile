@@ -1,4 +1,4 @@
-# 参考sgl-kernel/Dockerfile 中 deps阶段，构建出编译sgl-kernel的镜像
+# 参考python/sglang/kernels/aot/Dockerfile 中 deps阶段，构建出编译sgl-kernel的镜像
 ARG BASE_IMG=registry.cn-hangzhou.aliyuncs.com/augusto/manylinux-builder
 ARG CUDA_VERSION=13.0
 
@@ -106,4 +106,3 @@ replace-with = 'aliyun'
 [source.aliyun]
 registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
 EOF
-

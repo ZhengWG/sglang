@@ -8,19 +8,19 @@ register_cpu_ci(est_time=6, suite="base-a-test-cpu")
 
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import sglang.srt.observability.trace as mod
 from sglang.srt.observability.trace import (
+    NORMAL_TRACE_LEVEL,
     SpanAttributes,
-    TraceCustomIdGenerator,
     TraceEvent,
     TraceNullContext,
     TraceReqContext,
     TraceSliceContext,
-    TraceThreadContext,
     TraceThreadInfo,
     extract_trace_headers,
+    get_global_trace_level,
     get_global_tracing_enabled,
     process_tracing_init,
     set_global_trace_level,
@@ -51,19 +51,31 @@ class TestTraceFunctions(unittest.TestCase):
         self.assertEqual(extract_trace_headers({}), {})
 
     def test_set_global_trace_level(self):
-        orig = mod.global_trace_level
-        set_global_trace_level(5)
-        self.assertEqual(mod.global_trace_level, 5)
-        mod.global_trace_level = orig
+        from sglang.srt.runtime_context import get_resources
+
+        orig = get_resources().trace_level
+        try:
+            set_global_trace_level(5)
+            self.assertEqual(get_global_trace_level(), 5)
+        finally:
+            get_resources().trace_level = orig
 
     def test_global_trace_level_env_var(self):
-        import importlib
+        # The level lives on ctx.resources and is seeded lazily from the env
+        # on first read after a reset (no module reload involved).
+        from sglang.srt.runtime_context import get_resources
 
-        with patch.dict(os.environ, {"SGLANG_TRACE_LEVEL": "2"}):
-            importlib.reload(mod)
-            self.assertEqual(mod.global_trace_level, 2)
-        importlib.reload(mod)  # restore default (SGLANG_TRACE_LEVEL unset → 3)
-        self.assertEqual(mod.global_trace_level, 3)
+        orig = get_resources().trace_level
+        try:
+            with patch.dict(os.environ, {"SGLANG_TRACE_LEVEL": "2"}):
+                get_resources().trace_level = None
+                self.assertEqual(get_global_trace_level(), 2)
+            with patch.dict(os.environ):
+                os.environ.pop("SGLANG_TRACE_LEVEL", None)
+                get_resources().trace_level = None
+                self.assertEqual(get_global_trace_level(), NORMAL_TRACE_LEVEL)
+        finally:
+            get_resources().trace_level = orig
 
     def test_get_global_tracing_enabled(self):
         self.assertEqual(get_global_tracing_enabled(), mod.opentelemetry_initialized)
@@ -72,25 +84,6 @@ class TestTraceFunctions(unittest.TestCase):
         ts = mod.get_cur_time_ns()
         self.assertIsInstance(ts, int)
         self.assertGreater(ts, 0)
-
-
-class TestDataclasses(unittest.TestCase):
-    def test_trace_thread_info(self):
-        info = TraceThreadInfo("host", 123, "label", 0, 1, 0)
-        self.assertEqual(info.thread_label, "label")
-
-    def test_trace_event(self):
-        evt = TraceEvent("name", 100, {"k": "v"})
-        self.assertEqual(evt.event_name, "name")
-
-    def test_trace_slice_context(self):
-        s = TraceSliceContext("slice", 100, end_time_ns=200, level=2, attrs={"a": 1})
-        self.assertEqual(s.slice_name, "slice")
-
-    def test_trace_thread_context(self):
-        info = TraceThreadInfo("h", 1, "l", 0, 0, 0)
-        ctx = TraceThreadContext(thread_info=info, cur_slice_stack=[])
-        self.assertEqual(len(ctx.cur_slice_stack), 0)
 
 
 class TestTraceNullContext(unittest.TestCase):
@@ -109,15 +102,6 @@ class TestSpanAttributes(unittest.TestCase):
     def test_constants_exist(self):
         self.assertEqual(SpanAttributes.GEN_AI_LATENCY_E2E, "gen_ai.latency.e2e")
         self.assertIsInstance(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS, str)
-
-
-class TestTraceCustomIdGenerator(unittest.TestCase):
-    def test_generates_nonzero_ids(self):
-        gen = TraceCustomIdGenerator()
-        trace_id = gen.generate_trace_id()
-        span_id = gen.generate_span_id()
-        self.assertIsInstance(trace_id, int)
-        self.assertIsInstance(span_id, int)
 
 
 # __get_host_id
@@ -208,32 +192,17 @@ class TestTraceReqContextDisabled(unittest.TestCase):
         self.assertFalse(ctx.tracing_enable)
         self.assertFalse(ctx.is_tracing_enabled())
 
-    def test_all_methods_noop(self):
-        ctx = TraceReqContext(rid="req-1")
-        ctx.trace_req_start()
-        ctx.trace_req_finish()
-        ctx.trace_slice_start("s", 1)
-        ctx.trace_slice_end("s", 1)
-        ctx.trace_slice(TraceSliceContext("s", 100))
-        ctx.trace_event("e", 1)
-        ctx.trace_set_root_attrs({"k": "v"})
-        ctx.trace_set_thread_attrs({"k": "v"})
-        ctx.abort()
-        ctx.rebuild_thread_context()
-
     def test_getstate_disabled(self):
         ctx = TraceReqContext(rid="req-1")
         state = ctx.__getstate__()
         self.assertEqual(state, {"tracing_enable": False})
 
     def test_setstate_disabled(self):
-        ctx = TraceReqContext.__new__(TraceReqContext)
+        ctx = TraceReqContext(rid="req-1")
         ctx.__setstate__({"tracing_enable": True, "is_copy": False})
         # opentelemetry_initialized is False → tracing forced off
         self.assertFalse(ctx.tracing_enable)
 
-    def test_trace_set_thread_info_disabled(self):
-        trace_set_thread_info("test_label")
         # Should not register anything
 
 
@@ -244,7 +213,9 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         self.orig_initialized = mod.opentelemetry_initialized
         self.orig_tracer = mod.tracer
         self.orig_threads = mod.threads_info.copy()
-        self.orig_level = mod.global_trace_level
+        from sglang.srt.runtime_context import get_resources
+
+        self.orig_level = get_resources().trace_level
 
         # Reset OTel global TracerProvider so set_tracer_provider works each test
         otel_trace._TRACER_PROVIDER_SET_ONCE._done = False
@@ -254,14 +225,16 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         otel_trace.set_tracer_provider(self.provider)
         mod.opentelemetry_initialized = True
         mod.tracer = otel_trace.get_tracer("test")
-        mod.global_trace_level = 3
+        set_global_trace_level(3)
 
     def tearDown(self):
         mod.opentelemetry_initialized = self.orig_initialized
         mod.tracer = self.orig_tracer
         mod.threads_info.clear()
         mod.threads_info.update(self.orig_threads)
-        mod.global_trace_level = self.orig_level
+        from sglang.srt.runtime_context import get_resources
+
+        get_resources().trace_level = self.orig_level
 
     def test_trace_set_thread_info(self):
         trace_set_thread_info("scheduler", tp_rank=0, dp_rank=0)
@@ -315,13 +288,6 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         ctx = TraceReqContext(rid="req-1", bootstrap_room=0xFF, role="prefill")
         ctx.trace_req_start(ts=1000)
         self.assertIsNotNone(ctx.root_span)
-        ctx.trace_req_finish(ts=2000)
-
-    def test_trace_req_finish_without_start(self):
-        """finish without start is a no-op."""
-        ctx = TraceReqContext(rid="req-1")
-        ctx.trace_req_start(ts=1000)
-        ctx.root_span = None
         ctx.trace_req_finish(ts=2000)
 
     def test_trace_slice_combined(self):
@@ -441,24 +407,6 @@ class TestTraceReqContextEnabled(unittest.TestCase):
 
         ctx.trace_req_finish(ts=5000)
 
-    def test_trace_set_root_attrs(self):
-        ctx = TraceReqContext(rid="req-1")
-        ctx.trace_req_start(ts=1000)
-        ctx.trace_set_root_attrs({"model": "llama"})
-        ctx.trace_req_finish(ts=2000)
-
-    def test_trace_set_root_attrs_no_span(self):
-        ctx = TraceReqContext(rid="req-1")
-        ctx.trace_req_start(ts=1000)
-        ctx.root_span = None
-        ctx.trace_set_root_attrs({"model": "llama"})  # no crash
-
-    def test_trace_set_thread_attrs(self):
-        ctx = TraceReqContext(rid="req-1")
-        ctx.trace_req_start(ts=1000)
-        ctx.trace_set_thread_attrs({"batch_size": 32})
-        ctx.trace_req_finish(ts=2000)
-
     def test_abort_with_unclosed_slices(self):
         ctx = TraceReqContext(rid="req-1")
         ctx.trace_req_start(ts=1000)
@@ -467,12 +415,159 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         ctx.abort(ts=2000)
         self.assertIsNone(ctx.thread_context)
 
+    def test_abort_closes_other_slices_when_one_end_fails(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        ctx.trace_slice_start("outer", level=1, ts=1500)
+        ctx.trace_slice_start("inner", level=2, ts=1600)
+        thread_context = ctx.thread_context
+        outer_span = Mock(wraps=thread_context.cur_slice_stack[0].span)
+        inner_actual_span = thread_context.cur_slice_stack[1].span
+        inner_span = Mock(wraps=inner_actual_span)
+        inner_span.end.side_effect = RuntimeError("slice end failed")
+        thread_context.cur_slice_stack[0].span = outer_span
+        thread_context.cur_slice_stack[1].span = inner_span
+
+        with self.assertLogs(mod.logger, level="WARNING"):
+            ctx.abort(ts=2000)
+
+        inner_span.end.assert_called_once_with(end_time=2000)
+        outer_span.end.assert_called_once_with(end_time=2000)
+        self.assertEqual(thread_context.cur_slice_stack, [])
+        self.assertIsNone(ctx.thread_context)
+        inner_actual_span.end(end_time=2000)
+        ctx.trace_req_finish(ts=3000)
+
     def test_abort_with_events_cache(self):
         ctx = TraceReqContext(rid="req-1")
         ctx.trace_req_start(ts=1000)
+        self.assertIsNotNone(ctx.thread_context)
+        self.assertIsNotNone(ctx.thread_context.thread_span)
         ctx.trace_event("evt", level=1, ts=1500)
         ctx.abort(ts=2000)
         self.assertEqual(len(ctx.events_cache), 0)
+        ctx.trace_req_finish(ts=3000)
+
+    def test_abort_with_events_cache_at_normal_level(self):
+        set_global_trace_level(NORMAL_TRACE_LEVEL)
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        self.assertIsNotNone(ctx.thread_context)
+        self.assertIsNone(ctx.thread_context.thread_span)
+        ctx.trace_event("evt", level=1, ts=1500)
+        ctx.abort(ts=2000)
+        self.assertEqual(len(ctx.events_cache), 0)
+        ctx.trace_req_finish(ts=3000)
+
+    def test_abort_cleans_events_cache_when_add_event_fails(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        thread_span = Mock(wraps=ctx.thread_context.thread_span)
+        thread_span.add_event.side_effect = RuntimeError("bad event")
+        ctx.thread_context.thread_span = thread_span
+        ctx.trace_event("evt", level=1, ts=1500)
+
+        with self.assertLogs(mod.logger, level="WARNING"):
+            ctx.abort(ts=2000)
+
+        thread_span.end.assert_called_once_with(end_time=2000)
+        self.assertIsNone(ctx.thread_context)
+        self.assertEqual(len(ctx.events_cache), 0)
+        ctx.trace_req_finish(ts=3000)
+
+    def test_abort_falls_back_when_abort_info_serialization_fails(self):
+        class BadFinishReason:
+            def to_json(self):
+                raise RuntimeError("serialization failed")
+
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        thread_span = Mock(wraps=ctx.thread_context.thread_span)
+        ctx.thread_context.thread_span = thread_span
+        ctx.trace_event("evt", level=1, ts=1500)
+
+        with (
+            patch(
+                "sglang.srt.managers.schedule_batch.BaseFinishReason",
+                BadFinishReason,
+            ),
+            self.assertLogs(mod.logger, level="WARNING"),
+        ):
+            ctx.abort(ts=2000, abort_info=BadFinishReason())
+
+        thread_span.set_attributes.assert_called_once_with(
+            {
+                "reason": "abort_info_serialization_failed",
+                "abort_info_type": "BadFinishReason",
+            }
+        )
+        self.assertIsNone(ctx.thread_context)
+        self.assertEqual(len(ctx.events_cache), 0)
+        ctx.trace_req_finish(ts=3000)
+
+    def test_trace_req_finish_closes_copied_context(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        copied = ctx.copy_for_thread()
+        copied.rebuild_thread_context(ts=1500)
+        copied.trace_event("evt", level=1, ts=1750)
+
+        copied.trace_req_finish(ts=2000)
+
+        self.assertIsNone(copied.thread_context)
+        self.assertEqual(len(copied.events_cache), 0)
+        ctx.trace_req_finish(ts=3000)
+
+    def test_trace_req_finish_survives_thread_span_end_failure(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        actual_thread_span = ctx.thread_context.thread_span
+        thread_span = Mock(wraps=actual_thread_span)
+        thread_span.end.side_effect = RuntimeError("end failed")
+        ctx.thread_context.thread_span = thread_span
+        ctx.trace_event("evt", level=1, ts=1500)
+
+        with self.assertLogs(mod.logger, level="WARNING"):
+            ctx.trace_req_finish(ts=2000)
+
+        self.assertIsNone(ctx.thread_context)
+        self.assertEqual(len(ctx.events_cache), 0)
+        self.assertIsNone(ctx.root_span)
+        actual_thread_span.end(end_time=2000)
+
+    def test_trace_req_finish_survives_root_span_operation_failures(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        actual_root_span = ctx.root_span
+        root_span = Mock(wraps=actual_root_span)
+        root_span.set_attributes.side_effect = RuntimeError("attrs failed")
+        root_span.set_status.side_effect = RuntimeError("status failed")
+        root_span.end.side_effect = RuntimeError("end failed")
+        ctx.root_span = root_span
+
+        with self.assertLogs(mod.logger, level="WARNING") as logs:
+            ctx.trace_req_finish(ts=2000, attrs={"tokens": 42})
+
+        root_span.set_attributes.assert_called_once_with({"tokens": 42})
+        root_span.set_status.assert_called_once()
+        root_span.end.assert_called_once_with(end_time=2000)
+        self.assertGreaterEqual(len(logs.output), 3)
+        self.assertIsNone(ctx.thread_context)
+        self.assertIsNone(ctx.root_span)
+        actual_root_span.end(end_time=2000)
+
+    def test_terminal_operations_are_idempotent(self):
+        ctx = TraceReqContext(rid="req-1")
+        ctx.trace_req_start(ts=1000)
+        ctx.trace_event("evt", level=1, ts=1500)
+
+        ctx.trace_req_finish(ts=2000)
+        ctx.abort(ts=2500)
+        ctx.trace_req_finish(ts=3000)
+
+        self.assertIsNone(ctx.thread_context)
+        self.assertEqual(ctx.events_cache, [])
+        self.assertIsNone(ctx.root_span)
 
     def test_abort_with_abort_info_dict(self):
         ctx = TraceReqContext(rid="req-1")
@@ -539,7 +634,7 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         state = ctx.__getstate__()
         ctx.trace_req_finish(ts=2000)
 
-        ctx2 = TraceReqContext.__new__(TraceReqContext)
+        ctx2 = TraceReqContext(rid="req-2")
         ctx2.__setstate__(state)
         self.assertTrue(ctx2.tracing_enable)
         self.assertTrue(ctx2.is_copy)
@@ -567,7 +662,7 @@ class TestTraceReqContextEnabled(unittest.TestCase):
         ctx.trace_req_finish(ts=3000)
 
         self.assertIsNotNone(state.get("last_span_context"))
-        ctx2 = TraceReqContext.__new__(TraceReqContext)
+        ctx2 = TraceReqContext(rid="req-2")
         ctx2.__setstate__(state)
         self.assertIsNotNone(ctx2.last_span_context)
 

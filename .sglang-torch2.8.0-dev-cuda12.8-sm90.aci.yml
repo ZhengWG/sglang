@@ -52,12 +52,12 @@ jobs:
         export CMAKE_BUILD_PARALLEL_LEVEL=20
         export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'
         export CUDA_VERSION=12.8
-        cd ./sgl-kernel && curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "uv build --wheel -Cbuild-dir=build . --verbose --color=always --no-build-isolation  -p $(which python)"
+        cd ./python/sglang/kernels/aot && curl http://dmsint.cn-hangzhou.alipay.aliyun-inc.com/noao/yuhong.gyh/ssh_key/run_with_ssh_key.sh | bash -s "uv build --wheel -Cbuild-dir=build . --verbose --color=always --no-build-isolation  -p $(which python)"
         wheel_file=$(ls -1 "dist/" | head -n 1)
         echo "ACB_BUILD_DIR=${ACB_BUILD_DIR}"
         mkdir -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/
         cp dist/${wheel_file} -p ${ACB_BUILD_DIR}/code-repo/aci/artifacts/
-        cd ../python
+        cd ../../..
         cp ../README.md ../LICENSE .
         rm -rf dist
         python3 -m build
@@ -72,5 +72,4 @@ jobs:
       - name: sgl_kernel
         type: file
         path: ${ACB_BUILD_DIR}/code-repo/aci/artifacts/sgl_kernel*.whl
-
 

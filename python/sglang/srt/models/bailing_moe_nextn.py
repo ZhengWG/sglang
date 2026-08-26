@@ -26,7 +26,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import ReplicatedLinear
@@ -49,7 +48,7 @@ from sglang.srt.models.bailing_moe_v3 import (
     BailingMoELinearDecoderLayer as BailingMoeV3DecoderLayer,
 )
 from sglang.srt.models.utils import WeightsMapper
-from sglang.srt.server_args import get_global_server_args
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import BumpAllocator, add_prefix
 
 LoraConfig = None
@@ -219,7 +218,7 @@ class BailingMoeForCausalLMNextN(nn.Module):
     ) -> None:
         nn.Module.__init__(self)
         self.config = config
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_parallel().tp_size
         self.quant_config = quant_config
         self.num_fused_shared_experts = 0
         is_bailing_moe_v3 = _is_bailing_moe_v3_config(config)
@@ -247,7 +246,7 @@ class BailingMoeForCausalLMNextN(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
             prefix=add_prefix("model.shared_head.head", prefix),
-            use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
+            use_attn_tp_group=get_parallel().enable_dp_lm_head,
         )
         self.logits_processor = LogitsProcessor(config)
         if is_bailing_moe_v3:

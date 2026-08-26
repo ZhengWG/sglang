@@ -27,6 +27,7 @@ def _triton_fallback(
     A_log=None,
     dt_bias=None,
     lower_bound=None,
+    return_intermediate_states=False,
 ):
     """Fall back to the Triton chunk_kda kernel (handles all preprocessing).
 
@@ -34,7 +35,7 @@ def _triton_fallback(
     activation internally when A_log is provided, so they must be threaded
     through here too -- otherwise the fallback silently skips activation.
     """
-    from sglang.srt.layers.attention.fla.kda import chunk_kda
+    from sglang.kernels.ops.attention.fla.kda import chunk_kda
 
     return chunk_kda(
         q=q,
@@ -49,6 +50,7 @@ def _triton_fallback(
         A_log=A_log,
         dt_bias=dt_bias,
         lower_bound=lower_bound,
+        output_intermediate_states=return_intermediate_states,
     )
 
 
@@ -105,8 +107,27 @@ class CulaKDAKernel(LinearAttnKernelBase):
         A_log: Optional[torch.Tensor] = None,
         dt_bias: Optional[torch.Tensor] = None,
         lower_bound: Optional[float] = None,
+        return_intermediate_states: bool = False,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # cuLA does not expose chunk-boundary states. Fall back to Triton when
+        # prefix caching needs them.
+        if return_intermediate_states:
+            return _triton_fallback(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                ssm_states,
+                cache_indices,
+                query_start_loc,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                lower_bound=lower_bound,
+                return_intermediate_states=True,
+            )
+
         # Guard: sequences shorter than cuLA chunk size fall back to Triton.
         seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         min_seq_len = seq_lens.min().item()
@@ -153,12 +174,12 @@ class CulaKDAKernel(LinearAttnKernelBase):
         A_log: Optional[torch.Tensor] = None,
         dt_bias: Optional[torch.Tensor] = None,
         lower_bound: Optional[float] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         from sgl_kernel import kda_fwd_prefill
 
-        from sglang.srt.layers.attention.fla.cumsum import chunk_local_cumsum
-        from sglang.srt.layers.attention.fla.kda import kda_gate_chunk_cumsum
-        from sglang.srt.layers.attention.fla.l2norm import l2norm_fwd
+        from sglang.kernels.ops.attention.fla.cumsum import chunk_local_cumsum
+        from sglang.kernels.ops.attention.fla.kda import kda_gate_chunk_cumsum
+        from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
 
         # Input shapes: q, k, v = [1, packed_seq, H, D], g = [1, packed_seq, H, D], beta = [1, packed_seq, H]
         batch_size = q.shape[0]  # should be 1
@@ -233,7 +254,7 @@ class CulaKDAKernel(LinearAttnKernelBase):
         # 11. Reshape output: [packed_seq, H, D] -> [1, packed_seq, H, D]
         output = output.reshape(batch_size, packed_seq, num_heads, head_dim)
 
-        return output, None
+        return output
 
     def target_verify(
         self,

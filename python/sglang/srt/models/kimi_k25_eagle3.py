@@ -25,9 +25,10 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from sglang.srt.distributed import get_pp_group
+from sglang.srt.distributed.device_communicators import triton_symm_mem_ag
 from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
 from sglang.srt.layers.layernorm import RMSNorm
-from sglang.srt.layers.linear import ReplicatedLinear
+from sglang.srt.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import (
@@ -122,7 +123,7 @@ class Eagle3MLADecoderLayer(nn.Module):
         )
         # Recompute fused-proj-dependent flags so they reflect the new input dim.
         attn.has_fused_proj = True
-        attn.use_min_latency_fused_a_gemm = False
+        attn._use_min_latency_fused_a_gemm = False
         quant_method = getattr(attn.fused_qkv_a_proj_with_mqa, "quant_method", None)
         attn.is_packed_weight = (
             quant_method is not None
@@ -207,10 +208,20 @@ class Eagle3MLAModel(nn.Module):
             getattr(config, "target_hidden_size", None) or config.hidden_size
         )
         self.num_aux_hidden_states = _get_eagle_aux_layer_count(config)
-        self.fc = nn.Linear(
+        self.fc = ColumnParallelLinear(
             target_hidden_size * self.num_aux_hidden_states,
             config.hidden_size,
             bias=getattr(config, "bias", False),
+            gather_output=False,
+            quant_config=quant_config,
+            prefix=add_prefix("fc", prefix),
+        )
+        # Guarded multimem all-gather for the fc output; buffer covers prefill.
+        self._fc_gatherer = triton_symm_mem_ag.MultimemAllGatherer(
+            max_tokens=triton_symm_mem_ag.recommended_max_tokens(
+                include_prefill=True, floor=512
+            ),
+            skip_entry_sync=False,
         )
 
         # Per-aux RMSNorm before fc; enabled via `fc_norm` or legacy
@@ -251,8 +262,8 @@ class Eagle3MLAModel(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         if input_embeds is None:
-            # MM positions in input_ids hold MM_PAD_SHIFT_VALUE+hash sentinels (far above
-            # vocab_size). Use target-produced mm_input_embeds for these positions and
+            # MM positions in input_ids hold hash-derived sentinels shifted beyond
+            # vocab_size. Use target-produced mm_input_embeds for these positions and
             # only call embed_tokens on the appended next-token to avoid embed OOB.
             embeds = forward_batch.mm_input_embeds
             if (
@@ -278,7 +289,8 @@ class Eagle3MLAModel(nn.Module):
                     [norm(chunk) for norm, chunk in zip(self.fc_norm, chunks)],
                     dim=-1,
                 )
-            hidden_states = self.fc(hidden_states)
+            hidden_states, _ = self.fc(hidden_states)
+            hidden_states = self._fc_gatherer(hidden_states)
 
         if hidden_states.shape[0] == 0:
             return hidden_states, [hidden_states]
