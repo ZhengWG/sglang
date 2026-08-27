@@ -1,5 +1,6 @@
 """Unified video decoder: torchcodec preferred, decord as fallback."""
 
+import functools
 import logging
 import os
 
@@ -51,6 +52,27 @@ class _FrameBatch:
         return self._data
 
 
+def _handle_decode_exceptions(fn):
+    """Surface frame-decode failures as ValueError.
+
+    Frame extraction runs lazily in the processors, outside load_video's
+    "Could not decode video" wrapping, so raw backend errors (torchcodec /
+    decord RuntimeError) would reach the serving layer as HTTP 500 with
+    decoder internals leaked to the client. ValueError maps to HTTP 400.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ImportError, MemoryError, ValueError):
+            raise
+        except Exception as e:
+            raise ValueError(f"Could not decode video: {e}") from e
+
+    return wrapper
+
+
 class VideoDecoderWrapper:
     """Unified video decoder that uses torchcodec when available, decord as fallback.
 
@@ -74,6 +96,10 @@ class VideoDecoderWrapper:
             kwargs = {"dimension_order": "NHWC"}
             if device == "cuda" and _try_cuda_backend():
                 kwargs["device"] = "cuda"
+            else:
+                # torchcodec defaults to a single FFmpeg thread; 0 lets FFmpeg
+                # choose, which decodes several times faster on CPU.
+                kwargs["num_ffmpeg_threads"] = 0
             self._tc_kwargs = kwargs
             try:
                 self._decoder = VideoDecoder(source, **kwargs)
@@ -81,6 +107,7 @@ class VideoDecoderWrapper:
                 if "device" in kwargs:
                     logger.warning("CUDA video decoding failed, falling back to CPU.")
                     kwargs.pop("device")
+                    kwargs["num_ffmpeg_threads"] = 0
                     self._tc_kwargs = kwargs
                     self._decoder = VideoDecoder(source, **kwargs)
                 else:
@@ -104,6 +131,7 @@ class VideoDecoderWrapper:
     def __len__(self):
         return len(self._decoder)
 
+    @_handle_decode_exceptions
     def __getitem__(self, idx):
         """Return single frame as numpy NHWC uint8."""
         if _BACKEND == "torchcodec":
@@ -128,24 +156,27 @@ class VideoDecoderWrapper:
     def get_batch(self, indices) -> "_FrameBatch":
         return _FrameBatch(self.get_frames_at(indices))
 
+    @_handle_decode_exceptions
     def get_frames_at(self, indices: list) -> np.ndarray:
         """Return frames at given indices as numpy array with shape (N, H, W, C)."""
         if _BACKEND == "torchcodec":
-            data = self._decoder.get_frames_at(indices).data
+            data = self._extract_frames(indices)
             if getattr(data, "is_cuda", False):
                 data = data.cpu()
             return data.numpy()
         else:
             return self._decoder.get_batch(indices).asnumpy()
 
-    def get_frames_as_tensor(self, indices: list):
-        """Return frames at given indices as a torch tensor (NHWC, uint8, pinned memory)."""
-        import torch
+    def _extract_frames(self, indices: list):
+        """Torchcodec frame extraction, split across parallel decoders on CPU.
 
+        Sparse VLM sampling is seek-bound; parallel CPU decoders beat both a
+        single decoder and NVDEC for this access pattern.
+        """
         if (
-            _BACKEND == "torchcodec"
-            and self._num_decode_threads != 1
+            self._num_decode_threads != 1
             and len(indices) > 1
+            and "device" not in self._tc_kwargs
         ):
             num_threads = self._num_decode_threads
             if num_threads <= 0:
@@ -153,9 +184,15 @@ class VideoDecoderWrapper:
             num_threads = min(num_threads, len(indices))
             if num_threads > 1:
                 return self._parallel_decode(indices, num_threads)
+        return self._decoder.get_frames_at(indices).data
+
+    @_handle_decode_exceptions
+    def get_frames_as_tensor(self, indices: list):
+        """Return frames at given indices as a torch tensor (NHWC, uint8, pinned memory)."""
+        import torch
 
         if _BACKEND == "torchcodec":
-            data = self._decoder.get_frames_at(indices).data
+            data = self._extract_frames(indices)
             if getattr(data, "is_cuda", False):
                 data = data.cpu()
             return data.pin_memory()

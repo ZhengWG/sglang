@@ -2115,13 +2115,17 @@ def get_video_bytes(video_file: Union[str, bytes, VideoData]) -> bytes:
     raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
 
-def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
+def load_video(
+    video_file: Union[str, bytes, VideoData],
+    frame_count_limit: Optional[int] = None,
+    use_gpu: bool = False,
+):
+    # frame_count_limit is accepted for caller symmetry; frame sampling is
+    # applied by the processors on the returned decoder/reader.
+    # use_gpu defaults to False: VLM frame sampling is sparse/seek-bound, where
+    # parallel CPU decoding beats NVDEC; pass use_gpu=True for sequential reads.
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
-
-    # Callers pass frame_count_limit as the second positional (None for VIDEO).
-    if not isinstance(use_gpu, bool):
-        use_gpu = True
 
     try:
         from decord.bridge import decord_bridge
