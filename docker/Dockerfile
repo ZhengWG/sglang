@@ -723,9 +723,9 @@ RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
     fi
 
 # Runtime logging and internal launch scripts expect these paths to exist.
-RUN mkdir -p /home/admin/logs /opt/conda/bin \
-    && ln -sf /usr/bin/python /opt/conda/bin/python \
-    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
+# link sglang python venv to /opt/conda for compatibility with xruntime that expect conda
+RUN mkdir -p /home/admin/logs \
+    && ln -sf /opt/sglang /opt/conda \
     && ln -sf /home/admin/logs /logs
 
 # install cuda-compat scripts, make sure cuda-compat package has been installed
@@ -976,9 +976,9 @@ RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
 WORKDIR /sgl-workspace/sglang
 
 # Runtime logging and internal launch scripts expect these paths to exist.
-RUN mkdir -p /home/admin/logs /opt/conda/bin \
-    && ln -sf /usr/bin/python /opt/conda/bin/python \
-    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
+# link sglang python venv to /opt/conda for compatibility with xruntime that expect conda
+RUN mkdir -p /home/admin/logs \
+    && ln -sf /opt/sglang /opt/conda \
     && ln -sf /home/admin/logs /logs
 
 # install cuda-compat scripts, make sure cuda-compat package has been installed
