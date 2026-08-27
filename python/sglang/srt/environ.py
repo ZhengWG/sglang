@@ -1067,14 +1067,6 @@ class Envs:
     # otherwise.
     SGLANG_OPT_MOE_QUANT_ONCE = EnvBool(False)
 
-    # HiSparse
-    # Kill-switch for the shared-index (IndexShare) swap-in prefetch
-    # (auto-enabled for GLM-5.2-style DSA); set True to A/B synchronous swap-in.
-    SGLANG_DISABLE_HISPARSE_PREFETCH = EnvBool(False)
-    # Timing probe: run the swap-in fully but skip the host->device KV bytes,
-    # measuring the "IO is free" floor. GARBAGE OUTPUT -- benchmarking only.
-    SGLANG_DEBUG_HISPARSE_SKIP_IO = EnvBool(False)
-
     # Proactively free out-of-window SWA slots while caching unfinished requests.
     # Applies to both unified and legacy hybrid-SWA radix trees.
     SGLANG_OPT_SWA_PROACTIVE_FREE_OUT_OF_WINDOW_SLOTS = EnvBoolWithAlias(
@@ -1169,6 +1161,8 @@ class Envs:
     # into a small CUDA graph, collapsing its host dispatch cost to one launch.
     # Experimental; auto-falls back to eager if the backend's prep is not capturable.
     SGLANG_ENABLE_METADATA_GLUE_GRAPH = EnvBool(False)
+    # Fuse KDA conv1d + gating-delta-rule into one kernel on the MTP
+    # target-verify chain path (speculative_eagle_topk == 1). Experimental.
     SGLANG_OPT_FUSED_KDA_VERIFY = EnvBool(False)
     # A/B: keep the DFLASH draft greedy head eager (not folded in-graph).
     SGLANG_DFLASH_EAGER_DRAFT_SAMPLER = EnvBool(False)
@@ -1239,15 +1233,6 @@ class Envs:
     # mamba pool ratio accordingly. Frees one resident slot per running request,
     # raising max_running_requests. Off = original locking + ratio (escape hatch).
     SGLANG_OPT_MAMBA_SKIP_DECODE_LOCK = EnvBool(False)
-
-    # Fuse KDA conv1d + gating-delta-rule into one kernel on the MTP
-    # target-verify chain path (speculative_eagle_topk == 1). Experimental.
-    SGLANG_OPT_FUSED_KDA_VERIFY = EnvBool(False)
-
-    # Unified Radix Tree
-    SGLANG_ENABLE_UNIFIED_RADIX_TREE = EnvBool(False)
-    # Registered TreeCore backend serving the unified radix cache.
-    SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND = EnvStr("python")
 
     # ===================================================================
     # CUDA graphs and execution buffers
