@@ -19,6 +19,8 @@ class PoolEntry:
     # MLA cache data is redundant across TP ranks, so storage writes only need
     # to be issued by TP rank 0.
     tp_redundant: bool = False
+    # Reclaim callbacks receive the absolute allocation size n. The host
+    # callback evicts n slots; the device callback makes alloc(n) feasible.
     host_evict_fn: Callable[[int], Any] | None = None
     device_evict_fn: Callable[[int], Any] | None = None
     device_alloc_fn: Callable[[int], Any] | None = None

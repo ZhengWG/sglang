@@ -25,7 +25,7 @@ ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG INSTALL_FLASHINFER_JIT_CACHE=0
 ARG FLASHINFER_VERSION=0.6.17
-ARG MOONCAKE_VERSION=0.3.12.post1
+ARG MOONCAKE_VERSION=0.3.13
 ARG MSCCLPP_VERSION=sglang-v0.9.1
 
 ARG BOOTSTRAP_PIP_ARTIFACTORY_URL='https://antsys-moyun-zty.oss-cn-wulanchabu.aliyuncs.com/augusto.yjh/tools' # original is https://bootstrap.pypa.io/get-pip.py, this is a mirror for it, since sometimes the original url can be unstable in China, if you need to use the original url, just set this arg to empty string
@@ -723,9 +723,9 @@ RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
     fi
 
 # Runtime logging and internal launch scripts expect these paths to exist.
-RUN mkdir -p /home/admin/logs /opt/conda/bin \
-    && ln -sf /usr/bin/python /opt/conda/bin/python \
-    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
+# link sglang python venv to /opt/conda for compatibility with xruntime that expect conda
+RUN mkdir -p /home/admin/logs \
+    && ln -sf /opt/sglang /opt/conda \
     && ln -sf /home/admin/logs /logs
 
 # install cuda-compat scripts, make sure cuda-compat package has been installed
@@ -976,9 +976,9 @@ RUN if [ -n "$SGLANG_CURRENT_WHL" ]; then \
 WORKDIR /sgl-workspace/sglang
 
 # Runtime logging and internal launch scripts expect these paths to exist.
-RUN mkdir -p /home/admin/logs /opt/conda/bin \
-    && ln -sf /usr/bin/python /opt/conda/bin/python \
-    && ln -sf /usr/bin/python3 /opt/conda/bin/python3 \
+# link sglang python venv to /opt/conda for compatibility with xruntime that expect conda
+RUN mkdir -p /home/admin/logs \
+    && ln -sf /opt/sglang /opt/conda \
     && ln -sf /home/admin/logs /logs
 
 # install cuda-compat scripts, make sure cuda-compat package has been installed

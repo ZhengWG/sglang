@@ -42,6 +42,7 @@ from sglang.srt.layers.moe import (
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.moe.utils import is_shared_experts_fusion_disabled
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_dequant,
@@ -75,7 +76,6 @@ from sglang.srt.models.deepseek_common.utils import (
 from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
 from sglang.srt.runtime_context import (
-    get_exec,
     get_forward,
     get_parallel,
     get_stream,
@@ -1379,138 +1379,109 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def end_layer(self):
         return self.model.end_layer
 
-    def determine_num_fused_shared_experts(
-        self, architecture: str = "BailingMoeV3ForCausalLM"
+    @classmethod
+    def shared_experts_fusion_disable_reason(
+        cls,
+        hf_config,
+        quant_config,
+        expected_architecture="BailingMoeV3ForCausalLM",
     ):
-        """Determine whether to enable fused shared experts optimization.
+        """Return why shared-expert fusion cannot be used, or ``None``.
 
-        This optimization fuses shared experts with routed experts for better performance.
-        When enabled with EP (Expert Parallelism), shared experts are distributed across
-        GPUs along with routed experts, solving the TP size limitation issue.
-
-        It is disabled when:
-        1. User explicitly disables it via --disable-shared-experts-fusion
-        2. Model config doesn't match the expected architecture
-        3. Hardware doesn't support it (requires CUDA with capability >= 80 or AMD with capability >= gfx942)
-        4. Using W4AFP8 quantization (different quant methods for routed and shared experts)
-        5. Routed/shared experts use different per-layer SwiGLU clamp limits
-
-        NOTE: This optimization requires that shared_experts and routed experts have the same
-        intermediate_size. For BailingMoE V3, this is guaranteed by the model architecture:
-        - config.moe_intermediate_size is used for routed experts
-        - config.moe_shared_expert_intermediate_size (if set) should equal moe_intermediate_size
-          for fusion to work correctly, otherwise the default fallback is
-          moe_intermediate_size * num_shared_experts which would NOT be compatible with fusion.
+        The loader evaluates this gate once for each runner before model
+        construction.  Keep it independent of a model instance so the result
+        can be installed in the runner's runtime context before any MoE layer
+        is created.
         """
-        self.num_fused_shared_experts = 0
-        if get_exec().moe.disable_shared_experts_fusion:
-            return
+        num_shared_experts = getattr(hf_config, "num_shared_experts", 0)
 
-        num_shared_experts = getattr(self.config, "num_shared_experts", 0)
-        num_experts = getattr(self.config, "num_experts", 0)
-
-        # Only enable fusion if there are shared experts
+        # Only enable fusion if there are shared experts.
         if num_shared_experts == 0:
-            return
+            return None
 
-        # Check conditions for enabling fused shared experts
-        disable_reason = None
-
-        # Check A2A MoE backend (e.g., DeepEP)
-        # Fused shared experts adds an extra expert ID (e.g., 512 for 512 routed experts),
-        # making total experts = num_experts + 1 (e.g., 513). DeepEP routes expert IDs to
-        # ranks via expert_id // (num_experts // group_size), which breaks for the extra
-        # shared expert ID. Also, DeepEP asserts num_experts % group_size == 0, which
-        # fails for 513. Therefore, fused shared experts is incompatible with A2A backends.
+        # Fused shared experts adds an extra expert ID.  A2A backends cannot
+        # route that extra ID correctly (and often require a divisible expert
+        # count), so fusion is incompatible with them.
         if not get_moe_a2a_backend().is_none():
-            disable_reason = (
+            return (
                 "A2A MoE backend (e.g., DeepEP) is enabled. Fused shared experts is "
                 "incompatible with A2A backends because the extra shared expert ID cannot "
                 "be correctly routed."
             )
-        # Check architecture
-        elif self.config.architectures[0] != architecture:
-            disable_reason = "Config does not support fused shared expert(s)."
-        # The fused runner carries one scalar clamp per layer, so the routed
-        # and shared expert can only be fused when their normalized limits
-        # (where config value 0 means no clamp) are identical.
-        elif not BailingMoE._swiglu_limits_match_for_fusion(self.config):
-            disable_reason = (
+
+        if hf_config.architectures[0] != expected_architecture:
+            return "Config does not support fused shared expert(s)."
+
+        # The fused runner carries one scalar clamp per layer, so routed and
+        # shared experts must have identical normalized per-layer limits.
+        if not BailingMoE._swiglu_limits_match_for_fusion(hf_config):
+            return (
                 "Routed and shared experts use different per-layer SwiGLU clamp "
                 "limits, but fused shared experts support only one clamp per layer."
             )
-        # Check hardware capability
-        elif (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
+
+        if (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
             not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)
         ):
-            disable_reason = (
+            return (
                 "Only Bailing MoE V3 on NV-platform with capability >= 80 "
                 "or AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization."
             )
-        # Check W4AFP8 quantization
-        elif self.quant_config and self.quant_config.get_name() == "w4afp8":
-            disable_reason = "Bailing MoE V3 W4AFP8 model uses different quant method for routed experts and shared experts."
-        # Check shared_experts intermediate_size compatibility
-        # Fusion requires shared_experts and routed experts to have the same intermediate_size
-        # Note: The default value for moe_shared_expert_intermediate_size is
-        # moe_intermediate_size * num_shared_experts (see BailingMoE.__init__)
-        else:
-            shared_expert_intermediate_size = getattr(
-                self.config,
-                "moe_shared_expert_intermediate_size",
-                self.config.moe_intermediate_size * num_shared_experts,
-            )
-            if shared_expert_intermediate_size != self.config.moe_intermediate_size:
-                disable_reason = (
-                    f"Shared experts have different intermediate_size ({shared_expert_intermediate_size}) "
-                    f"from routed experts ({self.config.moe_intermediate_size}). Fusion requires them to be equal."
-                )
-            # Check FP8 blockwise quantization alignment
-            # FusedMoE doesn't have padding logic for FP8, so we need to check alignment
-            # Note: When EP is enabled, moe_tp_size is smaller than tp_size, which makes
-            # intermediate_size_per_partition larger and easier to satisfy alignment requirements.
-            elif self.quant_config and self.quant_config.get_name() == "fp8":
-                weight_block_size = getattr(
-                    self.quant_config, "weight_block_size", None
-                )
-                if weight_block_size is not None:
-                    block_n = weight_block_size[0]
-                    block_k = weight_block_size[1]
-                    # Use moe_tp_size for alignment check (accounts for EP mode)
-                    moe_ep_size = get_parallel().moe_ep_size
-                    moe_tp_size = (
-                        self.tp_size // moe_ep_size if moe_ep_size > 1 else self.tp_size
-                    )
-                    intermediate_size_per_partition = (
-                        self.config.moe_intermediate_size // moe_tp_size
-                    )
-                    if (
-                        intermediate_size_per_partition % block_n != 0
-                        or intermediate_size_per_partition % block_k != 0
-                    ):
-                        disable_reason = (
-                            f"FP8 blockwise quantization requires intermediate_size_per_partition "
-                            f"({intermediate_size_per_partition}) to be divisible by block_n ({block_n}) and block_k ({block_k}). "
-                            f"Current config: moe_intermediate_size={self.config.moe_intermediate_size}, "
-                            f"tp_size={self.tp_size}, moe_tp_size={moe_tp_size}. "
-                            f"Consider using --disable-shared-experts-fusion to use padding solution instead."
-                        )
 
-        if disable_reason is not None:
-            from sglang.srt.arg_groups.overrides import declare_load_time_override
+        if quant_config and quant_config.get_name() == "w4afp8":
+            return "Bailing MoE V3 W4AFP8 model uses different quant method for routed experts and shared experts."
 
-            declare_load_time_override(
-                "BailingMoeV3ForCausalLM.determine_num_fused_shared_experts",
-                {"disable_shared_experts_fusion": True},
+        # Fusion requires shared and routed experts to have the same
+        # intermediate size.  The default config value is routed size times
+        # the number of shared experts, which is not fusion-compatible.
+        shared_expert_intermediate_size = getattr(
+            hf_config,
+            "moe_shared_expert_intermediate_size",
+            hf_config.moe_intermediate_size * num_shared_experts,
+        )
+        if shared_expert_intermediate_size != hf_config.moe_intermediate_size:
+            return (
+                f"Shared experts have different intermediate_size ({shared_expert_intermediate_size}) "
+                f"from routed experts ({hf_config.moe_intermediate_size}). Fusion requires them to be equal."
             )
-            self.num_fused_shared_experts = 0
-            log_info_on_rank0(
-                logger,
-                f"{disable_reason} Shared experts fusion optimization is disabled.",
-            )
+
+        # FusedMoE has no padding path for FP8 blockwise quantization.  Account
+        # for EP when checking the per-partition intermediate size.
+        if quant_config and quant_config.get_name() == "fp8":
+            weight_block_size = getattr(quant_config, "weight_block_size", None)
+            if weight_block_size is not None:
+                block_n, block_k = weight_block_size
+                parallel = get_parallel()
+                tp_size = parallel.tp_size
+                moe_ep_size = parallel.moe_ep_size
+                moe_tp_size = tp_size // moe_ep_size if moe_ep_size > 1 else tp_size
+                intermediate_size_per_partition = (
+                    hf_config.moe_intermediate_size // moe_tp_size
+                )
+                if (
+                    intermediate_size_per_partition % block_n != 0
+                    or intermediate_size_per_partition % block_k != 0
+                ):
+                    return (
+                        "FP8 blockwise quantization requires "
+                        f"intermediate_size_per_partition ({intermediate_size_per_partition}) "
+                        f"to be divisible by block_n ({block_n}) and block_k ({block_k}). "
+                        f"Current config: moe_intermediate_size={hf_config.moe_intermediate_size}, "
+                        f"tp_size={tp_size}, moe_tp_size={moe_tp_size}. Consider using "
+                        "--disable-shared-experts-fusion to use padding solution instead."
+                    )
+
+        return None
+
+    def determine_num_fused_shared_experts(self):
+        # The loader installs the runner-specific decision; construction only
+        # reads it and bakes the result into the MoE layers.
+        num_shared_experts = getattr(self.config, "num_shared_experts", 0)
+        self.num_fused_shared_experts = (
+            0 if is_shared_experts_fusion_disabled() else num_shared_experts
+        )
+        if self.num_fused_shared_experts == 0:
             return
-
-        self.num_fused_shared_experts = num_shared_experts
 
         # Safety check: current CUDA implementation only supports num_fused_shared_experts == 1.
         # The grouped_topk_gpu and _post_process_topk_ids functions only handle the last column,

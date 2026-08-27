@@ -8,6 +8,10 @@ classes to this file as the surface grows.
 
 Current coverage:
 
+* `TestSimpleServerInfoResolvedConfig` — the local `/simple_server_info`
+  compatibility endpoint reads the resolution projection, preserves the
+  scheduler overlay, and does not expose the runtime `model_config` memo.
+
 * `TestServerInfoKvEventsField` — the `kv_events` publisher descriptor
   surfaced by `_build_kv_events_block`. Covers the full input matrix
   end-to-end (happy path / disabled / malformed JSON / inproc endpoint /
@@ -97,6 +101,49 @@ def _call_server_info_with(
         http_server._global_state = prior_state
         if published:
             reset_context()
+
+
+class TestSimpleServerInfoResolvedConfig(CustomTestCase):
+    """The compact local endpoint follows the full readback's config rules."""
+
+    def test_uses_resolved_values_and_preserves_scheduler_overlay(self):
+        class StubServerArgs:
+            model_config = SimpleNamespace(context_len=8192)
+
+            def resolved_dict(self):
+                return {
+                    "chunked_prefill_size": 4096,
+                    "max_running_requests": 16,
+                    "max_total_num_tokens": 32768,
+                }
+
+        async def _fake_internal_state():
+            return []
+
+        stub_state = SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                server_args=StubServerArgs(),
+                get_internal_state=_fake_internal_state,
+            ),
+            scheduler_info={"max_running_requests": 32},
+        )
+        prior_state = http_server.get_global_state()
+        http_server.set_global_state(stub_state)
+        try:
+            info = asyncio.run(http_server.get_simple_server_info())
+        finally:
+            http_server._global_state = prior_state
+
+        self.assertEqual(info["context_length"], 8192)
+        self.assertEqual(info["chunked_prefill_size"], 4096)
+        self.assertEqual(info["max_running_requests"], 32)
+        self.assertEqual(info["max_total_tokens"], 32768)
+
+    def test_resolved_dict_excludes_runtime_model_config_memo(self):
+        args = ServerArgs(model_path="dummy")
+        object.__setattr__(args, "model_config", SimpleNamespace(context_len=8192))
+
+        self.assertNotIn("model_config", args.resolved_dict())
 
 
 class TestServerInfoKvEventsField(CustomTestCase):
@@ -292,7 +339,7 @@ class TestServerInfoControlPlaneUpdates(CustomTestCase):
             tokenizer_manager.record_config_updates("test", weight_version="v2")
             self.assertEqual(tokenizer_manager.config_value("weight_version"), "v2")
             overlaid = tokenizer_manager.resolved_config_dict(
-                dataclasses.asdict(server_args)
+                server_args.resolved_dict()
             )
             self.assertEqual(overlaid["weight_version"], "v2")
         finally:
@@ -313,9 +360,9 @@ class TestServerInfoExistingFieldsPreserved(CustomTestCase):
     """
 
     def test_every_server_args_field_appears_in_response(self):
-        # `dataclasses.asdict(server_args)` is spread into the response;
-        # asserting every dataclass field surfaces is the strongest
-        # backward-compat guarantee that's still implementation-agnostic.
+        # `server_args.resolved_dict()` is spread into the response; asserting
+        # every dataclass field surfaces is the strongest backward-compat
+        # guarantee that's still implementation-agnostic.
         args = ServerArgs(model_path="dummy")
 
         info = _call_server_info_with(args)
