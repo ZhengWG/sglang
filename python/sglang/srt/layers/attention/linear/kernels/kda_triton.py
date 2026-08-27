@@ -27,7 +27,6 @@ class TritonKDAKernel(LinearAttnKernelBase):
     # non-packed Triton decode() path (fused_sigmoid_gating_delta_rule_update),
     # the same fallback CPU/NPU use. Batched decode is handled via query_start_loc.
     supports_packed_decode: bool = not is_cpu() and not is_npu() and not is_xpu()
-    # Fused conv1d + gating-delta-rule chain-verify kernel (MTP topk==1).
     supports_fused_chain_verify: bool = not is_cpu() and not is_npu()
 
     def packed_decode(
@@ -74,6 +73,11 @@ class TritonKDAKernel(LinearAttnKernelBase):
             and replayssm_g is not None
             and replayssm_write_pos is not None
         ):
+            if lower_bound is not None:
+                raise NotImplementedError(
+                    "KDA safe gate (lower_bound) is not implemented in the "
+                    "ReplaySSM decode kernel; disable --enable-linear-replayssm."
+                )
             K = ssm_states.shape[-1]  # ssm_states: [num_slots, HV, V, K]
             fused_recurrent_linear_replayssm_decode(
                 mixed_qkv=mixed_qkv,
@@ -227,7 +231,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
         lower_bound: Optional[float] = None,
         return_intermediate_states: bool = False,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return chunk_kda(
             q=q,
             k=k,

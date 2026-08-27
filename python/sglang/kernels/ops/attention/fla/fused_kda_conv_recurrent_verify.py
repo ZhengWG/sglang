@@ -29,6 +29,13 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.kernels.jit.utils import is_arch_support_pdl
+
+# V-tile width of the fused verify kernel. Tuned on B200 at T=5 with
+# benchmark/kernels/bench_kda_verify_sweep.py; any power of two is
+# numerics-safe at num_warps=4 (bit-exact vs the BV=32 original).
+KDA_VERIFY_BLOCK_V = 4
+
 
 @triton.jit
 def fused_kda_conv_gating_verify_kernel(
@@ -75,7 +82,18 @@ def fused_kda_conv_gating_verify_kernel(
     USE_LOWER_BOUND: tl.constexpr,
     SAVE_INTERMEDIATE_WINDOW: tl.constexpr,
     CACHE_INTERMEDIATE_STATES: tl.constexpr,
+    USE_GDC: tl.constexpr = False,
 ):
+    # PDL: overlap prologue with the tail of the producer qkv-projection GEMM;
+    # every global load (conv_state_indices, mixed_qkv, weights) happens after
+    # the wait. The immediate trigger releases the LAUNCH of the PDL'd gated
+    # norm so its prologue overlaps this kernel's whole (long, latency-bound)
+    # body -- consumers' own gdc_wait still fences on full completion. Fired
+    # before the padded-slot early return so every CTA triggers explicitly.
+    if USE_GDC:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
@@ -199,19 +217,47 @@ def fused_kda_conv_gating_verify_kernel(
         v_c2 = x_v
 
         if SAVE_INTERMEDIATE_WINDOW:
-            iw_base = (
-                inter_conv_window + iw_idx * stride_iw_line + t * stride_iw_step
-            )
+            iw_base = inter_conv_window + iw_idx * stride_iw_line + t * stride_iw_step
             if is_qk_owner:
-                tl.store(iw_base + q_ch * stride_iw_dim + 0 * stride_iw_win, q_c0, mask=mask_k)
-                tl.store(iw_base + q_ch * stride_iw_dim + 1 * stride_iw_win, q_c1, mask=mask_k)
-                tl.store(iw_base + q_ch * stride_iw_dim + 2 * stride_iw_win, q_c2, mask=mask_k)
-                tl.store(iw_base + k_ch * stride_iw_dim + 0 * stride_iw_win, k_c0, mask=mask_k)
-                tl.store(iw_base + k_ch * stride_iw_dim + 1 * stride_iw_win, k_c1, mask=mask_k)
-                tl.store(iw_base + k_ch * stride_iw_dim + 2 * stride_iw_win, k_c2, mask=mask_k)
-            tl.store(iw_base + v_ch * stride_iw_dim + 0 * stride_iw_win, v_c0, mask=mask_v)
-            tl.store(iw_base + v_ch * stride_iw_dim + 1 * stride_iw_win, v_c1, mask=mask_v)
-            tl.store(iw_base + v_ch * stride_iw_dim + 2 * stride_iw_win, v_c2, mask=mask_v)
+                tl.store(
+                    iw_base + q_ch * stride_iw_dim + 0 * stride_iw_win,
+                    q_c0,
+                    mask=mask_k,
+                )
+                tl.store(
+                    iw_base + q_ch * stride_iw_dim + 1 * stride_iw_win,
+                    q_c1,
+                    mask=mask_k,
+                )
+                tl.store(
+                    iw_base + q_ch * stride_iw_dim + 2 * stride_iw_win,
+                    q_c2,
+                    mask=mask_k,
+                )
+                tl.store(
+                    iw_base + k_ch * stride_iw_dim + 0 * stride_iw_win,
+                    k_c0,
+                    mask=mask_k,
+                )
+                tl.store(
+                    iw_base + k_ch * stride_iw_dim + 1 * stride_iw_win,
+                    k_c1,
+                    mask=mask_k,
+                )
+                tl.store(
+                    iw_base + k_ch * stride_iw_dim + 2 * stride_iw_win,
+                    k_c2,
+                    mask=mask_k,
+                )
+            tl.store(
+                iw_base + v_ch * stride_iw_dim + 0 * stride_iw_win, v_c0, mask=mask_v
+            )
+            tl.store(
+                iw_base + v_ch * stride_iw_dim + 1 * stride_iw_win, v_c1, mask=mask_v
+            )
+            tl.store(
+                iw_base + v_ch * stride_iw_dim + 2 * stride_iw_win, v_c2, mask=mask_v
+            )
 
         # SiLU, then round to the activation dtype: the unfused path stores the
         # conv output to a bf16 tensor and reloads it for the recurrence; the
@@ -339,7 +385,18 @@ def fused_kda_conv_gating_verify(
     assert ssm_states.is_contiguous()
     BK = triton.next_power_of_2(K)
     assert BK == K, "K must be a power of two (NK==1)"
-    BV = min(triton.next_power_of_2(V), 32)
+    # Smaller V tiles keep winning on this latency-bound grid (serial T-step
+    # recurrence per CTA; more CTAs = shorter per-step chains, and the
+    # duplicated per-head q/k conv work stays cheaper than the parallelism
+    # gain all the way down): B200 T=5 sweep (us/layer, warps=4) measured
+    # 4 -> 11.56, 8 -> 12.53, 16 -> 12.83, 32 -> 14.26, 64 -> 20.7,
+    # 128 -> 38 (benchmark/kernels/bench_kda_verify_sweep.py; H20-3e ranks
+    # 16 first but B200 is the production target). Bit-exact across BV at
+    # num_warps=4: the V tiling never touches the K-axis reduction order.
+    # BV=128 (the norm-fusion single-tile probe) measured 2x slower -- folding
+    # the gated RMSNorm into this kernel's epilogue is a dead end; it is
+    # PDL-chained behind this kernel instead (see fused_norm_gate.py).
+    BV = min(triton.next_power_of_2(V), KDA_VERIFY_BLOCK_V)
     NV = triton.cdiv(V, BV)
 
     a2 = a.reshape(seq_len, HV * K)
@@ -364,6 +421,9 @@ def fused_kda_conv_gating_verify(
         assert intermediate_states_buffer.is_contiguous()
 
     grid = (NV, B * HV)
+    # PDL (sm90+): chain behind the producer qkv-projection GEMM and signal the
+    # downstream o_norm / o_proj. Scheduling only — bit-exactness unaffected.
+    pdl_kwargs = {"USE_GDC": True, "launch_pdl": True} if is_arch_support_pdl() else {}
     fused_kda_conv_gating_verify_kernel[grid](
         x=mixed_qkv,
         w=conv_weight,
@@ -424,5 +484,6 @@ def fused_kda_conv_gating_verify(
         # higher values must be re-validated for bit-exactness before use.
         num_warps=num_warps,
         num_stages=3,
+        **pdl_kwargs,
     )
     return o.view(1, seq_len, HV, V)

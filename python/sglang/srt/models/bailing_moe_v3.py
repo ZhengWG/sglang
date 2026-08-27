@@ -3,20 +3,27 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
-from sglang.kernels.ops.quantization.fp8_kernel import is_fp8_fnuz
+from sglang.kernels.ops.moe.router import (
+    ROUTER_GATE_MATVEC_MAX_M,
+    router_gate_matvec,
+)
+from sglang.kernels.ops.quantization.fp8_kernel import (
+    is_fp8_fnuz,
+)
 from sglang.srt.configs import KimiLinearConfig
 from sglang.srt.distributed import (
     get_pp_group,
     moe_expert_parallel_all_reduce,
     moe_tensor_model_parallel_all_reduce,
 )
+from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers import deep_gemm_wrapper
@@ -39,7 +46,7 @@ from sglang.srt.layers.moe import (
     get_moe_a2a_backend,
     should_skip_post_experts_all_reduce,
 )
-from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
+from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.moe.utils import is_shared_experts_fusion_disabled
@@ -49,7 +56,6 @@ from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_to_tensor_quant,
     channel_quant_to_tensor_quant,
     normalize_e4m3fn_to_e4m3fnuz,
-    requant_weight_ue8m0_inplace,
 )
 from sglang.srt.layers.quantization.int8_utils import (
     block_dequant as int8_block_dequant,
@@ -71,9 +77,8 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_cpu_amx_available,
     _is_cuda,
     _is_hip,
-    _use_aiter_gfx95,
 )
-from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA, DeepseekV2MLP
+from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA
 from sglang.srt.models.kimi_linear import KimiDeltaAttention
 from sglang.srt.runtime_context import (
     get_forward,
@@ -84,7 +89,6 @@ from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
     bind_or_assign,
-    get_bool_env_var,
     is_cuda,
     is_flashinfer_available,
     is_sm100_supported,
@@ -93,10 +97,6 @@ from sglang.srt.utils import (
 )
 
 _is_fp8_fnuz = is_fp8_fnuz()
-
-if _use_aiter_gfx95:
-
-    pass
 
 if _is_cuda:
     from sgl_kernel import awq_dequantize
@@ -107,18 +107,14 @@ elif _is_hip:
         awq_dequantize_triton as awq_dequantize,
     )
 
-else:
+elif not (_is_cpu and _is_cpu_amx_available):
     from vllm._custom_ops import awq_dequantize
-
-if _is_hip:
-    pass
 
 _is_flashinfer_available = is_flashinfer_available()
 _is_sm100_supported = is_cuda() and is_sm100_supported()
 
 
 class DsV3MLA(DeepseekV2AttentionMLA):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -215,19 +211,16 @@ class DsV3MLA(DeepseekV2AttentionMLA):
 
     def _apply_gated(self, attn_output: torch.Tensor, gate: torch.Tensor):
         if self.gated_attention_proj_granularity_type == "head_wise":
-            # gate shape: [seq_len, head_num]
             attn_output = (
                 attn_output.view(-1, self.num_local_heads, self.v_head_dim)
                 * gate[:, :, None]
             )
             attn_output = attn_output.view(-1, self.num_local_heads * self.v_head_dim)
         else:
-            # gate shape: [seq_len, head_num*head_dim]
             attn_output = attn_output * gate
         return attn_output
 
 
-LoraConfig = None
 logger = logging.getLogger(__name__)
 
 
@@ -282,26 +275,7 @@ def is_pp_missing_parameter(
     return False
 
 
-def weight_loader_with_alias(alias: str):
-    def wrapper(func: Callable):
-        def inner_func(
-            param: torch.Tensor,
-            loaded_weight: torch.Tensor,
-            *args,
-            prefix: str = None,
-            **kwargs,
-        ):
-            # pf = "[vLLM][load]" + " " if prefix is None else f"[{prefix}] "
-            value = func(param, loaded_weight, *args, **kwargs)
-            return value
-
-        return inner_func
-
-    return wrapper
-
-
 class BailingMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -322,7 +296,6 @@ class BailingMLP(nn.Module):
         self.tp_size = tp_size if tp_size is not None else get_parallel().tp_size
         self.tp_rank = tp_rank if tp_rank is not None else get_parallel().tp_rank
 
-        # Store original and padded intermediate sizes
         self.intermediate_size = intermediate_size
         self.padded_intermediate_size = padded_intermediate_size or intermediate_size
 
@@ -346,7 +319,6 @@ class BailingMLP(nn.Module):
             tp_size=tp_size,
         )
 
-        # Pre-compute padding-related values for forward optimization
         if self.padded_intermediate_size > self.intermediate_size:
             self.padded_size_per_partition = (
                 self.padded_intermediate_size // self.tp_size
@@ -369,21 +341,13 @@ class BailingMLP(nn.Module):
     ):
         x, _ = self.gate_up_proj(x)
 
-        # Handle padded intermediate size for FP8 quantization
-        # When padded_intermediate_size > intermediate_size:
-        # - gate_up_proj outputs [batch, 2 * padded_intermediate_size_per_partition]
-        # - We need to extract the effective part, apply activation, then pad back
         if self.padded_size_per_partition is not None:
-            # Use pre-computed values for better performance
-            # Split into gate and up parts
             gate_padded = x[..., : self.padded_size_per_partition]
             up_padded = x[..., self.padded_size_per_partition :]
 
-            # Extract effective parts
             gate_effective = gate_padded[..., : self.effective_size_per_partition]
             up_effective = up_padded[..., : self.effective_size_per_partition]
 
-            # Apply SiLU to gate and multiply with up
             if self.swiglu_limit is not None:
                 x = F.silu(gate_effective).clamp(
                     max=self.swiglu_limit
@@ -391,7 +355,6 @@ class BailingMLP(nn.Module):
             else:
                 x = F.silu(gate_effective) * up_effective
 
-            # Pad back to padded_intermediate_size_per_partition for down_proj
             x = F.pad(x, (0, self.pad_size_per_partition))
         else:
             if self.swiglu_limit is not None:
@@ -433,36 +396,26 @@ class BailingMoEGate(nn.Module):
             self.expert_bias = None
 
     def forward(self, hidden_states):
+        if (
+            hidden_states.is_cuda
+            and 0 < hidden_states.shape[0] <= ROUTER_GATE_MATVEC_MAX_M
+            and self.weight.dtype in (torch.float32, torch.bfloat16)
+        ):
+            # Decode-sized M: one fp32-accumulating triton matvec for either
+            # gate dtype. Cold-cache (rotating weights) it beats the library
+            # path up to M=8 — by ~2.6-3x at the bs=1 verify shape (M=4) —
+            # and ties it at M=1; see router_gate_matvec for the numbers.
+            return router_gate_matvec(hidden_states, self.weight)
         logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None)
         return logits
 
 
 class BailingMoE(nn.Module):
-
     @staticmethod
     def _get_swiglu_limit(limit_list, layer_num):
-        try:
-            if (
-                limit_list is None
-                or len(limit_list) <= layer_num
-                or limit_list[layer_num] == 0
-            ):
-                return None
-            return limit_list[layer_num]
-        except Exception:
+        if limit_list is None or not 0 <= layer_num < len(limit_list):
             return None
-
-    @classmethod
-    def _swiglu_limits_match_for_fusion(cls, config: PretrainedConfig) -> bool:
-        """Whether routed/shared experts can share one per-layer clamp value."""
-        expert_limits = getattr(config, "expert_swiglu_limit_list", None)
-        shared_limits = getattr(config, "share_expert_swiglu_limit_list", None)
-        first_moe_layer = getattr(config, "first_k_dense_replace", 0)
-        return all(
-            cls._get_swiglu_limit(expert_limits, layer_id)
-            == cls._get_swiglu_limit(shared_limits, layer_id)
-            for layer_id in range(first_moe_layer, config.num_hidden_layers)
-        )
+        return limit_list[layer_num] or None
 
     def __init__(
         self,
@@ -492,10 +445,8 @@ class BailingMoE(nn.Module):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.score_function = getattr(config, "score_function", None)
 
-        # Fuse shared experts support
         self.num_fused_shared_experts = num_fused_shared_experts
 
-        # SwiGLU clip limits
         expert_swiglu_limit_list = getattr(config, "expert_swiglu_limit_list", None)
         share_expert_swiglu_limit_list = getattr(
             config, "share_expert_swiglu_limit_list", None
@@ -507,16 +458,14 @@ class BailingMoE(nn.Module):
             share_expert_swiglu_limit_list, layer_id
         )
 
-        # Gate always runs at half / full precision for now.
-        router_dtype = getattr(config, "router_dtype", None)
-        if router_dtype is None:
-            self.router_dtype = torch.float32
-        elif router_dtype == "fp32":
-            self.router_dtype = torch.float32
-        else:
-            self.router_dtype = torch.bfloat16
+        # Run the MoE gate in bf16. ling-v3's config sets router_dtype="fp32",
+        # but on Hopper that fp32 gate GEMM falls back to a slow sm80 (Ampere)
+        # no-tensor-core path (~7% of decode GPU time). bf16 uses Hopper tensor
+        # cores; the top-k selection re-casts gating logits back to fp32
+        # (see layers/moe/topk.py), so routing stays fp32-stable. Validated on
+        # ling-v3 TP4: accuracy-neutral (greedy), ~17% bs=1 TPOT improvement.
+        self.router_dtype = torch.bfloat16
 
-        # check group topk
         self.num_expert_group = getattr(config, "n_group", 0)
         self.topk_group = getattr(config, "topk_group", 0)
         if self.num_expert_group > 0 or self.topk_group > 0:
@@ -547,7 +496,6 @@ class BailingMoE(nn.Module):
                 self.score_function == "sigmoid" and self.correction_bias is not None
             ), "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"
 
-        # Whether A2A MoE (DeepEP, etc.) is enabled
         self._enable_a2a_moe = not get_moe_a2a_backend().is_none()
 
         # Scaling factor for fused shared experts in EP mode.
@@ -586,6 +534,10 @@ class BailingMoE(nn.Module):
             ),
             num_fused_shared_experts=self.num_fused_shared_experts,
             fused_shared_experts_scaling_factor=fused_shared_experts_scaling_factor,
+            is_fp4_experts=(
+                quant_config is not None
+                and getattr(quant_config, "is_fp4_experts", False)
+            ),
         )
 
         # Whether to apply routed_scaling_factor at model layer.
@@ -599,7 +551,6 @@ class BailingMoE(nn.Module):
             and self.routed_scaling_factor != 1.0
         )
 
-        # Only create separate shared_experts when not using fusion
         if self.num_shared_experts > 0 and self.num_fused_shared_experts == 0:
             intermediate_size = getattr(
                 config,
@@ -615,8 +566,6 @@ class BailingMoE(nn.Module):
             if self._enable_a2a_moe:
                 shared_tp_kwargs = dict(tp_rank=0, tp_size=1)
                 shared_tp_size = 1
-            # Compute padded intermediate size for FP8 quantization using the
-            # actual TP degree used by shared_experts.
             padded_intermediate_size = self._compute_padded_intermediate_size(
                 intermediate_size, quant_config, shared_tp_size
             )
@@ -660,12 +609,9 @@ class BailingMoE(nn.Module):
         if quant_config is None:
             return None
 
-        # Only apply padding for FP8 quantization
         if quant_config.get_name() != "fp8":
             return None
 
-        # Get block size from quantization config
-        # FP8 uses block_n for column parallel and block_k for row parallel
         weight_block_size = getattr(quant_config, "weight_block_size", None)
         if weight_block_size is None:
             return None
@@ -674,17 +620,14 @@ class BailingMoE(nn.Module):
         block_k = weight_block_size[1]
         block_size = max(block_n, block_k)
 
-        # Check if padding is needed
         intermediate_size_per_partition = intermediate_size // tp_size
 
-        # Check if already aligned
         if (
             intermediate_size_per_partition % block_n == 0
             and intermediate_size_per_partition % block_k == 0
         ):
             return None
 
-        # Compute padded size: align to block_size * tp_size
         alignment = block_size * tp_size
         padded_intermediate_size = (
             (intermediate_size + alignment - 1) // alignment
@@ -831,13 +774,13 @@ class BailingKDA(KimiDeltaAttention):
     ) -> None:
         kimi_linear_config = KimiLinearConfig(
             linear_attn_config={
-                "head_dim": getattr(config, "head_dim", None),
+                "head_dim": config.head_dim,
                 "num_heads": config.num_attention_heads,
                 "short_conv_kernel_size": config.short_conv_kernel_size,
                 "kda_layers": [],
                 "full_attn_layers": [],
             },
-            v_head_dim=getattr(config, "v_head_dim", None),
+            v_head_dim=config.v_head_dim,
         )
         super().__init__(
             layer_id,
@@ -847,14 +790,18 @@ class BailingKDA(KimiDeltaAttention):
             prefix=prefix,
             rms_norm_eps=1e-6,
             no_kda_lora=config.no_kda_lora,
-            safe_gate=getattr(config, "kda_safe_gate", False),
-            lower_bound=getattr(config, "kda_lower_bound", None),
+            safe_gate=config.kda_safe_gate,
+            lower_bound=config.kda_lower_bound,
             reduce_results=reduce_results,
+            # Ling-V3 shards KDA on the attention-TP group (DP attention) and
+            # carries its own value head dim; upstream Kimi-Linear does neither,
+            # so both are opt-in on KimiDeltaAttention.
+            shard_on_attn_tp=True,
+            v_head_dim=config.v_head_dim,
         )
 
 
 class BailingMoEAttention(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -963,7 +910,6 @@ class BailingMoEAttention(nn.Module):
 
 
 class BailingMoELinearDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -978,9 +924,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
         self.layer_id = layer_id
         self.use_mla = getattr(config, "full_attention_type", "mla") == "mla"
         self.attention_type = config.attention_type
-        # todo nextn
-
-        is_kda = True
         self.config = config
 
         if config.attention_type == 0:  # Linear layer
@@ -1019,7 +962,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     ),
                 )
             else:
-                logger.info(f"==={layer_id=} use gqa")
                 self.attention = BailingMoEAttention(
                     config,
                     quant_config=quant_config,
@@ -1059,7 +1001,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
             )
         else:
             if is_nextn or self.layer_id >= config.first_k_dense_replace:
-                # MoE layer
                 self.mlp = BailingMoE(
                     config,
                     quant_config=quant_config,
@@ -1069,7 +1010,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     alt_stream=alt_stream,
                 )
             else:
-                # dense layer
                 self.mlp = BailingMLP(
                     hidden_size=self.hidden_size,
                     intermediate_size=config.intermediate_size,
@@ -1117,15 +1057,12 @@ class BailingMoELinearDecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Step 1: prepare_attn (dp_scatter + input_layernorm)
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
 
-        # Step 2: attention
         if not forward_batch.forward_mode.is_idle():
             if self.attention_type == 0:
-                # KDA (linear attention) — needs zero_allocator
                 hidden_states = self.attention(
                     hidden_states=hidden_states,
                     positions=positions,
@@ -1133,7 +1070,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     zero_allocator=zero_allocator,
                 )
             elif self.use_mla:
-                # MLA (softmax attention)
                 hidden_states = self.attention(
                     positions=positions,
                     hidden_states=hidden_states,
@@ -1141,19 +1077,16 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     zero_allocator=zero_allocator,
                 )
             else:
-                # GQA fallback
                 hidden_states = self.attention(
                     hidden_states=hidden_states,
                     positions=positions,
                     forward_batch=forward_batch,
                 )
 
-        # Step 3: prepare_mlp (all-reduce attn output + dp_gather + post_attention_layernorm)
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
 
-        # Step 4: MLP
         fuse_mlp_allreduce = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
                 forward_batch
@@ -1177,7 +1110,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
                     forward_batch=forward_batch,
                 )
 
-        # Step 5: postprocess_layer (dp_scatter for next layer)
         if fuse_mlp_allreduce:
             hidden_states._sglang_needs_allreduce_fusion = True
         else:
@@ -1198,7 +1130,6 @@ class BailingMoELinearDecoderLayer(nn.Module):
 
 
 class BailingMoELinearModel(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1277,6 +1208,13 @@ class BailingMoELinearModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.embed_scale = 1.0
+
+        # Hidden-state capture for speculative decoding (DSpark / DFlash / EAGLE3).
+        # When set, ``forward`` appends each captured layer's final
+        # ``hidden_states + residual`` (shape ``[N, hidden_size]``) to an
+        # aux list and returns ``(hidden_states, aux_hidden_states)``.
+        self.layers_to_capture: Optional[List[int]] = None
+        self.capture_aux_hidden_states = False
         return
 
     def forward(
@@ -1306,6 +1244,23 @@ class BailingMoELinearModel(nn.Module):
             device=device,
         )
 
+        # DSpark / DFlash capture relies on the per-layer eager loop exposing the
+        # completed hidden state of each layer, so it is only supported when this
+        # rank owns the final pipeline stage (the aux list is consumed there).
+        # Gate on capture_hidden_mode so plain (non-capturing) prefills / decodes
+        # keep the zero-overhead path and only the dspark target-prefill asks for
+        # aux hidden states.
+        capture_mode = forward_batch.capture_hidden_mode
+        capture_aux = (
+            self.capture_aux_hidden_states
+            and self.pp_group.is_last_rank
+            and self.layers_to_capture is not None
+            and capture_mode is not None
+            and capture_mode.need_capture()
+        )
+        if capture_aux:
+            dspark_aux_hidden_states: List[torch.Tensor] = []
+
         for i in range(self.start_layer, self.end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
@@ -1316,6 +1271,16 @@ class BailingMoELinearModel(nn.Module):
                     residual=residual,
                     zero_allocator=zero_allocator,
                 )
+                if (
+                    capture_aux
+                    and i in self.layers_to_capture
+                    and hidden_states.shape[0] != 0
+                ):
+                    if residual is None:
+                        dspark_aux_hidden_states.append(hidden_states)
+                    else:
+                        dspark_aux_hidden_states.append(hidden_states + residual)
+
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -1326,11 +1291,12 @@ class BailingMoELinearModel(nn.Module):
                     hidden_states = self.norm(hidden_states)
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
+            if capture_aux and len(dspark_aux_hidden_states) > 0:
+                return hidden_states, dspark_aux_hidden_states
             return hidden_states
 
 
 class BailingMoeV3ForCausalLM(nn.Module):
-
     def __init__(
         self,
         *,
@@ -1362,14 +1328,19 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 else ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
-                    params_dtype=torch.float32,
+                    # bf16 lm_head (was fp32): fp32 vocab GEMM uses a slow sm80
+                    # path on Hopper; logits are still cast to fp32 for sampling
+                    # in the logits processor. Accuracy-neutral on ling-v3.
+                    params_dtype=torch.bfloat16,
                     quant_config=quant_config,
-                    use_attn_tp_group=get_parallel().enable_dp_lm_head,
+                    use_attn_tp_group=get_parallel().config.enable_dp_lm_head,
                 )
             )
             self.logits_processor = LogitsProcessor(config)
         else:
             self.lm_head = PPMissingLayer()
+
+        self.capture_aux_hidden_states = False
 
     @property
     def start_layer(self):
@@ -1386,40 +1357,17 @@ class BailingMoeV3ForCausalLM(nn.Module):
         quant_config,
         expected_architecture="BailingMoeV3ForCausalLM",
     ):
-        """Return why shared-expert fusion cannot be used, or ``None``.
-
-        The loader evaluates this gate once for each runner before model
-        construction.  Keep it independent of a model instance so the result
-        can be installed in the runner's runtime context before any MoE layer
-        is created.
-        """
         num_shared_experts = getattr(hf_config, "num_shared_experts", 0)
-
-        # Only enable fusion if there are shared experts.
         if num_shared_experts == 0:
             return None
-
-        # Fused shared experts adds an extra expert ID.  A2A backends cannot
-        # route that extra ID correctly (and often require a divisible expert
-        # count), so fusion is incompatible with them.
         if not get_moe_a2a_backend().is_none():
             return (
                 "A2A MoE backend (e.g., DeepEP) is enabled. Fused shared experts is "
                 "incompatible with A2A backends because the extra shared expert ID cannot "
                 "be correctly routed."
             )
-
         if hf_config.architectures[0] != expected_architecture:
             return "Config does not support fused shared expert(s)."
-
-        # The fused runner carries one scalar clamp per layer, so routed and
-        # shared experts must have identical normalized per-layer limits.
-        if not BailingMoE._swiglu_limits_match_for_fusion(hf_config):
-            return (
-                "Routed and shared experts use different per-layer SwiGLU clamp "
-                "limits, but fused shared experts support only one clamp per layer."
-            )
-
         if (not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0)) and (
             not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)
         ):
@@ -1427,13 +1375,36 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 "Only Bailing MoE V3 on NV-platform with capability >= 80 "
                 "or AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization."
             )
+        if quant_config and (
+            quant_config.get_name() == "w4afp8"
+            or getattr(quant_config, "is_fp4_experts", False)
+        ):
+            return (
+                "Bailing MoE V3 uses different quant methods for routed experts "
+                "and shared experts."
+            )
+        if quant_config and quant_config.get_name() == "compressed_tensors":
+            from sglang.srt.layers.quantization.compressed_tensors.utils import (
+                should_ignore_layer,
+            )
 
-        if quant_config and quant_config.get_name() == "w4afp8":
-            return "Bailing MoE V3 W4AFP8 model uses different quant method for routed experts and shared experts."
-
-        # Fusion requires shared and routed experts to have the same
-        # intermediate size.  The default config value is routed size times
-        # the number of shared experts, which is not fusion-compatible.
+            ignore = getattr(quant_config, "ignore", ())
+            fused_mapping = getattr(quant_config, "packed_modules_mapping", {})
+            shared_ignored = should_ignore_layer(
+                "model.layers.0.mlp.shared_experts.gate_proj",
+                ignore=ignore,
+                fused_mapping=fused_mapping,
+            )
+            routed_ignored = should_ignore_layer(
+                "model.layers.0.mlp.experts.0.gate_proj",
+                ignore=ignore,
+                fused_mapping=fused_mapping,
+            )
+            if shared_ignored != routed_ignored:
+                return (
+                    "Bailing MoE V3 uses different quant methods for routed experts "
+                    "and shared experts."
+                )
         shared_expert_intermediate_size = getattr(
             hf_config,
             "moe_shared_expert_intermediate_size",
@@ -1444,16 +1415,12 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 f"Shared experts have different intermediate_size ({shared_expert_intermediate_size}) "
                 f"from routed experts ({hf_config.moe_intermediate_size}). Fusion requires them to be equal."
             )
-
-        # FusedMoE has no padding path for FP8 blockwise quantization.  Account
-        # for EP when checking the per-partition intermediate size.
         if quant_config and quant_config.get_name() == "fp8":
             weight_block_size = getattr(quant_config, "weight_block_size", None)
             if weight_block_size is not None:
                 block_n, block_k = weight_block_size
-                parallel = get_parallel()
-                tp_size = parallel.tp_size
-                moe_ep_size = parallel.moe_ep_size
+                tp_size = get_parallel().tp_size
+                moe_ep_size = get_parallel().moe_ep_size
                 moe_tp_size = tp_size // moe_ep_size if moe_ep_size > 1 else tp_size
                 intermediate_size_per_partition = (
                     hf_config.moe_intermediate_size // moe_tp_size
@@ -1470,15 +1437,13 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         f"tp_size={tp_size}, moe_tp_size={moe_tp_size}. Consider using "
                         "--disable-shared-experts-fusion to use padding solution instead."
                     )
-
         return None
 
     def determine_num_fused_shared_experts(self):
-        # The loader installs the runner-specific decision; construction only
-        # reads it and bakes the result into the MoE layers.
-        num_shared_experts = getattr(self.config, "num_shared_experts", 0)
         self.num_fused_shared_experts = (
-            0 if is_shared_experts_fusion_disabled() else num_shared_experts
+            0
+            if is_shared_experts_fusion_disabled()
+            else getattr(self.config, "num_shared_experts", 0)
         )
         if self.num_fused_shared_experts == 0:
             return
@@ -1494,7 +1459,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 f"one fused shared expert. AMD platform with aiter supports multiple shared experts."
             )
 
-        # Log EP mode info
         moe_ep_size = get_parallel().moe_ep_size
         if moe_ep_size > 1:
             log_info_on_rank0(
@@ -1509,7 +1473,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
             )
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
-        # Perform post-processing after loading weights
         if is_nextn:
             layer_ids = [self.config.num_hidden_layers]
         else:
@@ -1525,8 +1488,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
                             and layer_id >= self.model.start_layer
                         ):
                             layer_ids.add(layer_id)
-        logger.info(f"=====layer_ids {layer_ids}")
-
         for layer_id in layer_ids:
             self_attn = (
                 self.model.layers[layer_id].attention
@@ -1536,7 +1497,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
             if not hasattr(self_attn, "kv_b_proj"):
                 continue
             if hasattr(self_attn.kv_b_proj, "qweight"):
-                # AWQ compatible
                 if _is_cuda or _is_hip:
                     w = awq_dequantize(
                         self_attn.kv_b_proj.qweight,
@@ -1587,7 +1547,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
                         if (
                             deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
                             and not deep_gemm_wrapper.DEEPGEMM_BLACKWELL
-                            and get_bool_env_var("SGL_USE_DEEPGEMM_BMM", "false")
+                            and envs.SGLANG_USE_DEEPGEMM_BMM.get()
                         ):
                             block_scale = weight_scale
                             use_deep_gemm_bmm = True
@@ -1619,7 +1579,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
             if w.dtype == torch.int8:
                 if hasattr(self.quant_config, "weight_block_size"):
-                    # block-wise int8 need it
                     weight_block_size = self.quant_config.weight_block_size
                     if weight_block_size is not None:
                         assert hasattr(self_attn.kv_b_proj, "weight_scale_inv")
@@ -1629,7 +1588,6 @@ class BailingMoeV3ForCausalLM(nn.Module):
                             weight, weight_scale, weight_block_size
                         ).to(torch.bfloat16)
                 else:
-                    # channel-wise int8 need it
                     w = w.to(torch.bfloat16) * self_attn.kv_b_proj.weight_scale.to(
                         torch.bfloat16
                     )
@@ -1679,81 +1637,37 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 self_attn.w_vc = bind_or_assign(self_attn.w_vc, w_vc.contiguous())
                 self_attn.use_deep_gemm_bmm = True
 
-        if (
-            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-            and deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
-            and hasattr(self.quant_config, "weight_block_size")
-            and self.quant_config.weight_block_size is not None
-        ):
-            self._weight_requant_ue8m0(is_nextn)
-
-    def _weight_requant_ue8m0(self, is_nextn=False):
-        weight_block_size = self.quant_config.weight_block_size
-
-        moe_layers = list(
-            range(
-                self.config.first_k_dense_replace,
-                self.config.num_hidden_layers,
-                self.config.moe_layer_freq,
-            )
-        )
-
-        num_hidden_layers = 1 if is_nextn else self.config.num_hidden_layers
-
-        for layer_id in range(num_hidden_layers):
-            if is_nextn:
-                layer = self.model.decoder
-            else:
-                layer = self.model.layers[layer_id]
-
-            module_list = [
-                layer.self_attn.kv_b_proj,
-                layer.self_attn.o_proj,
-            ]
-
-            if self.config.q_lora_rank is not None:
-                module_list.append(layer.self_attn.fused_qkv_a_proj_with_mqa)
-                module_list.append(layer.self_attn.q_b_proj)
-            else:
-                module_list.append(layer.self_attn.kv_a_proj_with_mqa)
-                module_list.append(layer.self_attn.q_proj)
-
-            for module in module_list:
-                requant_weight_ue8m0_inplace(
-                    module.weight, module.weight_scale_inv, weight_block_size
-                )
-
-            if layer_id in moe_layers or is_nextn:
-                shared_experts = getattr(layer.mlp, "shared_experts", None)
-                if shared_experts is not None:
-                    for module in [
-                        shared_experts.gate_up_proj,
-                        shared_experts.down_proj,
-                    ]:
-                        requant_weight_ue8m0_inplace(
-                            module.weight, module.weight_scale_inv, weight_block_size
-                        )
-
-                experts = layer.mlp.experts
-                if isinstance(experts, DeepEPMoE):
-                    for w in [
-                        experts.w13_weight_fp8,
-                        experts.w2_weight_fp8,
-                    ]:
-                        requant_weight_ue8m0_inplace(w[0], w[1], weight_block_size)
-            else:
-                mlp = layer.mlp
-                assert isinstance(mlp, DeepseekV2MLP)
-                for module in [
-                    mlp.gate_up_proj,
-                    mlp.down_proj,
-                ]:
-                    requant_weight_ue8m0_inplace(
-                        module.weight, module.weight_scale_inv, weight_block_size
-                    )
+        # NOTE: no model-level ue8m0 requant here. Fp8LinearMethod /
+        # Fp8MoEMethod .process_weights_after_loading requant every
+        # block-fp8 weight for DeepGEMM (with the format_ue8m0 reentry
+        # guard); a second model-level pass double-packs the scales and
+        # crashes, which is why deepseek_v2 dropped its copy too.
 
     def get_decoder_attention_types(self):
         return self.model.decoder_attention_types
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.model.word_embeddings
+
+    def set_dspark_layers_to_capture(self, layer_ids: List[int]) -> None:
+        """Configure per-layer hidden-state capture for DSpark.
+
+        The target model exposes the final ``hidden_states + residual`` of each
+        requested layer so the DSpark draft can project them into its context KV
+        cache. ``layer_ids`` are raw target decoder layer indices (e.g.
+        ``[1, 11, 23, 29, 35]``); capture happens after layer ``i`` runs, so no
+        ``+1`` offset is applied (in contrast to the DFlash convention used by
+        models that capture before the layer runs).
+        """
+        if not self.pp_group.is_last_rank:
+            return
+        if layer_ids is None:
+            raise ValueError(
+                "DSPARK requires explicit layer_ids for aux hidden capture."
+            )
+        self.capture_aux_hidden_states = True
+        self.model.capture_aux_hidden_states = True
+        self.model.layers_to_capture = list(layer_ids)
 
     def forward(
         self,
@@ -1771,8 +1685,17 @@ class BailingMoeV3ForCausalLM(nn.Module):
             pp_proxy_tensors=pp_proxy_tensors,
         )
         if self.pp_group.is_last_rank:
+            aux_hidden_states = None
+            if self.capture_aux_hidden_states and isinstance(hidden_states, tuple):
+                hidden_states, aux_hidden_states = hidden_states
             return self.logits_processor(
-                input_ids, hidden_states.float(), self.lm_head, forward_batch
+                input_ids,
+                # keep hidden_states in bf16 so the lm_head matmul runs in bf16
+                # (logits are cast to fp32 inside the logits processor)
+                hidden_states,
+                self.lm_head,
+                forward_batch,
+                aux_hidden_states=aux_hidden_states,
             )
         else:
             return hidden_states
@@ -1803,26 +1726,21 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 return
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", self.weight_direct_load)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
             if "A_log" in name:
-                # Temporary use this way
-                # As our A_log param's shape is different from kimi's
+                # A_log param shape differs from Kimi's
                 loaded_weight = loaded_weight[None, None, :, None]
             weight_loader(param, loaded_weight)
             return
 
         stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            # no_kda_lora
             (".fused_qkvbfg_proj", ".q_proj", 0),
             (".fused_qkvbfg_proj", ".k_proj", 1),
             (".fused_qkvbfg_proj", ".v_proj", 2),
             (".fused_qkvbfg_proj", ".b_proj", 3),
             (".fused_qkvbfg_proj", ".f_proj", 3),
             (".fused_qkvbfg_proj", ".g_proj", 4),
-            # Fused path
             (".fused_qkvbfg_a_proj", ".q_proj", 0),
             (".fused_qkvbfg_a_proj", ".k_proj", 1),
             (".fused_qkvbfg_a_proj", ".v_proj", 2),
@@ -1831,11 +1749,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             (".fused_qkvbfg_a_proj", ".g_a_proj", 5),
             (".fused_fg_b_proj", ".f_b_proj", 0),
             (".fused_fg_b_proj", ".g_b_proj", 1),
-            # Unfused path: separate qkv_proj (when do_fuse_qkvbfg=False)
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            # qkv conv fuse
             (".qkv_conv1d", ".q_conv1d", 0),
             (".qkv_conv1d", ".k_conv1d", 1),
             (".qkv_conv1d", ".v_conv1d", 2),
@@ -1863,199 +1779,178 @@ class BailingMoeV3ForCausalLM(nn.Module):
             log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
 
         for name, loaded_weight in weights:
-            try:
-                found = False
-                name0 = name
-                if name.startswith("model.mtp"):
+            if name.startswith("model.mtp"):
+                continue
+            layer_idx = None
+            if "model.layers." in name:
+                layer_idx = int(name.split(".")[2])
+                if not is_nextn and layer_idx >= self.config.num_hidden_layers:
                     continue
-                layer_idx = None
-                if "model.layers." in name:
-                    layer_idx = int(name.split(".")[2])
-                    if not is_nextn and layer_idx >= self.config.num_hidden_layers:
-                        continue
-                if (
-                    ("v_head" in name)
-                    or ("inv_freq" in name)
-                    or (self.config.tie_word_embeddings and "lm_head" in name)
-                ):
+            if (
+                ("v_head" in name)
+                or ("inv_freq" in name)
+                or (self.config.tie_word_embeddings and "lm_head" in name)
+            ):
+                continue
+
+            if is_nextn:
+                if not name.startswith(nextn_layer_prefix):
                     continue
+                rewritten = rewrite_nextn_weight_name(name, nextn_layer_prefix)
+                if rewritten is None:
+                    continue
+                name = rewritten
+                layer_idx = 0
 
-                if is_nextn:
-                    if not name.startswith(nextn_layer_prefix):
-                        continue
-                    rewritten = rewrite_nextn_weight_name(name, nextn_layer_prefix)
-                    if rewritten is None:
-                        continue
-                    name = rewritten
-                    layer_idx = 0
+            if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
+                name = name.replace(
+                    "mlp.shared_experts",
+                    f"mlp.experts.{self.config.num_experts}",
+                )
 
-                # Redirect shared_experts weights to FusedMoE when fusion is enabled
-                if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
-                    name = name.replace(
-                        "mlp.shared_experts",
-                        f"mlp.experts.{self.config.num_experts}",
+            weight_names.append(name)
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                if "mlp.experts" in name:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                if param_name in {
+                    ".fused_qkvbfg_a_proj",
+                    ".fused_fg_b_proj",
+                    ".fused_qkvbfg_proj",
+                }:
+                    layer = (
+                        self.model.decoder
+                        if is_nextn
+                        else self.model.layers[int(name.split(".")[2])]
                     )
+                    if is_pp_missing_parameter(name, layer):
+                        continue
+                    layer_attn = layer.attention
+                    if not getattr(layer_attn, "do_fuse_qkvbfg", False):
+                        continue
+                    if param_name == ".fused_qkvbfg_proj":
+                        if not getattr(layer_attn, "no_kda_lora", False):
+                            continue
+                        if weight_name == ".b_proj" and not getattr(
+                            layer_attn, "fuse_no_lora_beta", False
+                        ):
+                            continue
+                        if weight_name in {".f_proj", ".g_proj"} and getattr(
+                            layer_attn, "fuse_no_lora_beta", False
+                        ):
+                            shard_id += 1
+                    elif getattr(layer_attn, "no_kda_lora", False):
+                        continue
 
-                weight_names.append(name)
+                new_name = name.replace(weight_name, param_name)
+                if new_name not in params_dict:
+                    continue
 
-                for param_name, weight_name, shard_id in stacked_params_mapping:
+                param = params_dict[new_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    if "mlp.experts" in name:
+                    name = name.replace(weight_name, param_name)
+
+                    if name not in params_dict:
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Check if this mapping targets a fused projection (only apply fusion check to fused params)
-                    if param_name in {
-                        ".fused_qkvbfg_a_proj",
-                        ".fused_fg_b_proj",
-                        ".fused_qkvbfg_proj",
-                    }:
-                        layer = (
-                            self.model.decoder
-                            if is_nextn
-                            else self.model.layers[int(name.split(".")[2])]
-                        )
-                        if is_pp_missing_parameter(name, layer):
-                            continue
-                        layer_attn = layer.attention
-                        # Only load to fused projection if fusion is enabled
-                        if not getattr(layer_attn, "do_fuse_qkvbfg", False):
-                            continue
-                        if param_name == ".fused_qkvbfg_proj":
-                            if not getattr(layer_attn, "no_kda_lora", False):
-                                continue
-                            if weight_name == ".b_proj" and not getattr(
-                                layer_attn, "fuse_no_lora_beta", False
-                            ):
-                                continue
-                            if weight_name in {".f_proj", ".g_proj"} and getattr(
-                                layer_attn, "fuse_no_lora_beta", False
-                            ):
-                                shard_id += 1
-                        elif getattr(layer_attn, "no_kda_lora", False):
-                            continue
-
-                    new_name = name.replace(weight_name, param_name)
-                    if new_name not in params_dict:
-                        continue
-
-                    param = params_dict[new_name]
+                    param = params_dict[name]
                     weight_loader = param.weight_loader
-                    found = True
-                    weight_loader(param, loaded_weight, shard_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
-                    for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
-                        if weight_name not in name:
-                            continue
-                        name = name.replace(weight_name, param_name)
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if "slope" in name:
+                        continue
 
-                        if name not in params_dict:
-                            continue
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        found = True
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            name,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                    if fuse_qkv_a_proj and (
+                        "q_a_proj" in name or "kv_a_proj_with_mqa" in name
+                    ):
+                        cached_a_proj[name] = loaded_weight
+                        q_a_proj_name = (
+                            name
+                            if "q_a_proj" in name
+                            else name.replace("kv_a_proj_with_mqa", "q_a_proj")
                         )
-                        break
-                    else:
+                        kv_a_proj_name = (
+                            name
+                            if "kv_a_proj_with_mqa" in name
+                            else name.replace("q_a_proj", "kv_a_proj_with_mqa")
+                        )
 
-                        if name.endswith(".bias") and name not in params_dict:
-                            continue
-                        if "slope" in name:
-                            continue
-
-                        if fuse_qkv_a_proj and (
-                            "q_a_proj" in name or "kv_a_proj_with_mqa" in name
+                        if (
+                            q_a_proj_name in cached_a_proj
+                            and kv_a_proj_name in cached_a_proj
                         ):
-                            found = True
-                            cached_a_proj[name] = loaded_weight
-                            q_a_proj_name = (
-                                name
+                            q_a_proj_weight = cached_a_proj[q_a_proj_name]
+                            kv_a_proj_weight = cached_a_proj[kv_a_proj_name]
+                            cat_dim = 0
+                            if self.quant_config is not None and (
+                                self.quant_config.get_name() == "awq"
+                                or self.quant_config.get_name() == "awq_marlin"
+                                or self.quant_config.get_name() == "moe_wna16"
+                            ):
+                                cat_dim = 1
+                            fused_weight = torch.cat(
+                                [q_a_proj_weight, kv_a_proj_weight], dim=cat_dim
+                            )
+                            param_name = (
+                                name.replace("q_a_proj", "fused_qkv_a_proj_with_mqa")
                                 if "q_a_proj" in name
-                                else name.replace("kv_a_proj_with_mqa", "q_a_proj")
+                                else name.replace(
+                                    "kv_a_proj_with_mqa",
+                                    "fused_qkv_a_proj_with_mqa",
+                                )
                             )
-                            kv_a_proj_name = (
-                                name
-                                if "kv_a_proj_with_mqa" in name
-                                else name.replace("q_a_proj", "kv_a_proj_with_mqa")
-                            )
-
-                            # When both q_a_proj and kv_a_proj_with_mqa has been cached, load the fused weight to parameter
-                            if (
-                                q_a_proj_name in cached_a_proj
-                                and kv_a_proj_name in cached_a_proj
-                            ):
-                                q_a_proj_weight = cached_a_proj[q_a_proj_name]
-                                kv_a_proj_weight = cached_a_proj[kv_a_proj_name]
-                                cat_dim = 0
-                                if self.quant_config is not None and (
-                                    self.quant_config.get_name() == "awq"
-                                    or self.quant_config.get_name() == "awq_marlin"
-                                    or self.quant_config.get_name() == "moe_wna16"
-                                ):
-                                    cat_dim = 1
-                                fused_weight = torch.cat(
-                                    [q_a_proj_weight, kv_a_proj_weight], dim=cat_dim
-                                )
-                                param_name = (
-                                    name.replace(
-                                        "q_a_proj", "fused_qkv_a_proj_with_mqa"
-                                    )
-                                    if "q_a_proj" in name
-                                    else name.replace(
-                                        "kv_a_proj_with_mqa",
-                                        "fused_qkv_a_proj_with_mqa",
-                                    )
-                                )
-                                if param_name not in params_dict:
-                                    continue
-                                param = params_dict[param_name]
-                                weight_loader = getattr(
-                                    param, "weight_loader", default_weight_loader
-                                )
-
-                                weight_loader(param, fused_weight)
-                                cached_a_proj.pop(q_a_proj_name)
-                                cached_a_proj.pop(kv_a_proj_name)
-                        else:
-                            if name not in params_dict:
-                                name = name.replace(".dense.", ".o_proj.")
-                                if name not in params_dict:
-                                    continue
-                            if is_pp_missing_parameter(name, self):
+                            if param_name not in params_dict:
                                 continue
-                            if (
-                                "attention" in name
-                                and "slope" not in name
-                                and is_linear_layer(
-                                    layer_idx, self.model.layer_group_size
-                                )
-                            ):
-                                load_linear_attn_weight(name, loaded_weight, self)
-                                loaded_params.add(name)
-                                found = True
-                                continue
-
-                            param = params_dict[name]
-                            found = True
+                            param = params_dict[param_name]
                             weight_loader = getattr(
                                 param, "weight_loader", default_weight_loader
                             )
-                            weight_loader(param, loaded_weight)
-            finally:
-                if not found:
-                    # print(f"fail load: {name0}")
-                    pass
+
+                            weight_loader(param, fused_weight)
+                            cached_a_proj.pop(q_a_proj_name)
+                            cached_a_proj.pop(kv_a_proj_name)
+                    else:
+                        if name not in params_dict:
+                            name = name.replace(".dense.", ".o_proj.")
+                            if name not in params_dict:
+                                continue
+                        if is_pp_missing_parameter(name, self):
+                            continue
+                        if (
+                            "attention" in name
+                            and "slope" not in name
+                            and is_linear_layer(layer_idx, self.model.layer_group_size)
+                        ):
+                            load_linear_attn_weight(name, loaded_weight, self)
+                            loaded_params.add(name)
+                            continue
+
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
             loaded_params.add(name)
         self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
 

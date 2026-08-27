@@ -157,7 +157,7 @@ class DeepseekMLACpuForwardMixin:
         )
         attn_output = output
         if gate is not None:
-            self._apply_gated(attn_output, gate)
+            attn_output = self._apply_gated(attn_output, gate)
         output, _ = self.o_proj(attn_output)
 
         return output
