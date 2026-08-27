@@ -100,7 +100,7 @@ def _maybe_pin_memory(tensor):
     return tensor.pin_memory()
 
 
-def _translate_decode_errors(fn):
+def _handle_decode_exceptions(fn):
     """Surface frame-decode failures as ValueError.
 
     Frame extraction runs lazily in the processors, outside load_video's
@@ -178,7 +178,7 @@ class VideoDecoderWrapper:
     def __len__(self):
         return len(self._decoder)
 
-    @_translate_decode_errors
+    @_handle_decode_exceptions
     def __getitem__(self, idx):
         """Return single frame as numpy NHWC uint8."""
         if _BACKEND == "torchcodec":
@@ -195,7 +195,7 @@ class VideoDecoderWrapper:
         else:
             return float(self._decoder.get_avg_fps())
 
-    @_translate_decode_errors
+    @_handle_decode_exceptions
     def get_frames_at(self, indices: list) -> np.ndarray:
         """Return frames at given indices as numpy array with shape (N, H, W, C)."""
         idx = _as_int_indices(indices)
@@ -232,7 +232,7 @@ class VideoDecoderWrapper:
     def get_batch(self, indices) -> "_FrameBatch":
         return _FrameBatch(self.get_frames_at(indices))
 
-    @_translate_decode_errors
+    @_handle_decode_exceptions
     def get_frames_as_tensor(self, indices: list):
         """Return frames at given indices as a torch tensor (NHWC, uint8).
 
