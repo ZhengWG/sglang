@@ -488,13 +488,15 @@ class DSparkV4MarkovHead(nn.Module):
         first_prev_tokens: torch.Tensor,
         hidden_states: Optional[torch.Tensor],
         sampler: StepSampler,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        collect_corrected: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         return run_markov_block(
             self,
             base_logits,
             first_prev_tokens=first_prev_tokens,
             hidden_states=hidden_states,
             sampler=sampler,
+            collect_corrected=collect_corrected,
         )
 
 
@@ -660,12 +662,6 @@ class DeepseekV4ForCausalLMDSpark(nn.Module):
                 "shared experts into fused expert slots."
             )
 
-        return DeepseekV4ForCausalLM.shared_experts_fusion_disable_reason(
-            hf_config, quant_config
-        )
-
-    @classmethod
-    def shared_experts_fusion_disable_reason(cls, hf_config, quant_config):
         return DeepseekV4ForCausalLM.shared_experts_fusion_disable_reason(
             hf_config, quant_config
         )

@@ -44,17 +44,11 @@ class KDAKernelDispatcher:
         self,
         decode_backend: LinearAttnKernelBackend,
         prefill_backend: LinearAttnKernelBackend,
-        verify_backend: Optional[LinearAttnKernelBackend] = None,
-        lower_bound: Optional[float] = None,
+        verify_backend: LinearAttnKernelBackend,
     ):
-        if verify_backend is None:
-            verify_backend = (
-                decode_backend
-                if decode_backend.is_flashinfer()
-                else LinearAttnKernelBackend.TRITON
-            )
         self.verify_backend = verify_backend
         triton_kernel = TritonKDAKernel()
+        self.triton_kernel = triton_kernel
         helion_kernel = None
         if decode_backend.is_helion() or prefill_backend.is_helion():
             if not is_cuda():
@@ -68,17 +62,6 @@ class KDAKernelDispatcher:
                 enable_decode=decode_backend.is_helion(),
                 enable_prefill=prefill_backend.is_helion(),
             )
-
-        # CuTe DSL recurrent KDA only implements the standard softplus gate.
-        # The model-level lower_bound is known when the backend is initialized,
-        # so resolve this incompatibility once instead of falling back on every
-        # decode call. CuTe DSL prefill remains independently selectable.
-        if decode_backend.is_cutedsl() and lower_bound is not None:
-            rank0_log(
-                "KDA cutedsl decode does not support bounded safe gate; "
-                "using Triton decode."
-            )
-            decode_backend = LinearAttnKernelBackend.TRITON
 
         if decode_backend.is_triton():
             self.decode_kernel = triton_kernel
@@ -154,12 +137,6 @@ class KDAKernelDispatcher:
             )
 
             self.extend_kernel = FlashKDAKernel()
-        elif prefill_backend.is_cula():
-            from sglang.srt.layers.attention.linear.kernels.kda_cula import (
-                CulaKDAKernel,
-            )
-
-            self.extend_kernel = CulaKDAKernel()
         elif prefill_backend.is_cutedsl():
             if not is_cuda():
                 raise ValueError("KDA CuTe DSL backend requires CUDA")
@@ -210,7 +187,7 @@ class KDAKernelDispatcher:
         else:
             raise ValueError(
                 f"Unsupported KDA prefill backend: {prefill_backend}. "
-                "KDA supports 'triton', 'helion', 'flashkda', 'cula', 'cutedsl', "
+                "KDA supports 'triton', 'helion', 'flashkda', 'cutedsl', "
                 "'nvidia_kda', or 'ptx_kda' (cutedsl/nvidia_kda prefill need "
                 "SM100, ptx_kda SM103)."
             )
@@ -274,7 +251,12 @@ class KDAKernelDispatcher:
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        return self.decode_kernel.decode(
+        kernel = self.decode_kernel
+        if kwargs.get("lower_bound") is not None and not getattr(
+            kernel, "supports_safe_gate", True
+        ):
+            kernel = self.triton_kernel
+        return kernel.decode(
             q,
             k,
             v,
@@ -343,8 +325,13 @@ class KDAKernelDispatcher:
         cache_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         **kwargs,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        return self.extend_kernel.extend(
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        kernel = self.extend_kernel
+        if kwargs.get("lower_bound") is not None and not getattr(
+            kernel, "supports_safe_gate", True
+        ):
+            kernel = self.triton_kernel
+        return kernel.extend(
             q,
             k,
             v,
@@ -418,21 +405,20 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 "KDA FlashInfer speculative decoding only supports topk=1 "
                 "(EAGLE tree verify / retrieve_parent_token is unsupported)."
             )
-        config = model_runner.model_config.hf_config
-        lower_bound = getattr(config, "kda_lower_bound", None)
         self.kernel_dispatcher = KDAKernelDispatcher(
-            decode_backend,
-            prefill_backend,
-            verify_backend,
-            lower_bound=lower_bound,
+            decode_backend, prefill_backend, verify_backend
         )
-        # Fused conv1d + gating-delta-rule chain-verify (MTP topk==1) fast
-        # path. Opt-in and KDA-only: no shared conv/GDN kernel is modified,
-        # and every unsupported case (tree, width != 4, T < 3) falls through
-        # to the reference two-kernel path below.
+        # One-shot; emitted at the first fused-decode interception below.
+        self._fused_override_notice = (
+            "K3 fused KDA decode engaged: --linear-attn-decode-backend "
+            f"{decode_backend} only picks the fallback kernel for shapes "
+            "the fused kernel does not cover."
+        )
         self._fused_chain_verify_fn = None
-        if envs.SGLANG_OPT_FUSED_KDA_VERIFY.get() and getattr(
-            self.kernel_dispatcher.verify_kernel, "supports_fused_chain_verify", False
+        if (
+            envs.SGLANG_OPT_FUSED_KDA_VERIFY.get()
+            and verify_backend.is_triton()
+            and self.kernel_dispatcher.verify_kernel.supports_fused_chain_verify
         ):
             from sglang.kernels.ops.attention.fla.fused_kda_conv_recurrent_verify import (
                 fused_kda_conv_gating_verify,
@@ -440,12 +426,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
             self._fused_chain_verify_fn = fused_kda_conv_gating_verify
             rank0_log("KDA fused chain-verify kernel enabled (topk==1 path).")
-        # One-shot; emitted at the first fused-decode interception below.
-        self._fused_override_notice = (
-            "K3 fused KDA decode engaged: --linear-attn-decode-backend "
-            f"{decode_backend} only picks the fallback kernel for shapes "
-            "the fused kernel does not cover."
-        )
         # Per-request row index into the speculative `intermediate_ssm` scratch,
         # used by the MTP / target_verify path (mirrors GDNAttnBackend). Sized
         # past the pool for attn_tp-padded warmup/MLP-sync batches (see helper).
@@ -462,12 +442,11 @@ class KDAAttnBackend(MambaAttnBackendBase):
             self.forward_metadata.mamba_track_mask_indices = (
                 forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
             )
-            if not forward_batch.forward_mode.is_target_verify():
-                self.forward_metadata.conv_states_mask_indices = (
-                    forward_batch.mamba_track_indices[
-                        self.forward_metadata.mamba_track_mask_indices
-                    ]
-                )
+            self.forward_metadata.conv_states_mask_indices = (
+                forward_batch.mamba_track_indices[
+                    self.forward_metadata.mamba_track_mask_indices
+                ]
+            )
 
     def forward_decode(
         self,
@@ -576,8 +555,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
             conv_state_indices=cache_indices,
         )
 
-        lower_bound = kwargs.get("lower_bound", getattr(layer, "lower_bound", None))
-
         # The packed kernel assumes one token per request. Assert the dispatch
         # invariant before taking the fused path.
         if self.kernel_dispatcher.supports_packed_decode:
@@ -591,12 +568,12 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 b=b,
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
-                lower_bound=lower_bound,
                 scale=layer.head_k_dim**-0.5,
                 ssm_states=ssm_states,
                 cache_indices=cache_indices,
                 num_v_heads=layer.num_v_heads,
                 head_v_dim=layer.head_v_dim,
+                lower_bound=layer.lower_bound,
                 replayssm_d=replayssm_d,
                 replayssm_k=replayssm_k,
                 replayssm_g=replayssm_g,
@@ -624,7 +601,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
-            lower_bound=lower_bound,
+            lower_bound=layer.lower_bound,
         )
 
         self._track_mamba_state_decode(
@@ -832,6 +809,58 @@ class KDAAttnBackend(MambaAttnBackendBase):
             )
         if ragged_layout is None:
             batch_size = seq_len // draft_token_num
+            conv_state_indices = cache_indices[:batch_size]
+            # Fused chain-verify fast path: one kernel replaces the transpose-copy +
+            # conv1d + transpose-copy + recurrence sequence. Chain (topk==1) only --
+            # retrieve_* are None there; the tree path and any unsupported shape keep
+            # the reference kernels.
+            if self._can_run_fused_chain_verify(
+                layer=layer,
+                mixed_qkv=mixed_qkv,
+                a=a,
+                b=b,
+                draft_token_num=draft_token_num,
+                conv_states=conv_states,
+                ssm_states=ssm_states,
+                intermediate_state_cache=intermediate_state_cache,
+                intermediate_conv_window_cache=intermediate_conv_window_cache,
+                cache_indices=conv_state_indices,
+                intermediate_state_indices=intermediate_state_indices[:batch_size],
+                retrieve_next_token=retrieve_next_token,
+                retrieve_next_sibling=retrieve_next_sibling,
+                retrieve_parent_token=retrieve_parent_token,
+                replayssm_rawv=replayssm_rawv,
+            ):
+                return self._fused_chain_verify_fn(
+                    mixed_qkv=mixed_qkv,
+                    conv_weight=layer.conv_weights,
+                    conv_bias=layer.bias,
+                    # Same [.., dim, width] view the reference causal_conv1d_update
+                    # call below takes: upstream stores the persistent conv state
+                    # width-major, and the kernel asserts the dim axis is
+                    # contiguous. (intermediate_conv_window is transposed on both
+                    # the fork and upstream, so it needs no extra adjustment.)
+                    conv_state=conv_states.transpose(-1, -2),
+                    conv_state_indices=conv_state_indices,
+                    intermediate_conv_window=(
+                        intermediate_conv_window_cache.transpose(-1, -2)
+                    ),
+                    intermediate_state_indices=intermediate_state_indices[:batch_size],
+                    a=a,
+                    b=b,
+                    A_log=layer.A_log,
+                    dt_bias=layer.dt_bias,
+                    ssm_states=ssm_states,
+                    cache_indices=conv_state_indices,
+                    intermediate_states_buffer=intermediate_state_cache,
+                    scale=layer.head_k_dim**-0.5,
+                    T=draft_token_num,
+                    num_q_heads=layer.num_q_heads,
+                    num_v_heads=layer.num_v_heads,
+                    head_k_dim=layer.head_k_dim,
+                    head_v_dim=layer.head_v_dim,
+                    lower_bound=layer.lower_bound,
+                )
             dense_token_indices = None
             mixed_qkv_dense = mixed_qkv.view(batch_size, draft_token_num, -1)
         else:
@@ -853,47 +882,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
             dense.index_copy_(0, dense_token_indices, mixed_qkv)
             mixed_qkv_dense = dense[:num_dense_tokens].view(
                 batch_size, draft_token_num, -1
-            )
-
-        # Fused chain-verify fast path: one kernel replaces the transpose-copy,
-        # conv1d, transpose-copy, and recurrent-update sequence. Tree verify and
-        # unsupported shapes keep the upstream reference path below.
-        if (
-            self._fused_chain_verify_fn is not None
-            and ragged_layout is None
-            and intermediate_state_cache is not None
-            and retrieve_next_token is None
-            and retrieve_next_sibling is None
-            and retrieve_parent_token is None
-            and isinstance(mixed_qkv, torch.Tensor)
-            and layer.conv_weights.shape[-1] == 4
-            and draft_token_num >= 3
-        ):
-            verify_indices = cache_indices[:batch_size]
-            return self._fused_chain_verify_fn(
-                mixed_qkv=mixed_qkv,
-                conv_weight=layer.conv_weights,
-                conv_bias=layer.bias,
-                conv_state=conv_states.transpose(-1, -2),
-                conv_state_indices=verify_indices,
-                intermediate_conv_window=(
-                    intermediate_conv_window_cache.transpose(-1, -2)
-                ),
-                intermediate_state_indices=intermediate_state_indices[:batch_size],
-                a=a,
-                b=b,
-                A_log=layer.A_log,
-                dt_bias=layer.dt_bias,
-                ssm_states=ssm_states,
-                cache_indices=verify_indices,
-                intermediate_states_buffer=intermediate_state_cache,
-                scale=layer.head_k_dim**-0.5,
-                T=draft_token_num,
-                num_q_heads=layer.q_dim // layer.head_q_dim,
-                num_v_heads=layer.num_v_heads,
-                head_k_dim=layer.head_k_dim,
-                head_v_dim=layer.head_v_dim,
-                lower_bound=getattr(layer, "lower_bound", None),
             )
 
         # causal_conv1d_update expects [.., dim, width]. KDA keeps dense conv-window
@@ -971,6 +959,147 @@ class KDAAttnBackend(MambaAttnBackendBase):
             covered = dense_token_indices < (batch_size * draft_token_num)
             core_attn_out = torch.where(covered.view(1, -1, 1, 1), core_attn_out, 0.0)
         return core_attn_out
+
+    def _can_run_fused_chain_verify(
+        self,
+        *,
+        layer: RadixLinearAttention,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        draft_token_num: int,
+        conv_states: torch.Tensor,
+        ssm_states: torch.Tensor,
+        intermediate_state_cache: Optional[torch.Tensor],
+        intermediate_conv_window_cache: torch.Tensor,
+        cache_indices: torch.Tensor,
+        intermediate_state_indices: torch.Tensor,
+        retrieve_next_token: Optional[torch.Tensor],
+        retrieve_next_sibling: Optional[torch.Tensor],
+        retrieve_parent_token: Optional[torch.Tensor],
+        replayssm_rawv: Optional[torch.Tensor],
+    ) -> bool:
+        if self._fused_chain_verify_fn is None or not mixed_qkv.is_cuda:
+            return False
+        if replayssm_rawv is not None or any(
+            value is not None
+            for value in (
+                retrieve_next_token,
+                retrieve_next_sibling,
+                retrieve_parent_token,
+            )
+        ):
+            return False
+        if draft_token_num < 3 or mixed_qkv.shape[0] % draft_token_num != 0:
+            return False
+        if (
+            not isinstance(layer.conv_weights, torch.Tensor)
+            or layer.conv_weights.ndim != 2
+            or layer.conv_weights.shape[1] != 4
+            or layer.conv_weights.stride(1) != 1
+        ):
+            return False
+        if (
+            layer.num_q_heads != layer.num_k_heads
+            or layer.head_q_dim != layer.head_k_dim
+            or layer.head_k_dim & (layer.head_k_dim - 1)
+        ):
+            return False
+
+        seq_len, dim = mixed_qkv.shape
+        batch_size = seq_len // draft_token_num
+        expected_dim = (
+            2 * layer.num_q_heads * layer.head_k_dim
+            + layer.num_v_heads * layer.head_v_dim
+        )
+        if dim != expected_dim or layer.conv_weights.shape[0] != dim:
+            return False
+        if layer.bias is not None and (
+            not isinstance(layer.bias, torch.Tensor)
+            or layer.bias.ndim != 1
+            or layer.bias.shape[0] != dim
+        ):
+            return False
+        if not isinstance(layer.A_log, torch.Tensor) or not isinstance(
+            layer.dt_bias, torch.Tensor
+        ):
+            return False
+        if (
+            a.ndim == 0
+            or b.ndim == 0
+            or mixed_qkv.dtype not in (torch.bfloat16, torch.float16)
+            or a.dtype != mixed_qkv.dtype
+            or b.dtype != mixed_qkv.dtype
+            or conv_states.dtype != mixed_qkv.dtype
+            or intermediate_conv_window_cache.dtype != mixed_qkv.dtype
+            or layer.conv_weights.dtype
+            not in (torch.bfloat16, torch.float16, torch.float32)
+            or (layer.bias is not None and layer.bias.dtype != layer.conv_weights.dtype)
+        ):
+            return False
+        if (
+            layer.A_log.dtype != torch.float32
+            or layer.dt_bias.dtype != torch.float32
+            or ssm_states.dtype != torch.float32
+            or intermediate_state_cache is None
+            or intermediate_state_cache.dtype != torch.float32
+        ):
+            return False
+        if (
+            mixed_qkv.stride(-1) != 1
+            or a.stride(-1) != 1
+            or b.stride(-1) != 1
+            or not conv_states.is_contiguous()
+            or not ssm_states.is_contiguous()
+            or not intermediate_state_cache.is_contiguous()
+        ):
+            return False
+        if (
+            a.numel() != seq_len * layer.num_v_heads * layer.head_k_dim
+            or b.numel() != seq_len * layer.num_v_heads
+            or layer.A_log.numel() != layer.num_v_heads
+            or layer.dt_bias.numel() != layer.num_v_heads * layer.head_k_dim
+        ):
+            return False
+        if (
+            conv_states.ndim != 3
+            or tuple(conv_states.shape[-2:]) != (3, dim)
+            or intermediate_conv_window_cache.ndim != 4
+            or tuple(intermediate_conv_window_cache.shape[-2:]) != (3, dim)
+            or ssm_states.ndim != 4
+            or tuple(ssm_states.shape[-3:])
+            != (layer.num_v_heads, layer.head_v_dim, layer.head_k_dim)
+            or intermediate_state_cache.ndim != 5
+            or intermediate_state_cache.shape[1] < draft_token_num
+            or tuple(intermediate_state_cache.shape[-3:])
+            != (layer.num_v_heads, layer.head_v_dim, layer.head_k_dim)
+        ):
+            return False
+        if (
+            cache_indices.ndim != 1
+            or intermediate_state_indices.ndim != 1
+            or cache_indices.numel() != batch_size
+            or intermediate_state_indices.numel() != batch_size
+            or cache_indices.dtype != torch.int32
+            or intermediate_state_indices.dtype != torch.int32
+        ):
+            return False
+        tensors = (
+            layer.conv_weights,
+            layer.A_log,
+            layer.dt_bias,
+            a,
+            b,
+            conv_states,
+            ssm_states,
+            intermediate_state_cache,
+            intermediate_conv_window_cache,
+            cache_indices,
+            intermediate_state_indices,
+        )
+        if layer.bias is not None:
+            tensors += (layer.bias,)
+        return all(tensor.device == mixed_qkv.device for tensor in tensors)
 
     def _can_run_dspark_cutedsl_mtp(
         self,

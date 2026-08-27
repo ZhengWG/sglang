@@ -182,7 +182,6 @@ jobs:
         git config --global url."https://gitee.com/staugust/cutlass".insteadOf "https://github.com/NVIDIA/cutlass"
 
         # 蚂蚁内部的镜像仓库
-        git config --global url."git@code.alipay.com:Theta/cuLA.git".insteadOf "https://code.alipay.com/Theta/cuLA.git"
         git config --global url."git@code.alipay.com:inference/DeepGEMM.git".insteadOf https://github.com/deepseek-ai/DeepGEMM.git
         git config --global url."git@code.alipay.com:inference/DeepGEMM".insteadOf https://github.com/deepseek-ai/DeepGEMM
         git config --global url."git@code.alipay.com:inference_thirdparty/dlpack.git".insteadOf https://github.com/dmlc/dlpack.git

@@ -1693,6 +1693,10 @@ class MergedColumnParallelRepeatedLinear(LinearBase):
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        tp_rank: Rank to shard the column-parallel part on. Defaults to the
+            global TP rank; pass the attention-TP rank to shard on attn-TP
+            instead (see KimiDeltaAttention's shard_on_attn_tp).
+        tp_size: World size matching ``tp_rank``. Defaults to global TP size.
     """
 
     def __init__(
@@ -1721,8 +1725,7 @@ class MergedColumnParallelRepeatedLinear(LinearBase):
             tp_rank = get_parallel().tp_rank
         if tp_size is None:
             tp_size = get_parallel().tp_size
-        self.tp_rank = tp_rank
-        self.tp_size = tp_size
+        self.tp_rank, self.tp_size = tp_rank, tp_size
 
         self.output_partition_sizes = [
             divide(x, self.tp_size) for x in column_output_sizes
@@ -1767,6 +1770,10 @@ class ColumnParallelBatchedLinear(nn.Module):
         input_size: input dimension of the linear layer.
         output_size: output dimension of the linear layer.
         dtype: Data type for the parameters.
+        tp_rank: Rank to shard the output dimension on. Defaults to the global
+            TP rank; pass the attention-TP rank to shard on attn-TP instead
+            (see KimiDeltaAttention's shard_on_attn_tp).
+        tp_size: World size matching ``tp_rank``. Defaults to global TP size.
     """
 
     def __init__(
@@ -1783,8 +1790,7 @@ class ColumnParallelBatchedLinear(nn.Module):
             tp_rank = get_parallel().tp_rank
         if tp_size is None:
             tp_size = get_parallel().tp_size
-        self.tp_rank = tp_rank
-        self.tp_size = tp_size
+        self.tp_rank, self.tp_size = tp_rank, tp_size
         self.weight = nn.Parameter(
             torch.empty(batch, output_size // self.tp_size, input_size, dtype=dtype),
             requires_grad=False,

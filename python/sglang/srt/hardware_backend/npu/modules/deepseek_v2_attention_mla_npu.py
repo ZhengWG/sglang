@@ -135,6 +135,9 @@ def forward_mha_core_npu(
     k: torch.Tensor,
     v: torch.Tensor,
     forward_batch: "ForwardBatch",
+    # Gated attention (Ling-V3 / BailingMoeV3): the subclass appends its gate
+    # to inner_state, so every *_core dispatched from forward_core takes it as
+    # a trailing arg. None everywhere else.
     gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     attn_output = m.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
@@ -292,6 +295,9 @@ def forward_mla_core_npu(
     zero_allocator: "BumpAllocator",
     positions: torch.Tensor,
     topk_indices: torch.Tensor,
+    # Gated attention (Ling-V3 / BailingMoeV3): the subclass appends its gate
+    # to inner_state, so every *_core dispatched from forward_core takes it as
+    # a trailing arg. None everywhere else.
     gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     attn_output = m.attn_mqa(
@@ -489,6 +495,9 @@ def forward_dsa_core_npu(
     forward_batch: "ForwardBatch",
     zero_allocator: "BumpAllocator",
     positions: torch.Tensor,
+    # Gated attention (Ling-V3 / BailingMoeV3): the subclass appends its gate
+    # to inner_state, so every *_core dispatched from forward_core takes it as
+    # a trailing arg. None everywhere else.
     gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     attn_output = m.attn_mqa(

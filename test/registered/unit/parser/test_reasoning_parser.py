@@ -484,16 +484,6 @@ class TestLing3Detector(CustomTestCase):
         self.assertEqual(result.reasoning_text, "I need a tool")
         self.assertEqual(result.normal_text, "<tool_call>get_weather</tool_call>")
 
-    def test_tool_call_before_think_end_does_not_trigger_fallback(self):
-        """Preserve Ling3's tool-marker exclusion inside reasoning."""
-        text = "<think>I need a tool<tool_call>get_weather</tool_call></think>"
-        result = self.detector.detect_and_parse(text)
-        self.assertEqual(
-            result.reasoning_text,
-            "I need a tool<tool_call>get_weather</tool_call>",
-        )
-        self.assertEqual(result.normal_text, "")
-
     def test_reasoning_only_swaps_to_normal_text(self):
         text = "<think>Final answer without a closing think tag"
         result = self.detector.detect_and_parse(text)

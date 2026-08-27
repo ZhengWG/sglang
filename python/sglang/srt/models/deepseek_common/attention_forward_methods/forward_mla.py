@@ -60,7 +60,6 @@ from sglang.srt.models.deepseek_common.utils import (
     _is_cuda,
     _is_hip,
     _is_musa,
-    zero_attn_tp_scatter_padding,
 )
 from sglang.srt.runtime_context import get_exec, get_parallel
 from sglang.srt.state_capturer.indexer_topk import (
@@ -682,7 +681,7 @@ class DeepseekMLAForwardMixin:
         topk_indices,
         llama_4_scaling,
         fusion_plan: Optional[MlaBmmFusionPlan] = None,
-        gate=None,
+        gate: Optional[torch.Tensor] = None,
     ):
         save_kv_cache = True
 
@@ -764,11 +763,6 @@ class DeepseekMLAForwardMixin:
                 save_kv_cache=save_kv_cache,
                 **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
             )
-        attn_output = zero_attn_tp_scatter_padding(
-            attn_output,
-            forward_batch.extend_num_tokens,
-            forward_batch.get_num_non_padded_tokens(),
-        )
 
         # correct attn_output with respect to lse from other ranks
         if is_dcp_mla_decode_phase(forward_batch):

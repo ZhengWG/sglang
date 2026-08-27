@@ -137,6 +137,7 @@ def probe_routed_expert_weight_dtype(model_path: str) -> Optional[str]:
 _PREFETCH_BLOCK_SIZE = None
 _PREFETCH_STOP_TIMEOUT_SECONDS = 60.0
 CAPTURE_SAFE_WEIGHT_SENTINEL = 1e-3
+_MAP_POPULATE = getattr(mmap, "MAP_POPULATE", None)
 
 
 def _get_prefetch_block_size() -> int:
@@ -933,6 +934,22 @@ class CheckpointFilePrefetchHandle:
         return tuple(self._errors)
 
 
+def _get_local_prefetch_partition() -> Tuple[int, int]:
+    """Return the node-local rank and size used to divide page-cache work."""
+    if not torch.distributed.is_initialized():
+        return 0, 1
+
+    world_group = get_world_group()
+    local_rank = world_group.local_rank
+    local_world_size = world_group.local_size or world_group.world_size
+    if local_world_size <= 0 or not 0 <= local_rank < local_world_size:
+        raise RuntimeError(
+            "Invalid node-local distributed topology for checkpoint prefetch: "
+            f"local_rank={local_rank}, local_world_size={local_world_size}."
+        )
+    return local_rank, local_world_size
+
+
 def _prefetch_all_checkpoints(
     sorted_files: List[str],
     num_threads: int = 4,
@@ -960,13 +977,7 @@ def _prefetch_all_checkpoints(
     # Use node-local rank so that each node independently prefetches the
     # full checkpoint into its own page cache. Global rank would split files
     # across nodes, but page cache is not shared across nodes.
-    if torch.distributed.is_initialized():
-        world_group = get_world_group()
-        local_rank = world_group.local_rank
-        local_world_size = world_group.local_size or world_group.world_size
-    else:
-        local_rank = 0
-        local_world_size = 1
+    local_rank, local_world_size = _get_local_prefetch_partition()
 
     my_files = sorted_files[local_rank::local_world_size]
     total_for_rank = len(my_files)
@@ -1121,16 +1132,8 @@ def safetensors_weights_iterator(
 
 def prefetch_weight_files(hf_weights_files: List[str]) -> None:
     """Prefetch and mmap weight files in parallel for the current distributed rank."""
-    world_size = 1
-    rank = 0
-    if torch.distributed.is_initialized():
-        world_size = torch.distributed.get_world_size()
-        rank = torch.distributed.get_rank()
-        device_nums = torch.cuda.device_count()
-        if device_nums < world_size:
-            rank = rank % device_nums
-            world_size = device_nums
-    local_files = hf_weights_files[rank::world_size]
+    local_rank, local_world_size = _get_local_prefetch_partition()
+    local_files = hf_weights_files[local_rank::local_world_size]
     mmap_files_concurrently(local_files)
 
 
@@ -1149,13 +1152,19 @@ def mmap_files_concurrently(hf_weights_files: List[str]) -> None:
 
 
 def _mmap_single_file(st_file: str) -> None:
+    if _MAP_POPULATE is None:
+        # MAP_POPULATE is Linux-specific. A sequential read provides the same
+        # page-cache warming semantics on other platforms and Python builds.
+        _prefetch_checkpoint_file(st_file)
+        return
+
     with open(st_file, "rb") as f:
         file_size = os.path.getsize(st_file)
         mm = mmap.mmap(
             fileno=f.fileno(),
             length=file_size,
             prot=mmap.PROT_READ,
-            flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
+            flags=mmap.MAP_SHARED | _MAP_POPULATE,
         )
         mm.close()
 

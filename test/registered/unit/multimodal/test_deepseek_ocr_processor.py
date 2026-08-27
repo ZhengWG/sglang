@@ -165,6 +165,7 @@ class TestDeepseekOCRRuntimeProcessor(unittest.IsolatedAsyncioTestCase):
             RuntimeDeepseekOCRProcessor
         )
         processor._processor = SimpleNamespace(ocr2_mode=ocr2_mode)
+        processor.mm_processor_executor = None
         return processor
 
     def test_constructor_configures_ocr2_profile_from_official_auto_map(self):

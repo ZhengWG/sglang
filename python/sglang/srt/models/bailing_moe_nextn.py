@@ -38,28 +38,29 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.bailing_moe import BailingMoEBlock, BailingMoEForCausalLM
 from sglang.srt.models.bailing_moe_linear import (
-    BailingMoELinearDecoderLayer as BailingMoeV2_5DecoderLayer,
-)
-from sglang.srt.models.bailing_moe_linear import (
+    BailingMoELinearDecoderLayer,
     BailingMoeV2_5ForCausalLM,
 )
 from sglang.srt.models.bailing_moe_v3 import (
-    BailingMoeV3ForCausalLM,
     BailingMoELinearDecoderLayer as BailingMoeV3DecoderLayer,
+)
+from sglang.srt.models.bailing_moe_v3 import (
+    BailingMoeV3ForCausalLM,
 )
 from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import BumpAllocator, add_prefix
 
-LoraConfig = None
 logger = logging.getLogger(__name__)
 
 
 def _is_bailing_moe_v3_config(config: PretrainedConfig) -> bool:
-    return (
-        getattr(config, "model_type", None) == "bailing_hybrid"
-        and hasattr(config, "gated_attention_proj_granularity_type")
-    )
+    """Ling-V3 (KDA + gated MLA) vs the V2.5 lightning checkpoint.
+
+    ``use_kda`` is set by BailingHybridConfig from the presence of a short
+    conv, which is exactly what distinguishes the two.
+    """
+    return config.model_type == "bailing_hybrid" and config.use_kda
 
 
 class BailingMoEModelNextN(nn.Module):
@@ -96,17 +97,11 @@ class BailingMoEModelNextN(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # currently eh_proj is not quant for blockwise fp8 quant, but quant for compressed-tensor
-        eh_quant = (
-            None
-            if quant_config is None or quant_config.get_name() == "fp8"
-            else quant_config
-        )
         self.eh_proj = ReplicatedLinear(
             2 * config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=eh_quant,
+            quant_config=quant_config,
             prefix=add_prefix(f"layers.{config.num_hidden_layers}.eh_proj", prefix),
         )
 
@@ -115,7 +110,7 @@ class BailingMoEModelNextN(nn.Module):
         )
         if self.is_hybrid:
             config.attention_type = 1
-            decoder_layer_cls = BailingMoeV2_5DecoderLayer
+            decoder_layer_cls = BailingMoELinearDecoderLayer
             decoder_kwargs = {
                 "quant_config": quant_config,
                 "layer_id": 0,
@@ -131,7 +126,6 @@ class BailingMoEModelNextN(nn.Module):
                 config,
                 0,
                 quant_config=quant_config,
-                # is_nextn=True,
                 prefix=add_prefix("decoder", prefix),
             )
 
@@ -198,12 +192,10 @@ class BailingMoEModelNextN(nn.Module):
 
 
 class BailingMoeForCausalLMNextN(nn.Module):
-
     packed_modules_mapping = {
         "fused_qkv_a_proj_with_mqa": ["q_a_proj", "kv_a_proj_with_mqa"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
-    # To ensure correct weight loading and mapping.
     hf_to_sglang_mapper = WeightsMapper(
         orig_to_new_substr={
             "attention.dense": "attention.o_proj",
@@ -255,7 +247,7 @@ class BailingMoeForCausalLMNextN(nn.Module):
         if is_bailing_moe_v3:
             self.base_load_weights_func = BailingMoeV3ForCausalLM.load_weights
             self.post_load_weights_func = BailingMoeV3ForCausalLM.post_load_weights
-        elif hasattr(self.config, "model_type") and config.model_type == "bailing_hybrid":
+        elif config.model_type == "bailing_hybrid":
             self.base_load_weights_func = BailingMoeV2_5ForCausalLM.load_weights
             self.post_load_weights_func = BailingMoeV2_5ForCausalLM.post_load_weights
         else:

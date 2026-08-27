@@ -139,18 +139,21 @@ class FlashKDAKernel(LinearAttnKernelBase):
                 return_intermediate_states=return_intermediate_states,
             )
 
-        return self._flashkda_extend(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            ssm_states=ssm_states,
-            cache_indices=cache_indices,
-            query_start_loc=query_start_loc,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            lower_bound=lower_bound,
+        return (
+            self._flashkda_extend(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                ssm_states=ssm_states,
+                cache_indices=cache_indices,
+                query_start_loc=query_start_loc,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                lower_bound=lower_bound,
+            ),
+            None,
         )
 
     @staticmethod
@@ -223,7 +226,7 @@ class FlashKDAKernel(LinearAttnKernelBase):
         # KimiDeltaAttention.forward already applies sigmoid to beta on the
         # prefill path, but flash_kda expects beta LOGITS (it sigmoids
         # internally). Invert back so the kernel recovers the intended value:
-        # sigmoid(logit(p)) == p. (triton/cuLA consume the post-sigmoid beta.)
+        # sigmoid(logit(p)) == p. Triton consumes the post-sigmoid beta.
         beta = torch.logit(beta.float().clamp_(1e-7, 1.0 - 1e-7)).to(torch.bfloat16)
         beta = beta.contiguous()
 

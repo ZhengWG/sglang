@@ -644,6 +644,49 @@ class TestTemplateRegistry(CustomTestCase):
         result = get_conv_template_by_model_path("deepseek-ai/deepseek-ocr-base")
         self.assertEqual(result, "deepseek-ocr")
 
+    def test_get_conv_template_by_local_deepseek_ocr_config(self):
+        """OCR-1/2 configs must not fall back to the DeepSeek-VL2 template."""
+        cases = (
+            (
+                "DeepseekOCRForCausalLM",
+                "modeling_deepseekocr.DeepseekOCRForCausalLM",
+            ),
+            (
+                "DeepseekOCR2ForCausalLM",
+                "modeling_deepseekocr2.DeepseekOCR2ForCausalLM",
+            ),
+        )
+        for architecture, auto_model in cases:
+            with self.subTest(architecture=architecture):
+                with tempfile.TemporaryDirectory(prefix="snapshot-") as model_path:
+                    config = {
+                        "model_type": "deepseek_vl_v2",
+                        "architectures": [architecture],
+                        "auto_map": {"AutoModel": auto_model},
+                    }
+                    with open(
+                        os.path.join(model_path, "config.json"), "w"
+                    ) as file:
+                        json.dump(config, file)
+
+                    result = get_conv_template_by_model_path(model_path)
+
+                self.assertEqual(result, "deepseek-ocr")
+
+    def test_get_conv_template_by_local_deepseek_vl2_config(self):
+        """A genuine DeepSeek-VL2 config must keep its existing template."""
+        with tempfile.TemporaryDirectory(prefix="snapshot-") as model_path:
+            config = {
+                "model_type": "deepseek_vl_v2",
+                "architectures": ["DeepseekVLV2ForCausalLM"],
+            }
+            with open(os.path.join(model_path, "config.json"), "w") as file:
+                json.dump(config, file)
+
+            result = get_conv_template_by_model_path(model_path)
+
+        self.assertEqual(result, "deepseek-vl2")
+
     def test_get_conv_template_by_model_path_points(self):
         """Test that points model path is matched correctly."""
         result = get_conv_template_by_model_path("WePOINTS/points-v1.5")
@@ -1023,6 +1066,63 @@ class TestGenerateChatConv(CustomTestCase):
         msg = conv.messages[0][1]
         # deepseek-vl2 uses _get_full_multimodal_text_prompt to add image tokens
         self.assertIn("Describe both", msg)
+
+    def test_deepseek_ocr_preserves_existing_image_placeholder(self):
+        """The model-card prompt already contains the required placeholder."""
+        request = self._make_request(
+            [
+                ChatCompletionMessageUserParam(
+                    role="user",
+                    content=[
+                        ChatCompletionMessageContentTextPart(
+                            type="text",
+                            text=(
+                                "<image>\n<|grounding|>Convert the document "
+                                "to markdown."
+                            ),
+                        ),
+                        ChatCompletionMessageContentImagePart(
+                            type="image_url",
+                            image_url=ChatCompletionMessageContentImageURL(
+                                url="http://example.com/document.jpg"
+                            ),
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        conv = generate_chat_conv(request, "deepseek-ocr")
+
+        self.assertEqual(len(conv.image_data), 1)
+        self.assertEqual(conv.messages[0][1].count("<image>"), 1)
+
+    def test_deepseek_ocr_adds_missing_image_placeholder(self):
+        """OpenAI image parts without a text placeholder remain supported."""
+        request = self._make_request(
+            [
+                ChatCompletionMessageUserParam(
+                    role="user",
+                    content=[
+                        ChatCompletionMessageContentTextPart(
+                            type="text", text="Free OCR."
+                        ),
+                        ChatCompletionMessageContentImagePart(
+                            type="image_url",
+                            image_url=ChatCompletionMessageContentImageURL(
+                                url="http://example.com/document.jpg"
+                            ),
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        conv = generate_chat_conv(request, "deepseek-ocr")
+
+        self.assertEqual(len(conv.image_data), 1)
+        self.assertTrue(conv.messages[0][1].startswith("<image>\n"))
+        self.assertEqual(conv.messages[0][1].count("<image>"), 1)
 
     def test_unknown_role_raises(self):
         """Test that an unknown message role raises ValueError."""
