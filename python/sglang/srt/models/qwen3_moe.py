@@ -1240,8 +1240,11 @@ class Qwen3MoeForCausalLM(nn.Module):
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
 
-        concurrent.futures.wait(futures)
-        executor.shutdown()
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        finally:
+            executor.shutdown()
 
         if not hasattr(self, "routed_experts_weights_of_layer"):
             self.routed_experts_weights_of_layer = LazyValue(

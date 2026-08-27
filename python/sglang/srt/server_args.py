@@ -467,7 +467,8 @@ class ServerArgs:
             "and fall back to the pytorch bin format if safetensors format "
             "is not available. "
             '"prefetch_auto" like "auto" but performs concurrent mmap with '
-            "MAP_POPULATE to prefetch weight files into the page cache. "
+            "MAP_POPULATE when available, or sequential reads otherwise, to "
+            "prefetch weight files into the page cache. "
             "This helps maximize storage bandwidth and improve model loading "
             "performance, especially on systems with high disk I/O capacity. "
             '"pt" will load the weights in the pytorch bin format. '

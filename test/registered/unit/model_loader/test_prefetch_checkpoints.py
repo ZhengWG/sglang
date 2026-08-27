@@ -20,9 +20,11 @@ from sglang.srt.configs.load_config import LoadConfig, LoadFormat
 from sglang.srt.model_loader.loader import DefaultModelLoader
 from sglang.srt.model_loader.weight_utils import (
     CheckpointFilePrefetchHandle,
+    _mmap_single_file,
     _prefetch_all_checkpoints,
     buffered_multi_thread_safetensors_weights_iterator,
     fastsafetensors_weights_iterator,
+    prefetch_weight_files,
     safetensors_weights_iterator,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -249,6 +251,39 @@ class TestPrefetchCheckpoints(CustomTestCase):
             _prefetch_all_checkpoints(paths, num_threads=2)
 
         self.assertEqual(sorted(loaded_paths), sorted(paths[1::3]))
+
+    @patch("torch.distributed.is_initialized", return_value=True)
+    def test_prefetch_auto_uses_node_local_rank_partitioning(self, _):
+        paths = [f"model-{i:05d}.safetensors" for i in range(10)]
+
+        class FakeWorldGroup:
+            local_rank = 1
+            local_size = 3
+            world_size = 99
+
+        with (
+            patch(
+                "sglang.srt.model_loader.weight_utils.get_world_group",
+                return_value=FakeWorldGroup(),
+            ),
+            patch(
+                "sglang.srt.model_loader.weight_utils.mmap_files_concurrently"
+            ) as mmap_files,
+        ):
+            prefetch_weight_files(paths)
+
+        mmap_files.assert_called_once_with(paths[1::3])
+
+    def test_prefetch_auto_falls_back_without_map_populate(self):
+        with (
+            patch("sglang.srt.model_loader.weight_utils._MAP_POPULATE", None),
+            patch(
+                "sglang.srt.model_loader.weight_utils._prefetch_checkpoint_file"
+            ) as sequential_prefetch,
+        ):
+            _mmap_single_file("model.safetensors")
+
+        sequential_prefetch.assert_called_once_with("model.safetensors")
 
     @patch("torch.distributed.is_initialized", return_value=False)
     def test_prefetch_handle_cancels_before_scheduling_next_shard(self, _):

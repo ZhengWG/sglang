@@ -68,6 +68,13 @@ QWEN_VIDEO_PREPROCESS_CONFIG_KEYS = frozenset(
 )
 
 
+def _merge_video_preprocess_config(video_config, mm_sampling_kwargs):
+    config = dict(video_config or {})
+    if mm_sampling_kwargs:
+        config.update(mm_sampling_kwargs)
+    return config
+
+
 def _get_processor_video_config(video_config, video_metadata):
     if video_metadata and all(metadata is not None for metadata in video_metadata):
         return {
@@ -312,28 +319,30 @@ def smart_nframes(
 # process video, qwen-specific
 async def preprocess_video(
     vr,
-    image_factor: int,
-    video_min_pixels: int,
-    video_max_pixels: int,
-    temporal_factor: int,
-    default_fps: int | float,
-    default_fps_min_frames: int,
-    default_fps_max_frames: int,
-    mm_sampling_kwargs: dict = {},
+    image_factor: int = 28,
+    video_min_pixels: int = 4 * 28 * 28,
+    video_max_pixels: int = 16384 * 28 * 28,
+    temporal_factor: int = 2,
+    default_fps: int | float = 2.0,
+    default_fps_min_frames: int = 4,
+    default_fps_max_frames: int = 768,
+    mm_sampling_kwargs: Optional[dict] = None,
+    video_config: Optional[dict] = None,
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     try:
         # preprocessed video
         entry_time = time.perf_counter()
-        ele = {}
-        if mm_sampling_kwargs:
-            ele.update(mm_sampling_kwargs)
+        # Keep compatibility with public/main's ``video_config`` API while
+        # retaining the model-specific explicit defaults used on this branch.
+        # Per-request sampling parameters take precedence over server config.
+        ele = _merge_video_preprocess_config(video_config, mm_sampling_kwargs)
 
         video = vr
         total_frames = video_fps = idx = None
         if not isinstance(vr, np.ndarray):
             if not isinstance(vr, VideoReader):
-                return vr
+                return vr, None
             total_frames, video_fps = len(vr), vr.get_avg_fps()
             nframes = smart_nframes(
                 ele,
@@ -946,6 +955,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                         default_fps_min_frames=self.FPS_MIN_FRAMES,
                         default_fps_max_frames=self.FPS_MAX_FRAMES,
                         mm_sampling_kwargs=mm_sampling_kwargs,
+                        video_config=self.video_config,
                     )
                     for video in base_output.videos
                 ]

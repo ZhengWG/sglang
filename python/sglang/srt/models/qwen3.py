@@ -688,8 +688,11 @@ class Qwen3ForCausalLM(nn.Module):
                 else:
                     logger.warning(f"Parameter {name} not found in params_dict")
 
-        concurrent.futures.wait(futures)
-        executor.shutdown()
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        finally:
+            executor.shutdown()
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
