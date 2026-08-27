@@ -2119,7 +2119,9 @@ def get_video_bytes(video_file: Union[str, bytes, VideoData]) -> bytes:
     raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
 
-def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
+def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = False):
+    # use_gpu defaults to False: VLM frame sampling is sparse/seek-bound, where
+    # parallel CPU decoding beats NVDEC; pass use_gpu=True for sequential reads.
     if isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
         return video_file
 

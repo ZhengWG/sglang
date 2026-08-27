@@ -144,6 +144,9 @@ class VideoDecoderWrapper:
             kwargs = {"dimension_order": "NHWC"}
             if device == "cuda" and _try_cuda_backend():
                 kwargs["device"] = "cuda"
+            else:
+                # torchcodec defaults to a single FFmpeg thread; 0 lets FFmpeg choose.
+                kwargs["num_ffmpeg_threads"] = 0
             self._tc_kwargs = kwargs
             try:
                 self._decoder = VideoDecoder(source, **kwargs)
@@ -151,6 +154,7 @@ class VideoDecoderWrapper:
                 if "device" in kwargs:
                     logger.warning("CUDA video decoding failed, falling back to CPU.")
                     kwargs.pop("device")
+                    kwargs["num_ffmpeg_threads"] = 0
                     self._tc_kwargs = kwargs
                     self._decoder = VideoDecoder(source, **kwargs)
                 else:
@@ -196,10 +200,28 @@ class VideoDecoderWrapper:
         """Return frames at given indices as numpy array with shape (N, H, W, C)."""
         idx = _as_int_indices(indices)
         if _BACKEND == "torchcodec":
-            batch = self._decoder.get_frames_at(idx)
-            return _as_numpy(batch.data)
+            return _as_numpy(self._extract_frames(idx))
         else:
             return self._decoder.get_batch(idx).asnumpy()
+
+    def _extract_frames(self, idx: list):
+        """Torchcodec frame extraction, split across parallel decoders on CPU.
+
+        Sparse VLM sampling is seek-bound; parallel CPU decoders beat both a
+        single decoder and NVDEC for this access pattern.
+        """
+        if (
+            self._num_decode_threads != 1
+            and len(idx) > 1
+            and "device" not in self._tc_kwargs
+        ):
+            num_threads = self._num_decode_threads
+            if num_threads <= 0:
+                num_threads = min(os.cpu_count() or 8, 16)
+            num_threads = min(num_threads, len(idx))
+            if num_threads > 1:
+                return self._parallel_decode(idx, num_threads)
+        return self._decoder.get_frames_at(idx).data
 
     # ---- decord-compatible shims ----
     # Let this wrapper stand in for a raw decord `VideoReader` so processors
@@ -219,20 +241,10 @@ class VideoDecoderWrapper:
         import torch
 
         idx = _as_int_indices(indices)
-        if _BACKEND == "torchcodec" and self._num_decode_threads != 1 and len(idx) > 1:
-            num_threads = self._num_decode_threads
-            if num_threads <= 0:
-                num_threads = min(os.cpu_count() or 8, 16)
-            num_threads = min(num_threads, len(idx))
-            if num_threads > 1:
-                return self._parallel_decode(idx, num_threads)
-
         if _BACKEND == "torchcodec":
-            batch = self._decoder.get_frames_at(idx)
-            return _maybe_pin_memory(batch.data)
-        else:
-            arr = self._decoder.get_batch(idx).asnumpy()
-            return torch.from_numpy(arr).pin_memory()
+            return _maybe_pin_memory(self._extract_frames(idx))
+        arr = self._decoder.get_batch(idx).asnumpy()
+        return torch.from_numpy(arr).pin_memory()
 
     def _parallel_decode(self, indices, num_threads):
         """Decode frames using multiple VideoDecoder instances in parallel threads."""
@@ -258,7 +270,7 @@ class VideoDecoderWrapper:
                 idx = future_to_idx[future]
                 results[idx] = future.result()
 
-        return _maybe_pin_memory(torch.cat(results, dim=0))
+        return torch.cat(results, dim=0)
 
     @property
     def source_bytes(self) -> bytes | None:
