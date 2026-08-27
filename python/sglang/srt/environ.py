@@ -310,11 +310,9 @@ class Envs:
     SGLANG_EXTERNAL_MM_MODEL_ARCH = EnvStr("")
     SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE = EnvStr("")
 
-    # Multimodal
-    # Override video decode backend. Unset = torchcodec if importable, else
-    # decord. Set to "decord" to force the original decoder; "torchcodec"
-    # still falls back to decord if torchcodec is unavailable.
-    SGLANG_VIDEO_DECODE_BACKEND = EnvStr(None)
+    # Video decode backend. Default torchcodec (main-style VideoDecoderWrapper).
+    # Set to "decord" to keep the original load_video / encode_video path.
+    SGLANG_VIDEO_DECODE_BACKEND = EnvStr("torchcodec")
 
     # ===================================================================
     # HTTP server and health

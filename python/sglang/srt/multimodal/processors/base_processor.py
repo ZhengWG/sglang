@@ -839,7 +839,7 @@ class BaseMultimodalProcessor(ABC):
                 img.load()
                 return img
             elif modality == Modality.VIDEO:
-                return load_video(data)
+                return load_video(data, frame_count_limit)
             elif modality == Modality.AUDIO:
                 return load_audio(data, audio_sample_rate)
 

@@ -103,7 +103,7 @@ from sglang.srt.runtime_context import (
     get_exec,
     get_parallel,
 )
-from sglang.srt.utils.video_decoder import _BACKEND, VideoDecoderWrapper
+from sglang.srt.utils.video_decoder import _BACKEND
 
 if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
     from model_manager.apis import get_model_path_from_manager
@@ -120,7 +120,6 @@ torch_release = pkg_version.parse(torch.__version__).release
 COMPILE_CACHE_ROOT = os.path.expanduser("~/.cache")
 # List of compile cache dirs for save/load to speed up engine launch.
 COMPILE_CACHE_DIRS = ["flashinfer", "deep_gemm", "tvm-ffi"]
-
 
 # ==============================================================================
 # BEGIN: Multi-Device & CUDA Version Utilities
@@ -2116,50 +2115,13 @@ def get_video_bytes(video_file: Union[str, bytes, VideoData]) -> bytes:
     raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
 
-def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = False):
-    # use_gpu defaults to False: VLM frame sampling is sparse/seek-bound, where
-    # parallel CPU decoding beats NVDEC; pass use_gpu=True for sequential reads.
-    if isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
-        return video_file
-
-    raw_video_file = video_file.url if isinstance(video_file, VideoData) else video_file
-
-    # This branch-specific format stores a comma-separated sequence of
-    # base64 JPEG frames rather than an encoded video container.
-    if isinstance(raw_video_file, str) and raw_video_file.startswith(
-        "data:video/jpeg;"
-    ):
-        _, encoded = raw_video_file.split(",", 1)
-
-        def load_video_frame(frame_data):
-            image_frame = pybase64.b64decode(frame_data, validate=True)
-            image = Image.open(BytesIO(image_frame))
-            image.load()
-            return image.convert("RGB")
-
-        return np.stack(
-            [
-                np.asarray(load_video_frame(frame_data))
-                for frame_data in encoded.split(",")
-            ]
-        )
-
-    # Default: torchcodec via VideoDecoderWrapper (GPU when use_gpu and CUDA backend works).
-    if _BACKEND == "torchcodec":
-        source = _normalize_video_input(video_file)
-        if source is None:
-            raise ValueError(f"Unsupported video input type: {type(video_file)}")
-        device = "cuda" if use_gpu else "cpu"
-        try:
-            return VideoDecoderWrapper(source, device=device)
-        except (ImportError, MemoryError):
-            raise
-        except Exception as e:
-            raise ValueError(f"Could not decode video: {e}") from e
-
-    # ===== Fallback: original decord path =====
+def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = True):
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
+
+    # Callers pass frame_count_limit as the second positional (None for VIDEO).
+    if not isinstance(use_gpu, bool):
+        use_gpu = True
 
     try:
         from decord.bridge import decord_bridge
@@ -2172,6 +2134,44 @@ def load_video(video_file: Union[str, bytes, VideoData], use_gpu: bool = False):
     tmp_file = None
     vr = None
     try:
+        if isinstance(video_file, (list, tuple, torch.Tensor, np.ndarray)):
+            return video_file
+
+        raw_video_file = (
+            video_file.url if isinstance(video_file, VideoData) else video_file
+        )
+
+        # This branch-specific format stores a comma-separated sequence of
+        # base64 JPEG frames rather than an encoded video container.
+        if isinstance(raw_video_file, str) and raw_video_file.startswith(
+            "data:video/jpeg;"
+        ):
+            _, encoded = raw_video_file.split(",", 1)
+
+            def load_video_frame(frame_data):
+                image_frame = pybase64.b64decode(frame_data, validate=True)
+                image = Image.open(BytesIO(image_frame))
+                image.load()
+                return image.convert("RGB")
+
+            return np.stack(
+                [
+                    np.asarray(load_video_frame(frame_data))
+                    for frame_data in encoded.split(",")
+                ]
+            )
+
+        # Default: torchcodec. SGLANG_VIDEO_DECODE_BACKEND=decord uses the
+        # original decord path below, unchanged.
+        if _BACKEND == "torchcodec":
+            from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+
+            source = _normalize_video_input(video_file)
+            if source is None:
+                raise ValueError(f"Unsupported video input type: {type(video_file)}")
+            device = "cuda" if use_gpu else "cpu"
+            return VideoDecoderWrapper(source, device=device)
+
         if isinstance(raw_video_file, str) and raw_video_file.startswith(
             ("http://", "https://")
         ):
@@ -2233,6 +2233,9 @@ def sample_video_frames(
 
 
 def encode_video(video_path, frame_count_limit=None):
+    # Lazy import because decord is not available on some arm platforms.
+    from decord import VideoReader, cpu
+
     if not os.path.exists(video_path):
         logger.error(f"Video {video_path} does not exist")
         return []
@@ -2246,12 +2249,12 @@ def encode_video(video_path, frame_count_limit=None):
         return [l[i] for i in idxs]
 
     if _BACKEND == "torchcodec":
+        from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+
         decoder = VideoDecoderWrapper(video_path)
         avg_fps = decoder.avg_fps
         total_frames = len(decoder)
-        sample_fps = round(avg_fps / 1) if avg_fps > 0 else 1
-        if sample_fps == 0:
-            sample_fps = 1
+        sample_fps = round(avg_fps / 1) if avg_fps else 1
         frame_indices = [i for i in range(0, total_frames, sample_fps)]
         if frame_count_limit is not None and len(frame_indices) > frame_count_limit:
             frame_indices = uniform_sample(frame_indices, frame_count_limit)
@@ -2259,9 +2262,6 @@ def encode_video(video_path, frame_count_limit=None):
             return []
         frames_data = decoder.get_frames_at(frame_indices)
         return [Image.fromarray(v.astype("uint8")) for v in frames_data]
-
-    # Fallback: original decord path (unchanged)
-    from decord import VideoReader, cpu
 
     vr = VideoReader(video_path, ctx=cpu(0))
     sample_fps = round(vr.get_avg_fps() / 1)  # FPS

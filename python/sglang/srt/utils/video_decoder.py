@@ -1,6 +1,5 @@
 """Unified video decoder: torchcodec preferred, decord as fallback."""
 
-import functools
 import logging
 import os
 
@@ -10,35 +9,16 @@ from sglang.srt.environ import envs
 
 logger = logging.getLogger(__name__)
 
-# Backend selection. SGLANG_VIDEO_DECODE_BACKEND overrides auto-detection:
-#   unset/invalid -> torchcodec if importable, else decord
-#   "torchcodec"  -> force torchcodec (falls back to decord if unavailable)
-#   "decord"      -> force the original decord path
-_BACKEND = envs.SGLANG_VIDEO_DECODE_BACKEND.get()
-if isinstance(_BACKEND, str):
-    _BACKEND = _BACKEND.strip().lower() or None
-if _BACKEND not in (None, "torchcodec", "decord"):
-    logger.warning(
-        "Ignoring invalid SGLANG_VIDEO_DECODE_BACKEND=%r (expected 'torchcodec' or 'decord').",
-        _BACKEND,
-    )
-    _BACKEND = None
+try:
+    from torchcodec.decoders import VideoDecoder
 
-if _BACKEND != "decord":
-    forced_torchcodec = _BACKEND == "torchcodec"
-    try:
-        from torchcodec.decoders import VideoDecoder
+    _BACKEND = "torchcodec"
+except (ImportError, RuntimeError):
+    _BACKEND = "decord"
 
-        _BACKEND = "torchcodec"
-    except (ImportError, RuntimeError):
-        if forced_torchcodec:
-            logger.warning(
-                "SGLANG_VIDEO_DECODE_BACKEND=torchcodec requested but torchcodec is "
-                "unavailable; falling back to decord."
-            )
-        _BACKEND = "decord"
-
-logger.info("Video decode backend: %s.", _BACKEND)
+_env_backend = envs.SGLANG_VIDEO_DECODE_BACKEND.get()
+if isinstance(_env_backend, str) and _env_backend.strip().lower() == "decord":
+    _BACKEND = "decord"
 
 
 _cuda_backend_enabled: bool | None = None
@@ -60,11 +40,7 @@ def _try_cuda_backend() -> bool:
 
 
 class _FrameBatch:
-    """decord-`NDArray`-like wrapper so torchcodec frames support `.asnumpy()`.
-
-    Lets `VideoDecoderWrapper.get_batch(...).asnumpy()` work as a drop-in for
-    the raw decord `VideoReader` interface used by some processors.
-    """
+    """decord NDArray-like so processors can call get_batch(...).asnumpy()."""
 
     __slots__ = ("_data",)
 
@@ -73,52 +49,6 @@ class _FrameBatch:
 
     def asnumpy(self) -> np.ndarray:
         return self._data
-
-
-def _as_numpy(data) -> np.ndarray:
-    """Convert a torchcodec frame/batch tensor to CPU numpy.
-
-    CUDA tensors cannot call ``.numpy()`` directly.
-    """
-    if isinstance(data, np.ndarray):
-        return data
-    if hasattr(data, "detach"):
-        data = data.detach()
-    if getattr(data, "is_cuda", False):
-        data = data.cpu()
-    return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
-
-
-def _as_int_indices(indices) -> list[int]:
-    return [int(i) for i in indices]
-
-
-def _maybe_pin_memory(tensor):
-    """Pin CPU tensors; leave CUDA tensors on device."""
-    if getattr(tensor, "is_cuda", False):
-        return tensor
-    return tensor.pin_memory()
-
-
-def _handle_decode_exceptions(fn):
-    """Surface frame-decode failures as ValueError.
-
-    Frame extraction runs lazily in the processors, outside load_video's
-    "Could not decode video" wrapping, so raw backend errors (torchcodec /
-    decord RuntimeError) would reach the serving layer as HTTP 500 with
-    decoder internals leaked to the client. ValueError maps to HTTP 400.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except (ImportError, MemoryError, ValueError):
-            raise
-        except Exception as e:
-            raise ValueError(f"Could not decode video: {e}") from e
-
-    return wrapper
 
 
 class VideoDecoderWrapper:
@@ -144,9 +74,6 @@ class VideoDecoderWrapper:
             kwargs = {"dimension_order": "NHWC"}
             if device == "cuda" and _try_cuda_backend():
                 kwargs["device"] = "cuda"
-            else:
-                # torchcodec defaults to a single FFmpeg thread; 0 lets FFmpeg choose.
-                kwargs["num_ffmpeg_threads"] = 0
             self._tc_kwargs = kwargs
             try:
                 self._decoder = VideoDecoder(source, **kwargs)
@@ -154,7 +81,6 @@ class VideoDecoderWrapper:
                 if "device" in kwargs:
                     logger.warning("CUDA video decoding failed, falling back to CPU.")
                     kwargs.pop("device")
-                    kwargs["num_ffmpeg_threads"] = 0
                     self._tc_kwargs = kwargs
                     self._decoder = VideoDecoder(source, **kwargs)
                 else:
@@ -178,11 +104,13 @@ class VideoDecoderWrapper:
     def __len__(self):
         return len(self._decoder)
 
-    @_handle_decode_exceptions
     def __getitem__(self, idx):
         """Return single frame as numpy NHWC uint8."""
         if _BACKEND == "torchcodec":
-            return _as_numpy(self._decoder[idx])
+            frame = self._decoder[idx]
+            if getattr(frame, "is_cuda", False):
+                frame = frame.cpu()
+            return frame.numpy()
         else:
             frame = self._decoder[idx]
             return frame.asnumpy() if hasattr(frame, "asnumpy") else np.array(frame)
@@ -192,59 +120,48 @@ class VideoDecoderWrapper:
         if _BACKEND == "torchcodec":
             fps = self._decoder.metadata.average_fps
             return float(fps) if fps else 0.0
-        else:
-            return float(self._decoder.get_avg_fps())
+        return float(self._decoder.get_avg_fps())
 
-    @_handle_decode_exceptions
-    def get_frames_at(self, indices: list) -> np.ndarray:
-        """Return frames at given indices as numpy array with shape (N, H, W, C)."""
-        idx = _as_int_indices(indices)
-        if _BACKEND == "torchcodec":
-            return _as_numpy(self._extract_frames(idx))
-        else:
-            return self._decoder.get_batch(idx).asnumpy()
-
-    def _extract_frames(self, idx: list):
-        """Torchcodec frame extraction, split across parallel decoders on CPU.
-
-        Sparse VLM sampling is seek-bound; parallel CPU decoders beat both a
-        single decoder and NVDEC for this access pattern.
-        """
-        if (
-            self._num_decode_threads != 1
-            and len(idx) > 1
-            and "device" not in self._tc_kwargs
-        ):
-            num_threads = self._num_decode_threads
-            if num_threads <= 0:
-                num_threads = min(os.cpu_count() or 8, 16)
-            num_threads = min(num_threads, len(idx))
-            if num_threads > 1:
-                return self._parallel_decode(idx, num_threads)
-        return self._decoder.get_frames_at(idx).data
-
-    # ---- decord-compatible shims ----
-    # Let this wrapper stand in for a raw decord `VideoReader` so processors
-    # that call `get_avg_fps()` / `get_batch(...).asnumpy()` work unchanged.
     def get_avg_fps(self) -> float:
         return self.avg_fps
 
     def get_batch(self, indices) -> "_FrameBatch":
         return _FrameBatch(self.get_frames_at(indices))
 
-    @_handle_decode_exceptions
-    def get_frames_as_tensor(self, indices: list):
-        """Return frames at given indices as a torch tensor (NHWC, uint8).
+    def get_frames_at(self, indices: list) -> np.ndarray:
+        """Return frames at given indices as numpy array with shape (N, H, W, C)."""
+        if _BACKEND == "torchcodec":
+            data = self._decoder.get_frames_at(indices).data
+            if getattr(data, "is_cuda", False):
+                data = data.cpu()
+            return data.numpy()
+        else:
+            return self._decoder.get_batch(indices).asnumpy()
 
-        CPU tensors are pinned; CUDA tensors are left on device.
-        """
+    def get_frames_as_tensor(self, indices: list):
+        """Return frames at given indices as a torch tensor (NHWC, uint8, pinned memory)."""
         import torch
 
-        idx = _as_int_indices(indices)
+        if (
+            _BACKEND == "torchcodec"
+            and self._num_decode_threads != 1
+            and len(indices) > 1
+        ):
+            num_threads = self._num_decode_threads
+            if num_threads <= 0:
+                num_threads = min(os.cpu_count() or 8, 16)
+            num_threads = min(num_threads, len(indices))
+            if num_threads > 1:
+                return self._parallel_decode(indices, num_threads)
+
         if _BACKEND == "torchcodec":
-            return _maybe_pin_memory(self._extract_frames(idx))
-        arr = self._decoder.get_batch(idx).asnumpy()
-        return torch.from_numpy(arr).pin_memory()
+            data = self._decoder.get_frames_at(indices).data
+            if getattr(data, "is_cuda", False):
+                data = data.cpu()
+            return data.pin_memory()
+        else:
+            arr = self._decoder.get_batch(indices).asnumpy()
+            return torch.from_numpy(arr).pin_memory()
 
     def _parallel_decode(self, indices, num_threads):
         """Decode frames using multiple VideoDecoder instances in parallel threads."""
@@ -258,7 +175,8 @@ class VideoDecoderWrapper:
 
         def _decode_chunk(chunk):
             d = VideoDecoder(source, **kwargs)
-            return d.get_frames_at(chunk).data
+            data = d.get_frames_at(chunk).data
+            return data.cpu() if getattr(data, "is_cuda", False) else data
 
         with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
             future_to_idx = {
@@ -270,7 +188,7 @@ class VideoDecoderWrapper:
                 idx = future_to_idx[future]
                 results[idx] = future.result()
 
-        return torch.cat(results, dim=0)
+        return torch.cat(results, dim=0).pin_memory()
 
     @property
     def source_bytes(self) -> bytes | None:
