@@ -1,5 +1,6 @@
 """Unified video decoder: torchcodec preferred, decord as fallback."""
 
+import functools
 import logging
 import os
 
@@ -99,6 +100,27 @@ def _maybe_pin_memory(tensor):
     return tensor.pin_memory()
 
 
+def _translate_decode_errors(fn):
+    """Surface frame-decode failures as ValueError.
+
+    Frame extraction runs lazily in the processors, outside load_video's
+    "Could not decode video" wrapping, so raw backend errors (torchcodec /
+    decord RuntimeError) would reach the serving layer as HTTP 500 with
+    decoder internals leaked to the client. ValueError maps to HTTP 400.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ImportError, MemoryError, ValueError):
+            raise
+        except Exception as e:
+            raise ValueError(f"Could not decode video: {e}") from e
+
+    return wrapper
+
+
 class VideoDecoderWrapper:
     """Unified video decoder that uses torchcodec when available, decord as fallback.
 
@@ -152,6 +174,7 @@ class VideoDecoderWrapper:
     def __len__(self):
         return len(self._decoder)
 
+    @_translate_decode_errors
     def __getitem__(self, idx):
         """Return single frame as numpy NHWC uint8."""
         if _BACKEND == "torchcodec":
@@ -168,6 +191,7 @@ class VideoDecoderWrapper:
         else:
             return float(self._decoder.get_avg_fps())
 
+    @_translate_decode_errors
     def get_frames_at(self, indices: list) -> np.ndarray:
         """Return frames at given indices as numpy array with shape (N, H, W, C)."""
         idx = _as_int_indices(indices)
@@ -186,6 +210,7 @@ class VideoDecoderWrapper:
     def get_batch(self, indices) -> "_FrameBatch":
         return _FrameBatch(self.get_frames_at(indices))
 
+    @_translate_decode_errors
     def get_frames_as_tensor(self, indices: list):
         """Return frames at given indices as a torch tensor (NHWC, uint8).
 
