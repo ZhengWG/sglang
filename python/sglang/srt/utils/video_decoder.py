@@ -79,26 +79,41 @@ class VideoDecoderWrapper:
     All frames are returned in NHWC uint8 numpy format for consistency.
     """
 
-    def __init__(self, source, device: str = "cpu", num_decode_threads: int = 0):
+    def __init__(
+        self,
+        source=None,
+        device: str = "cpu",
+        num_decode_threads: int = 0,
+        *,
+        decoder=None,
+    ):
         """source: file path (str) or video bytes.
         device: "cpu" or "cuda". GPU decoding only supported with torchcodec.
         num_decode_threads: number of parallel decoder instances for frame
             extraction (torchcodec only). 0 = auto (capped at 16),
             1 = single decoder. Set > 1 to split frame indices across
             multiple decoders in parallel threads.
+        decoder: already-opened reader (e.g. GPU decord VideoReader).
         """
         self._source = source
         self._num_decode_threads = num_decode_threads
         self._source_bytes = source if isinstance(source, bytes) else None
         self._source_path = source if isinstance(source, str) else None
         self._tmp_path = None
+        self._tc_kwargs = {}
+        if decoder is not None:
+            self._decoder = decoder
+            return
+        if source is None:
+            raise ValueError("VideoDecoderWrapper requires source or decoder")
         if _BACKEND == "torchcodec":
             kwargs = {"dimension_order": "NHWC"}
             if device == "cuda" and _try_cuda_backend():
                 kwargs["device"] = "cuda"
             else:
-                # torchcodec defaults to a single FFmpeg thread; 0 lets FFmpeg
-                # choose, which decodes several times faster on CPU.
+                # The main decoder runs alone; let FFmpeg pick its threads.
+                # Parallel chunk decoders get a per-chunk quota instead (see
+                # _parallel_decode) so the total never exceeds the core count.
                 kwargs["num_ffmpeg_threads"] = 0
             self._tc_kwargs = kwargs
             try:
@@ -130,6 +145,10 @@ class VideoDecoderWrapper:
 
     def __len__(self):
         return len(self._decoder)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
 
     @_handle_decode_exceptions
     def __getitem__(self, idx):
@@ -180,7 +199,7 @@ class VideoDecoderWrapper:
         ):
             num_threads = self._num_decode_threads
             if num_threads <= 0:
-                num_threads = min(os.cpu_count() or 8, 16)
+                num_threads = min(os.cpu_count() or 8, 8)
             num_threads = min(num_threads, len(indices))
             if num_threads > 1:
                 return self._parallel_decode(indices, num_threads)
@@ -208,7 +227,13 @@ class VideoDecoderWrapper:
 
         chunks = [list(c) for c in np.array_split(indices, num_threads) if len(c) > 0]
         source = self._source
-        kwargs = self._tc_kwargs
+        # Give each chunk decoder an equal share of the cores so the total
+        # FFmpeg thread count stays at cpu_count regardless of chunk count
+        # (FFmpeg autoscale per decoder would oversubscribe by ~2x).
+        kwargs = {
+            **self._tc_kwargs,
+            "num_ffmpeg_threads": max(1, (os.cpu_count() or 8) // len(chunks)),
+        }
 
         def _decode_chunk(chunk):
             d = VideoDecoder(source, **kwargs)

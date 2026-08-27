@@ -103,7 +103,7 @@ from sglang.srt.runtime_context import (
     get_exec,
     get_parallel,
 )
-from sglang.srt.utils.video_decoder import _BACKEND
+from sglang.srt.utils.video_decoder import _BACKEND, VideoDecoderWrapper
 
 if envs.SGLANG_ASYNC_MODEL_MOUNT.get():
     from model_manager.apis import get_model_path_from_manager
@@ -2168,8 +2168,6 @@ def load_video(
         # Default: torchcodec. SGLANG_VIDEO_DECODE_BACKEND=decord uses the
         # original decord path below, unchanged.
         if _BACKEND == "torchcodec":
-            from sglang.srt.utils.video_decoder import VideoDecoderWrapper
-
             source = _normalize_video_input(video_file)
             if source is None:
                 raise ValueError(f"Unsupported video input type: {type(video_file)}")
@@ -2206,7 +2204,7 @@ def load_video(
         if vr is None:
             raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
-        return vr
+        return VideoDecoderWrapper(decoder=vr)
 
     except (ImportError, MemoryError):
         raise  # missing backend / OOM is not a bad payload
@@ -2253,8 +2251,6 @@ def encode_video(video_path, frame_count_limit=None):
         return [l[i] for i in idxs]
 
     if _BACKEND == "torchcodec":
-        from sglang.srt.utils.video_decoder import VideoDecoderWrapper
-
         decoder = VideoDecoderWrapper(video_path)
         avg_fps = decoder.avg_fps
         total_frames = len(decoder)
@@ -2267,13 +2263,13 @@ def encode_video(video_path, frame_count_limit=None):
         frames_data = decoder.get_frames_at(frame_indices)
         return [Image.fromarray(v.astype("uint8")) for v in frames_data]
 
-    vr = VideoReader(video_path, ctx=cpu(0))
+    vr = VideoDecoderWrapper(decoder=VideoReader(video_path, ctx=cpu(0)))
     sample_fps = round(vr.get_avg_fps() / 1)  # FPS
     frame_indices = [i for i in range(0, len(vr), sample_fps)]
     if frame_count_limit is not None and len(frame_indices) > frame_count_limit:
         frame_indices = uniform_sample(frame_indices, frame_count_limit)
 
-    frames = vr.get_batch(frame_indices).asnumpy()
+    frames = vr.get_frames_at(frame_indices)
     frames = [Image.fromarray(v.astype("uint8")) for v in frames]
     return frames
 
