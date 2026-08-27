@@ -426,7 +426,6 @@ LINEAR_ATTN_KERNEL_BACKEND_CHOICES = [
     "ptx_kda",
     "helion",
     "intel_xpu",
-    "cula",
 ]
 
 
@@ -6788,20 +6787,7 @@ class ServerArgs:
         cfg = resolving_view(self)
         import torch
 
-        # cuLA is prefill-only; use Triton for decode unless explicitly overridden.
-        if (
-            cfg.linear_attn_backend == "cula"
-            and cfg.linear_attn_decode_backend is None
-        ):
-            self._declare(
-                "_handle_linear_attn_backend",
-                linear_attn_decode_backend="triton",
-            )
-
-        prefill = cfg.linear_attn_prefill_backend or cfg.linear_attn_backend
         decode = cfg.linear_attn_decode_backend or cfg.linear_attn_backend
-        if prefill == "cula" and not is_cuda():
-            raise ValueError("--linear-attn-prefill-backend cula requires CUDA")
         if decode == "cutedsl" and not is_cuda():
             raise ValueError("--linear-attn-decode-backend cutedsl requires CUDA")
 

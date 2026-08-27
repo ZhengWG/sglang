@@ -132,11 +132,6 @@ else:
     )
     from sgl_kernel.version import __version__
 
-    try:
-        from sgl_kernel.kda import kda_fwd_prefill
-    except ImportError:
-        pass
-
     if torch.version.hip is not None:
         from sgl_kernel.elementwise import gelu_quick
         from sgl_kernel.top_k import deepseek_v4_topk_transform_512

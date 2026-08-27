@@ -984,13 +984,10 @@ class HybridLinearAttnBackend(AttentionBackend):
 
     @property
     def data_type(self):
-        # KV-cache dtype readers reach the wrapper since split backends are
-        # wrapped once; the full-attention side owns the KV cache.
-        return getattr(self.full_attn_backend, "data_type", None)
-
-    @property
-    def kv_cache_dtype(self):
-        return getattr(self.full_attn_backend, "kv_cache_dtype", None)
+        # KV-cache dtype readers (e.g. the trtllm_mla fused-rope check) reach the
+        # wrapper since split backends are wrapped once (#31439); the full-attn
+        # side owns the KV cache, so its dtype is authoritative.
+        return self.full_attn_backend.data_type
 
     @property
     def supports_ragged_verify_graph(self) -> bool:

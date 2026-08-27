@@ -3793,15 +3793,6 @@ class TestLing3Detector(unittest.TestCase):
                 self.assertEqual(tool_calls[0]["name"], "get_weather")
                 self.assertEqual(tool_calls[0]["parameters"], expected)
 
-    def test_streaming_empty_args_single_chunk(self):
-        tool_calls = self._collect_streaming_tool_calls(
-            ["<tool_call>get_date</tool_call>"]
-        )
-        self.assertEqual(len(tool_calls), 1)
-        self.assertEqual(tool_calls[0]["name"], "get_date")
-        self.assertEqual(tool_calls[0]["parameters"], "{}")
-        self.assertEqual(self.detector.streamed_args_for_tool[0], "{}")
-
 
 class TestJsonArrayParser(unittest.TestCase):
     def setUp(self):

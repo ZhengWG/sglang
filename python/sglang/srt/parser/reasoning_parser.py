@@ -749,7 +749,6 @@ class Ling3Detector(Glm45Detector):
         super().__init__(
             stream_reasoning=stream_reasoning,
             force_reasoning=force_reasoning,
-            force_nonempty_content=force_nonempty_content,
             continue_final_message=continue_final_message,
             previous_content=previous_content,
             reasoning_default="enable_thinking",
@@ -757,10 +756,7 @@ class Ling3Detector(Glm45Detector):
         self._force_nonempty_content = force_nonempty_content
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
-        # Apply Ling3's legacy fallback policy to the raw parse result. Calling
-        # super().detect_and_parse() here would apply the generic fallback first
-        # and make the tool-call exclusion below ineffective.
-        ret = self._detect_and_parse_impl(text)
+        ret = super().detect_and_parse(text)
         if (
             self._force_nonempty_content
             and ret.reasoning_text

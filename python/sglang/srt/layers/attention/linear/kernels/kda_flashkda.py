@@ -226,7 +226,7 @@ class FlashKDAKernel(LinearAttnKernelBase):
         # KimiDeltaAttention.forward already applies sigmoid to beta on the
         # prefill path, but flash_kda expects beta LOGITS (it sigmoids
         # internally). Invert back so the kernel recovers the intended value:
-        # sigmoid(logit(p)) == p. (triton/cuLA consume the post-sigmoid beta.)
+        # sigmoid(logit(p)) == p. Triton consumes the post-sigmoid beta.
         beta = torch.logit(beta.float().clamp_(1e-7, 1.0 - 1e-7)).to(torch.bfloat16)
         beta = beta.contiguous()
 

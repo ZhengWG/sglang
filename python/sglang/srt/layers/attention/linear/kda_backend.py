@@ -44,15 +44,8 @@ class KDAKernelDispatcher:
         self,
         decode_backend: LinearAttnKernelBackend,
         prefill_backend: LinearAttnKernelBackend,
-        verify_backend: Optional[LinearAttnKernelBackend] = None,
-        lower_bound: Optional[float] = None,
+        verify_backend: LinearAttnKernelBackend,
     ):
-        if verify_backend is None:
-            verify_backend = (
-                decode_backend
-                if decode_backend.is_flashinfer()
-                else LinearAttnKernelBackend.TRITON
-            )
         self.verify_backend = verify_backend
         triton_kernel = TritonKDAKernel()
         self.triton_kernel = triton_kernel
@@ -69,17 +62,6 @@ class KDAKernelDispatcher:
                 enable_decode=decode_backend.is_helion(),
                 enable_prefill=prefill_backend.is_helion(),
             )
-
-        # CuTe DSL recurrent KDA only implements the standard softplus gate.
-        # The model-level lower_bound is known when the backend is initialized,
-        # so resolve this incompatibility once instead of falling back on every
-        # decode call. CuTe DSL prefill remains independently selectable.
-        if decode_backend.is_cutedsl() and lower_bound is not None:
-            rank0_log(
-                "KDA cutedsl decode does not support bounded safe gate; "
-                "using Triton decode."
-            )
-            decode_backend = LinearAttnKernelBackend.TRITON
 
         if decode_backend.is_triton():
             self.decode_kernel = triton_kernel
@@ -155,12 +137,6 @@ class KDAKernelDispatcher:
             )
 
             self.extend_kernel = FlashKDAKernel()
-        elif prefill_backend.is_cula():
-            from sglang.srt.layers.attention.linear.kernels.kda_cula import (
-                CulaKDAKernel,
-            )
-
-            self.extend_kernel = CulaKDAKernel()
         elif prefill_backend.is_cutedsl():
             if not is_cuda():
                 raise ValueError("KDA CuTe DSL backend requires CUDA")
@@ -211,7 +187,7 @@ class KDAKernelDispatcher:
         else:
             raise ValueError(
                 f"Unsupported KDA prefill backend: {prefill_backend}. "
-                "KDA supports 'triton', 'helion', 'flashkda', 'cula', 'cutedsl', "
+                "KDA supports 'triton', 'helion', 'flashkda', 'cutedsl', "
                 "'nvidia_kda', or 'ptx_kda' (cutedsl/nvidia_kda prefill need "
                 "SM100, ptx_kda SM103)."
             )
@@ -429,28 +405,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 "KDA FlashInfer speculative decoding only supports topk=1 "
                 "(EAGLE tree verify / retrieve_parent_token is unsupported)."
             )
-        config = model_runner.model_config.hf_config
-        lower_bound = getattr(config, "kda_lower_bound", None)
         self.kernel_dispatcher = KDAKernelDispatcher(
-            decode_backend,
-            prefill_backend,
-            verify_backend,
-            lower_bound=lower_bound,
+            decode_backend, prefill_backend, verify_backend
         )
-        # Fused conv1d + gating-delta-rule chain-verify (MTP topk==1) fast
-        # path. Opt-in and KDA-only: no shared conv/GDN kernel is modified,
-        # and every unsupported case (tree, width != 4, T < 3) falls through
-        # to the reference two-kernel path below.
-        self._fused_chain_verify_fn = None
-        if envs.SGLANG_OPT_FUSED_KDA_VERIFY.get() and getattr(
-            self.kernel_dispatcher.verify_kernel, "supports_fused_chain_verify", False
-        ):
-            from sglang.kernels.ops.attention.fla.fused_kda_conv_recurrent_verify import (
-                fused_kda_conv_gating_verify,
-            )
-
-            self._fused_chain_verify_fn = fused_kda_conv_gating_verify
-            rank0_log("KDA fused chain-verify kernel enabled (topk==1 path).")
         # One-shot; emitted at the first fused-decode interception below.
         self._fused_override_notice = (
             "K3 fused KDA decode engaged: --linear-attn-decode-backend "
@@ -485,12 +442,11 @@ class KDAAttnBackend(MambaAttnBackendBase):
             self.forward_metadata.mamba_track_mask_indices = (
                 forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
             )
-            if not forward_batch.forward_mode.is_target_verify():
-                self.forward_metadata.conv_states_mask_indices = (
-                    forward_batch.mamba_track_indices[
-                        self.forward_metadata.mamba_track_mask_indices
-                    ]
-                )
+            self.forward_metadata.conv_states_mask_indices = (
+                forward_batch.mamba_track_indices[
+                    self.forward_metadata.mamba_track_mask_indices
+                ]
+            )
 
     def forward_decode(
         self,
@@ -599,8 +555,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
             conv_state_indices=cache_indices,
         )
 
-        lower_bound = kwargs.get("lower_bound", getattr(layer, "lower_bound", None))
-
         # The packed kernel assumes one token per request. Assert the dispatch
         # invariant before taking the fused path.
         if self.kernel_dispatcher.supports_packed_decode:
@@ -614,12 +568,12 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 b=b,
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
-                lower_bound=lower_bound,
                 scale=layer.head_k_dim**-0.5,
                 ssm_states=ssm_states,
                 cache_indices=cache_indices,
                 num_v_heads=layer.num_v_heads,
                 head_v_dim=layer.head_v_dim,
+                lower_bound=layer.lower_bound,
                 replayssm_d=replayssm_d,
                 replayssm_k=replayssm_k,
                 replayssm_g=replayssm_g,
@@ -647,7 +601,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
-            lower_bound=lower_bound,
+            lower_bound=layer.lower_bound,
         )
 
         self._track_mamba_state_decode(
@@ -928,47 +882,6 @@ class KDAAttnBackend(MambaAttnBackendBase):
             dense.index_copy_(0, dense_token_indices, mixed_qkv)
             mixed_qkv_dense = dense[:num_dense_tokens].view(
                 batch_size, draft_token_num, -1
-            )
-
-        # Fused chain-verify fast path: one kernel replaces the transpose-copy,
-        # conv1d, transpose-copy, and recurrent-update sequence. Tree verify and
-        # unsupported shapes keep the upstream reference path below.
-        if (
-            self._fused_chain_verify_fn is not None
-            and ragged_layout is None
-            and intermediate_state_cache is not None
-            and retrieve_next_token is None
-            and retrieve_next_sibling is None
-            and retrieve_parent_token is None
-            and isinstance(mixed_qkv, torch.Tensor)
-            and layer.conv_weights.shape[-1] == 4
-            and draft_token_num >= 3
-        ):
-            verify_indices = cache_indices[:batch_size]
-            return self._fused_chain_verify_fn(
-                mixed_qkv=mixed_qkv,
-                conv_weight=layer.conv_weights,
-                conv_bias=layer.bias,
-                conv_state=conv_states.transpose(-1, -2),
-                conv_state_indices=verify_indices,
-                intermediate_conv_window=(
-                    intermediate_conv_window_cache.transpose(-1, -2)
-                ),
-                intermediate_state_indices=intermediate_state_indices[:batch_size],
-                a=a,
-                b=b,
-                A_log=layer.A_log,
-                dt_bias=layer.dt_bias,
-                ssm_states=ssm_states,
-                cache_indices=verify_indices,
-                intermediate_states_buffer=intermediate_state_cache,
-                scale=layer.head_k_dim**-0.5,
-                T=draft_token_num,
-                num_q_heads=layer.q_dim // layer.head_q_dim,
-                num_v_heads=layer.num_v_heads,
-                head_k_dim=layer.head_k_dim,
-                head_v_dim=layer.head_v_dim,
-                lower_bound=getattr(layer, "lower_bound", None),
             )
 
         # causal_conv1d_update expects [.., dim, width]. KDA keeps dense conv-window
