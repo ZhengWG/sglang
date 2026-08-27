@@ -578,7 +578,7 @@ def generate_embedding_convs(
 
 # Models in which system adds modality tokens at prompt start automatically
 # when media inputs exceed modality tokens in prompt (e.g. 3 images but 2 <image> tokens)
-_MODELS_REQUIRING_MODALITY_SUPPLEMENT = {"deepseek-vl2"}
+_MODELS_REQUIRING_MODALITY_SUPPLEMENT = {"deepseek-vl2", "deepseek-ocr"}
 
 
 # adapted from https://github.com/vllm-project/vllm/blob/5124f5bf51b83e6f344c1bc6652e8c4d81313b34/vllm/entrypoints/chat_utils.py#L856
@@ -1108,6 +1108,15 @@ MODEL_TYPE_TO_TEMPLATE = {
     "whisper": "whisper",
 }
 
+_DEEPSEEK_OCR_AUTO_MODELS = {
+    "modeling_deepseekocr.DeepseekOCRForCausalLM",
+    "modeling_deepseekocr2.DeepseekOCR2ForCausalLM",
+}
+_DEEPSEEK_OCR_ARCHITECTURES = {
+    "DeepseekOCRForCausalLM",
+    "DeepseekOCR2ForCausalLM",
+}
+
 
 @register_conv_template_matching_function
 def match_points_v15_chat(model_path: str):
@@ -1131,7 +1140,25 @@ def get_model_type(model_path: str) -> Optional[str]:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-        return config.get("model_type")
+        model_type = config.get("model_type")
+        if model_type == "deepseek_vl_v2":
+            # OCR-1 and OCR-2 inherit DeepSeek-VL2's model_type in their
+            # official configs. Use their model class identity to avoid
+            # auto-detecting the deepseek-vl2 conversation template when the
+            # model is loaded from a local directory or an opaque cache path.
+            auto_map = config.get("auto_map") or {}
+            auto_model = (
+                auto_map.get("AutoModel") if isinstance(auto_map, dict) else None
+            )
+            architectures = config.get("architectures") or []
+            if isinstance(architectures, str):
+                architectures = [architectures]
+            if (
+                auto_model in _DEEPSEEK_OCR_AUTO_MODELS
+                or _DEEPSEEK_OCR_ARCHITECTURES.intersection(architectures)
+            ):
+                return "deepseek-ocr"
+        return model_type
     except (IOError, json.JSONDecodeError):
         return None
 
