@@ -1,0 +1,535 @@
+---
+title: CP / DCP 技术调研（SGLang vs vLLM）
+description: Prefill Context Parallelism 与 Decode Context Parallelism 的实现细节、通信与 KV 布局，以及与 vLLM 的对比
+---
+
+# CP / DCP 技术调研（SGLang vs vLLM）
+
+本文基于当前 SGLang 代码树（`python/sglang/srt/layers/{cp,dcp}/`、attention backend、mem_cache、parallel_state）与公开的 vLLM DCP 设计（blog / docs / PR），梳理 **Prefill Context Parallelism（CP）** 与 **Decode Context Parallelism（DCP）** 的动机、并行组布局、KV 处理、通信路径，以及两边引擎的异同。
+
+> **术语约定**
+>
+> | 名称 | SGLang CLI | vLLM CLI | 作用阶段 |
+> |---|---|---|---|
+> | Prefill CP | `--enable-prefill-cp` + `--attn-cp-size` + `--cp-strategy` | `--prefill-context-parallel-size` / `-pcp` | Prefill / Extend |
+> | Decode CP (DCP) | `--dcp-size` / `--decode-context-parallel-size` | `--decode-context-parallel-size` / `-dcp` | Decode（SGLang Triton 路径也覆盖 MHA extend） |
+
+两者**不是**同一套抽象：CP 沿序列把 **Q/hidden** 分到不同 rank 做并行 prefill；DCP 沿序列把 **KV cache** 交错分片，用来消除 TP 下的 KV 复制。
+
+---
+
+## 1. 为什么需要 CP / DCP
+
+### 1.1 TP 下的 KV 复制天花板
+
+标准 Tensor Parallel 按 **attention head** 切分权重与 KV。当：
+
+- **GQA**：`tp_size > num_kv_heads` 时，多余的 TP rank 只能复制同一套 KV head；
+- **MLA**（DeepSeek / Kimi 等）：latent KV 实质只有 **1 个 head**，纯 TP **完全无法**按 head 缩小 KV，整份 latent 在每个 TP rank 上复制。
+
+结果是长上下文下每卡 KV 占满，并发被卡住。vLLM blog（2026-08）在 8×B200 / Kimi K2.6 上给出量级：基线 TP 在 concurrency≈64 触顶；DCP 可把每卡 KV 降到约 `1/N`，concurrency 推到 512 量级并抬高 tok/s/GPU。
+
+### 1.2 Prefill 与 Decode 的不同瓶颈
+
+| 阶段 | 计算特征 | 并行诉求 |
+|---|---|---|
+| Prefill / Extend | 长序列 × 大激活，算力与激活通信并重 | 把序列分到多卡（Prefill CP / Ring / Ulysses） |
+| Decode | 每步 Q 极短、KV 极长；内存与带宽主导 | 把 KV 分到多卡（DCP / Helix） |
+
+SGLang 将这两类问题拆成两套子系统（`layers/cp` vs `layers/dcp`），metadata 也分开（`attn_cp_metadata` vs `attn_dcp_metadata`）。
+
+---
+
+## 2. 并行组与进程布局
+
+代码入口：`python/sglang/srt/distributed/parallel_state.py` → `initialize_model_parallel`。
+
+### 2.1 约束关系
+
+```
+world_size = tp_size * pp_size   （DP 另计）
+
+# DCP
+tp_size % dcp_size == 0
+dcp_size >= 1
+# DCP 不增加进程数：复用 TP ranks 的子集
+
+# Prefill CP
+attn_tp_size = tp_size / (attn_cp_size * attn_dp_size)
+tp_size % attn_cp_size == 0
+tp_size % (dp_size * attn_cp_size) == 0
+```
+
+含义：
+
+- **DCP**：在每个 TP group 内部切 contiguous 子组；
+- **Prefill CP**：把原来的 TP 再拆成 `attn_tp × attn_cp (× attn_dp)`，**缩小有效 attn_tp**，权重在 CP 维度上可能被复制。
+
+### 2.2 DCP 组构造
+
+```python
+# tp_size=8, dcp_size=4 → 两组 DCP
+# [g0,g1,g2,g3], [g4,g5,g6,g7]
+for tp_group in group_ranks:
+    for start in range(0, len(tp_group), dcp_size):
+        dcp_group_ranks.append(tp_group[start : start + dcp_size])
+```
+
+- `dcp_size == 1` 时 `_DCP = None`，runtime 侧 `dcp_enabled=False`，`attn_dcp_size=1`。
+- ModelRunner 常用 `dcp_rank = tp_rank % dcp_size`。
+
+### 2.3 Prefill CP 组构造（示例）
+
+文档注释（`parallel_state.py`）：`attn_cp=2`、`attn_tp=4` 时：
+
+```
+TP groups:     [g0..g3], [g4..g7]
+Attn CP:       [g0,g4], [g1,g5], [g2,g6], [g3,g7]
+```
+
+CP 组内做 hidden / KV 的 all-gather；同组不同 CP rank 持有序列不同分段。
+
+### 2.4 CLI 一览（SGLang）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--dcp-size` | 1 | Decode KV 序列分片度 |
+| `--dcp-comm-backend` | `ag_rs` | `ag_rs` / `a2a` / `fi_a2a` |
+| `--dcp-replicate-q-proj` | 模型相关 | MLA a2a 路径可跳过每层 Q AG |
+| `--enable-prefill-cp` | False | 打开 Prefill CP |
+| `--attn-cp-size` | 1 | Prefill CP 组大小 |
+| `--cp-strategy` | None | `zigzag` / `interleave` |
+| `--enable-cp-decode-attn-tp` | False | Prefill CP 下 decode 时把复制权重切片当伪 TP（**不是 DCP**） |
+
+平台校验要点（`_handle_dcp_validation`）：
+
+- HIP 上 DCP 较成熟；CUDA 上需特定模型/后端；
+- CUDA + speculative 目前仅白名单：Kimi Linear + DSPARK + decode-mode + `tokenspeed_mla`/`cutedsl_mla`（且 `SGLANG_RAGGED_VERIFY_MODE=static`）；
+- `fi_a2a` 需要 CUDA + MNNVL fabric（如 GB200 NVL72）；
+- Unified memory pool **拒绝** `dcp_size > 1`。
+
+---
+
+## 3. Decode Context Parallelism（DCP）深度解析
+
+### 3.1 核心思想：交错 KV 所有权
+
+**Owner rule**（`layers/dcp/layout.py`）：
+
+```
+绝对位置 p 由 rank (p % dcp_size) 持有
+物理 slot = virtual_loc // dcp_size
+```
+
+局部可见长度：
+
+```
+local_len = len // dcp_size + (rank < len % dcp_size)   # start=0
+```
+
+带 prefix `start` 偏移时由 `get_dcp_lens(lens, dcp_size, dcp_rank, start)` 统一计算。
+
+**例子**（`dcp_size=4`，序列长 10）：
+
+| Rank | 持有绝对位置 |
+|---|---|
+| 0 | 0, 4, 8 |
+| 1 | 1, 5, 9 |
+| 2 | 2, 6 |
+| 3 | 3, 7 |
+
+交错而非 contiguous chunk，是为了 **decode 时新 token 自然落到正确 rank**，无需重平衡。
+
+这与 Moonshot 在 vLLM #23734 引入的策略、Helix Parallelism（arXiv:2507.07120）一致。
+
+### 3.2 虚拟索引 vs 物理池
+
+| 概念 | 行为 |
+|---|---|
+| 物理 KV pool | 容量仍按本卡 `max_total_num_tokens` 分配（只存本 rank 的 shard） |
+| Allocator | `PagedTokenToKVPoolAllocator(size=max_tokens * dcp_size, page_size=page_size * dcp_size)` |
+| `req_to_token` | 存 **虚拟 index**；kernel 用 `// dcp_size` + `% dcp_size` 过滤 |
+| Radix / TreeCache | `page_size` 强制对齐到 `allocator.page_size`，避免 eviction 冲突 |
+
+效果：同样物理显存下，逻辑上可服务约 **`dcp_size` 倍** 的总 token 容量（每序列每卡只存 `1/dcp_size`）。
+
+写入路径：
+
+- **MHA（Triton）**：`loc = out_cache_loc // dcp_size`，`dcp_kv_mask = (positions % dcp_size == dcp_rank)`；
+- **MLA**：`valid_mask = loc % attn_dcp_size == attn_dcp_rank`（`memory_pool.py`）。
+
+### 3.3 Decode 计算流水线（Pass-Q）
+
+```
+┌─────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│ AllGather Q │ ──► │ Attn(Q_full, KV_local)│ ──► │ Merge partial + LSE │
+│ (或 Q 复制) │     │  return (out, LSE)    │     │ ag_rs / a2a / fi_a2a│
+└─────────────┘     └──────────────────────┘     └─────────────────────┘
+```
+
+1. **Q 侧**：默认在 DCP 组上 all-gather 完整 query（decode 时 Q 只有 1 token，通信量小）。`--dcp-replicate-q-proj` 可在加载时复制 Q 投影权重，让每 rank 本地算全 head，省掉每层 Q AG（对齐 vLLM `VLLM_DCP_Q_REPLICATE` / #45964）。
+2. **Attn**：每 rank 用完整 Q 对 **本地 KV shard** 做 attention，并返回 LSE（online softmax 所需）。
+3. **Merge**：把各 rank 的 partial output 按 LSE 加权合成，再恢复本 rank 的 head 切片。
+
+通信体积对 merge 而言是 **O(B × H × D)**，**与 KV 长度无关**——这是 DCP 相对 Ring Attention 在 decode 场景的关键优势。
+
+### 3.4 三种通信后端（`--dcp-comm-backend`）
+
+实现：`python/sglang/srt/layers/dcp/comm.py`。
+
+#### 3.4.1 `ag_rs`（默认）
+
+| 路径 | 合并函数 | 细节 |
+|---|---|---|
+| MLA | `cp_lse_ag_out_rs_mla` | AG LSE → Triton `correct_attn_out`（log2/exp2）→ **reduce-scatter** 沿 head |
+| MHA | `cp_lse_ag_out_rs_mha` | AG LSE → `exp(lse - global_lse)` 缩放 → **all-reduce** → 按 rank 切 head |
+
+MLA 伪代码：
+
+```python
+lses = cp_group.all_gather(cp_attn_lse)          # [N, B, H]
+out = correct_attn_out(cp_attn_out, lses, rank)  # 本地 LSE 校正
+out = cp_group.reduce_scatter_along_dim(out, 0)  # 收回本 rank heads
+```
+
+MHA 伪代码：
+
+```python
+global_lse = logsumexp(all_gather(lse), dim=0)
+out = all_reduce(out * exp(local_lse - global_lse))
+out = out[:, head_start:head_end]  # 切片
+```
+
+#### 3.4.2 `a2a`（Helix 风格 packed All-to-All）
+
+引入：SGLang #21637（对齐 vLLM #34883 / #41160）。
+
+```
+cp_attn_out [B, H, D]  → reshape [N, B, H/N, D]
+cp_attn_lse [B, H]     → reshape [N, B, H/N]
+pack LSE 为 output dtype 的额外列（bf16/fp16 时 lpd=2）
+→ 单次 all_to_all_single（uint8 字节传输，兼容 fp8）
+→ dcp_lse_combine_triton 本地加权合成
+```
+
+约束：`num_heads % dcp_size == 0`。
+
+收益：
+
+- 把原先「AG LSE + RS/AR」合成 **1 次** 平衡的 A2A；
+- 通信量同阶，但 collective 次数与尾延迟更优；
+- CUDA graph 路径预分配 `send_combined` / `recv_combined` buffer。
+
+#### 3.4.3 `fi_a2a`（FlashInfer MNNVL）
+
+依赖 FlashInfer #2951：`flashinfer.comm.dcp_alltoall`。
+
+- 进程启动时 `init_fi_a2a_workspace`（**必须在 CUDA graph capture 之前**，含 barrier）；
+- 交换布局：`partial_o [B, H_per_rank, cp_size, D]` + `softmax_stats [B, H_per_rank, cp_size, 2]`；
+- 本地仍复用 `dcp_lse_combine_triton`；
+- 仅 MNNVL fabric（如 GB200）；小消息上相对 NCCL A2A 可有数倍延迟收益（FlashInfer 报告量级）。
+
+### 3.5 Extend / Prefill 在 DCP 下的特殊处理
+
+Decode 交错写 KV 后，extend 若仍只看本地 shard，会缺 prefix。SGLang 选择：
+
+1. 用 `prepare_decode_context_parallel_metadata` 建 `DecodeContextParallelMetadata`：
+   - `dcp_local_prefix_kv_indices`：本 rank 持有的 prefix 物理 index；
+   - `dcp_kv_buffer`：临时全量 buffer（prefix gather 后 + 本段 extend）；
+   - `dcp_kv_indices` / `dcp_kv_indptr`：指向 buffer 的索引。
+2. `all_gather_kv_cache_for_dcp`：按交错规则 pad → AG → 按 query 顺序重排。
+3. MLA：`all_gather_kv_cache_for_mla_extend` 写入 `dcp_kv_buffer`；MHA chunked：`all_gather_kv_cache_for_mha_*`。
+
+代价：extend 时会临时 **物化完整 prefix KV**（相对 decode 路径更贵）。这是「decode 省显存」与「extend 正确性」之间的折中；Prefill CP 则用另一套策略避免在 prefill 全程依赖 DCP 的 AG-KV。
+
+### 3.6 Attention Backend 覆盖面（SGLang）
+
+| Backend | DCP 角色 |
+|---|---|
+| Triton MHA | 完整 decode + extend（AG+RS MHA 合并） |
+| FlashInfer-MLA / FlashMLA / TokenSpeed / CuteDSL / TRTLLM-MLA | 经 `forward_mla.py` 统一 Q AG / LSE merge |
+| FlashAttention（FA3/FA4） | **Prefill CP**，不是 DCP |
+| DSA + Interleave CP | Prefill CP（round-robin），不是 DCP |
+
+`plan_dcp_decode_metadata`：decode 时把全局 `kv_lens/indptr/indices` 压成本地 owned slots（`update_kv_lens_and_indices` Triton kernel）。
+
+### 3.7 关键 Kernel（`kernels/ops/attention/dcp_kernels.py`）
+
+| Kernel / API | 用途 |
+|---|---|
+| `create_triton_kv_indices_for_dcp_triton` | MHA：`abs_pos = first + i*dcp_size`，store `data // dcp_size` |
+| `create_mla_kv_page_table_for_dcp` | MLA paged page table |
+| `create_dcp_kv_indices` | MLA extend：gathered buffer 内的 prefix+extend 布局 |
+| `update_kv_lens_and_indices` | Decode：收集 owned slots |
+| `correct_attn_out` / `_correct_attn_cp_out_kernel` | AG+RS MLA LSE 校正 |
+| `dcp_lse_combine_triton` | A2A 路径本地 LSE 加权（支持 base-e / base-2） |
+
+---
+
+## 4. Prefill Context Parallelism（CP）深度解析
+
+### 4.1 Strategy 抽象（CP-v2）
+
+`python/sglang/srt/layers/cp/`：
+
+```
+ContextParallelStrategy (ABC)
+├── ZigzagCPStrategy      # --cp-strategy zigzag
+└── InterleaveCPStrategy  # --cp-strategy interleave
+```
+
+统一接口：`build_metadata` / `shard_hidden_states` / `shard_position_ids` / `gather_hidden_states` / `gather_kv_cache` / `run_attention` / `materialize_full_kv` / `materialize_full_mla_kv`。
+
+进程级单例：`init_cp_strategy(server_args)`；worker 子进程可 lazy 恢复。
+
+### 4.2 Zigzag（原 in-seq-split）
+
+`cp_size=4` 时每条序列切成 `2 * cp_size = 8` 块：
+
+```
+cp0: block0, block7
+cp1: block1, block6
+cp2: block2, block5
+cp3: block3, block4
+```
+
+目的：因果 mask 下每个 rank 的 **early + late** 块负载更均衡（类似 Megatron / Ring Attention 的 zigzag 负载均衡）。
+
+Attention 调用：把 local Q 再拆成 `q_prev` / `q_next`，分别带不同的 `kv_len_*` / `cu_seqlens_*` 跑两次 attn，再 cat。
+
+通信：
+
+- 层间 / 末层：`all_gather_into_tensor`（pad 到 `max_rank_len`）→ 按 `cp_reverse_index` 重排回全局 token 序；
+- KV 物化：`gather_kv_cache` 后 `set_kv_buffer` / `set_mla_kv_buffer` 写回**完整序** KV（供后续 decode / 非 CP 路径使用）。
+
+支持后端：FlashAttention、TRTLLM_MHA。
+
+### 4.3 Interleave（原 round-robin-split）
+
+```
+cp0: token0,4,8,...
+cp1: token1,5,9,...
+cp2: token2,6,10,...
+cp3: token3,7,11,...
+```
+
+与 DCP 的 owner 规则同构，但这里分的是 **prefill 计算 token**，不是「只存本地 KV」。
+
+DSA 路径专用：`run_attention` 为空（DSA 自己跑 attention）；提供：
+
+- `shard_per_request`（`dsa_cp_round_robin_split_q_seqs_kernel`）；
+- `materialize_full_indexer_k_cache`；
+- `all_gather_dsa_trtllm_fp8_kv`（FP8 用 uint8 视图 gather）。
+
+Gather：AG padded → `index_select` 按 `(flat % cp) * physical_len + flat // cp` 还原。
+
+### 4.4 CP Decode Attention TP（附属优化）
+
+当 Prefill CP 把 attn 权重复制成 `attn_tp_size=1` 时，decode 阶段每卡算完整 head 浪费算力。`--enable-cp-decode-attn-tp` 在 decode 把 Column/RowParallel 权重按 CP rank 切片，模拟正常 TP GEMM（白名单：DeepSeek-V4 / GLM DSA 等）。**它不改 KV 布局，也不等于 DCP。**
+
+### 4.5 Prefill CP 与 DCP 能否同开
+
+Server args **没有**硬性互斥。二者用不同通信组与 metadata：
+
+| | Prefill CP | DCP |
+|---|---|---|
+| Group | `_ATTN_CP` | `_DCP` ⊂ TP |
+| Metadata | `attn_cp_metadata` | `attn_dcp_metadata` |
+| 主战场 | FA / DSA prefill | Triton MHA / MLA decode |
+
+实践中常按 workload 选：超长 prefill 用 CP；高并发长上下文 decode / MLA 用 DCP。同开时需小心 KV 物化语义与 PD disagg / HiCache 交互（Kimi K3 cookbook 指出 HiCache L3 key 尚不感知 `dcp_rank`，L3 与 DCP 暂不共存）。
+
+---
+
+## 5. 与 vLLM 的对比
+
+### 5.1 算法族：同源
+
+两边 DCP 同属 **Helix / Moonshot interleaved KV + Pass-Q + LSE merge** 一族：
+
+| 维度 | SGLang | vLLM |
+|---|---|---|
+| KV 分片 | `pos % dcp_size` | 同（#23734）；另有 `--cp-kv-cache-interleave-size` 可按 block 交错 |
+| 进程模型 | 不扩 world，复用 TP | 同；有 PCP 时 DCP 可跨 PCP 轴 |
+| Decode 节奏 | AG Q → local attn → merge | 同（blog 称 AllGather Q → Compute → AG+RS） |
+| Q 复制 | `--dcp-replicate-q-proj` | `VLLM_DCP_Q_REPLICATE` / #45964 |
+| A2A | `#21637` packed out+LSE | `#34883` → `#41160` pack；`async_op=True` |
+| FlashInfer A2A | 显式 `--dcp-comm-backend fi_a2a` | `#48248` 在 Blackwell+full CUDA graph 等条件可自动走 fused |
+| Symm-mem A2A | 开放 PR `#33364` `symm_a2a` | `#48897` direct symm A2A |
+
+### 5.2 通信后端对照
+
+| Backend | SGLang | vLLM | NCCL 次数（量级） |
+|---|---|---|---|
+| AG+RS | 默认 `ag_rs`；MLA 用 RS，MHA 用 AR+slice | 默认 `ag_rs` | 经典路径约 3 次/层（含 Q AG） |
+| Packed A2A | `a2a`：1 次 A2A 传 out∥LSE | `a2a`：pack 后类似 | Q AG + 1 A2A |
+| FlashInfer MNNVL | 显式 `fi_a2a` | 条件自动 / fused | 专有 LL128 FIFO |
+| Direct symm | 进行中 | `VLLM_USE_DIRECT_DCP_A2A` | P2P，避开通用 NCCL |
+
+### 5.3 Prefill 方向差异（重要）
+
+| | SGLang | vLLM |
+|---|---|---|
+| Prefill 并行 | 一等公民：`--enable-prefill-cp` + zigzag/interleave strategy ABC | `--prefill-context-parallel-size`（PCP），文档强调 **扩 world**；Ring/Ulysses 路线图更重 |
+| Zigzag / Interleave | 完整 FA + DSA 实现 | 未以同名 strategy 暴露 |
+| Diffusion SP | `multimodal_gen` 另有 Ulysses/Ring degree | 独立 |
+
+经验结论（社区二次分析，需自行验证）：SGLang prefill 长序列更常走 **CP strategy + FA/DSA + AG KV 物化**；vLLM 长 prefill 更偏 **PCP / Ring / Ulysses** 方向。**Decode DCP 两边高度同构。**
+
+### 5.4 产品栈差异（影响落地）
+
+| 主题 | SGLang | vLLM |
+|---|---|---|
+| 缓存 | Radix / TreeCache；DCP 时 page_size×N | BlockManager / prefix caching |
+| HiCache | L3 与 DCP 暂不兼容（key 不感知 dcp_rank） | — |
+| Speculative | CUDA 上 DCP+spec 白名单很窄 | 官方 roadmap：更好 MTP/spec |
+| PD disagg | 需单独验证 DCP 与 transfer backend | 官方 roadmap hardening |
+| MLA 覆盖 | FlashInfer / FlashMLA / TokenSpeed / CuteDSL 等 | FlashMLA 等；部分 FlashInferMLA 与 LSE 有约束历史 |
+| GQA/MHA | Triton 路径较完整（#25090） | FlashAttn / FlashInfer 路由 A2A |
+
+### 5.5 配置示例对照
+
+**SGLang MLA DCP（示意）：**
+
+```bash
+python -m sglang.launch_server \
+  --model-path deepseek-ai/DeepSeek-V3 \
+  --tp-size 8 \
+  --dcp-size 8 \
+  --dcp-comm-backend a2a \
+  --dcp-replicate-q-proj
+```
+
+**vLLM 等价：**
+
+```bash
+vllm serve deepseek-ai/DeepSeek-R1 \
+  --tensor-parallel-size 8 \
+  --decode-context-parallel-size 8 \
+  --dcp-comm-backend a2a
+# Q 复制：VLLM_DCP_Q_REPLICATE=1
+```
+
+**SGLang Prefill CP（zigzag）：**
+
+```bash
+python -m sglang.launch_server \
+  --model-path <model> \
+  --tp-size 8 \
+  --enable-prefill-cp \
+  --attn-cp-size 2 \
+  --cp-strategy zigzag
+```
+
+**GQA DCP 上限提醒（vLLM 文档公式，SGLang 实践同类）：**
+
+```
+# 例：num_kv_heads=4, tp=8 → 复制因子 2 → dcp_size ≤ 2
+dcp_size ≤ tp_size / num_kv_heads
+```
+
+MLA 则可达 `dcp_size == tp_size`。
+
+---
+
+## 6. 通信量与复杂度速查
+
+设：`N = dcp_size`，`B` batch，`H` 本层参与 merge 的 head 数，`D` head dim，`T` 序列长，`E` 单 token KV 字节。
+
+| 操作 | 量级 | 备注 |
+|---|---|---|
+| Decode AG Q | `O(B · H · D)` | 与 T 无关；可被 Q-replicate 消掉 |
+| Decode merge AG+RS / A2A | `O(B · H · D)` | 与 T 无关 |
+| 本卡 KV 存储 | `O((T/N) · E)` | DCP 核心收益 |
+| Extend AG KV（SGLang） | `O(T · E)` 临时 | prefix 需 gather；decode 稳态不付此价 |
+| Prefill CP AG hidden/KV | `O(T · hidden)` | zigzag/interleave gather |
+| Ring Attention（对照） | 每层循环传 KV chunk，与 T 相关 | 更适超长 prefill |
+
+Helix 声称：相对基线可降低 TTL、提升并发数量级；A2A 相对 AG+RS 主要减 **collective 次数与尾延迟**，不是数量级通信量砍半。
+
+---
+
+## 7. 代码地图（SGLang）
+
+```
+python/sglang/srt/
+├── server_args.py                 # CLI / _handle_dcp_validation / _handle_context_parallelism
+├── distributed/parallel_state.py  # _DCP / _ATTN_CP 组创建
+├── runtime_context.py             # get_parallel().dcp_* / attn_cp_*
+├── layers/dcp/
+│   ├── comm.py                    # AG+RS / A2A / fi_a2a / KV AG helpers
+│   ├── layout.py                  # owner rule / get_dcp_lens
+│   ├── planner.py                 # metadata builders
+│   └── metadata.py                # DecodeContextParallelMetadata
+├── layers/cp/
+│   ├── base.py                    # Strategy ABC + singleton
+│   ├── zigzag.py                  # ZigzagCPStrategy
+│   ├── interleave.py              # InterleaveCPStrategy
+│   └── cp_decode_attn_tp.py       # decode 伪 TP 切片
+├── layers/attention/triton_backend.py          # MHA DCP
+├── models/deepseek_common/.../forward_mla.py   # MLA DCP 编排
+├── mem_cache/kv_cache_configurator.py          # allocator × dcp_size
+└── kernels/ops/attention/dcp_kernels.py        # Triton kernels
+
+test/registered/dcp/               # 功能 / layout / LSE / 模型 e2e
+```
+
+PR 系谱（便于追历史）：
+
+| PR | 内容 |
+|---|---|
+| SGLang #14194 | MLA DCP（FlashInfer 路径，AG+RS） |
+| SGLang #25090 | Triton/MHA DCP（对齐 vLLM Helix RFC #34018） |
+| SGLang #21637 | `a2a` / `fi_a2a` / Q-replicate |
+| SGLang #33364（开放） | `symm_a2a` |
+| vLLM #23734 | 首个 MLA DCP |
+| vLLM #34883 / #41160 | A2A + pack |
+| vLLM #45964 | Q replicate |
+| vLLM #48248 / #48897 | FlashInfer fused / direct symm A2A |
+| FlashInfer #2951 | `decode_cp_a2a_*` MNNVL |
+
+---
+
+## 8. 选型建议与已知限制
+
+### 8.1 何时开 DCP
+
+- MLA 模型 + 大 `tp_size`（否则 latent KV 全复制）；
+- GQA 且 `tp_size > num_kv_heads`，用多余复制度做序列分片；
+- 长上下文、高并发 decode，KV 显存是瓶颈；
+- 有高带宽 NVLink / NVL72 时优先尝试 `a2a` / `fi_a2a`。
+
+### 8.2 何时开 Prefill CP
+
+- Prefill/TTFT 被长序列激活卡住；
+- Dense+FA → `zigzag`；DSA/NSA → `interleave`；
+- 接受 decode 前把 KV gather 成完整序（或配合 CP decode attn TP）。
+
+### 8.3 当前限制（以代码校验为准）
+
+1. DCP 平台/模型矩阵仍不对称（HIP vs CUDA、spec 白名单）。
+2. `fi_a2a` 绑定 MNNVL；普通集群用 `a2a` 或默认 `ag_rs`。
+3. Unified KV pool、部分 HiCache L3 路径与 DCP 不兼容。
+4. Extend 路径的 KV all-gather 会短暂拉高显存与带宽。
+5. Prefill CP 与 DCP 同开缺少一等公民集成测试叙事，需 case-by-case。
+6. vLLM 侧 PCP 扩 world 与 SGLang `attn_cp` 缩 `attn_tp` 的运维模型不同，迁移配置时不能 1:1 抄参数。
+
+---
+
+## 9. 总结
+
+- **DCP** 解决的是「TP 无法继续按 head 切 KV」的显存复制问题：用 `pos % N` 交错分片，decode 用 Pass-Q + LSE merge；通信与序列长度解耦。
+- **Prefill CP** 解决的是长 prefill 的序列并行：zigzag / interleave 两套策略，末尾 gather 物化完整激活/KV。
+- 与 **vLLM DCP** 在数学与通信后端命名上高度对齐（`ag_rs` / `a2a` / Q-replicate / FlashInfer A2A）；差异主要在 **prefill 并行产品化路径**、**缓存/PD/HiCache 集成**，以及 **默认后端与自动选择策略**。
+- 落地时优先明确瓶颈是 **decode KV 容量** 还是 **prefill 序列算力**，再分别打开 `--dcp-size` 或 `--enable-prefill-cp`，并按互联能力选择 `--dcp-comm-backend`。
+
+---
+
+## 参考
+
+- SGLang 源码：`python/sglang/srt/layers/{cp,dcp}/`，`distributed/parallel_state.py`，`kernels/ops/attention/dcp_kernels.py`
+- vLLM Blog: [Efficient Decode Context Parallelism](https://vllm.ai/blog/2026-08-07-decode-context-parallelism)
+- vLLM Docs: Context Parallel Deployment / Engine Arguments（`--decode-context-parallel-size`，`--dcp-comm-backend`，`--prefill-context-parallel-size`）
+- Helix Parallelism: arXiv:2507.07120；NVIDIA TensorRT-LLM Helix；vLLM RFC #34018
+- Moonshot DCP upstream: vLLM #23734
+- FlashInfer DCP A2A: #2951
