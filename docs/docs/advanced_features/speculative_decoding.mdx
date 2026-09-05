@@ -36,6 +36,8 @@ SGLang provides several speculative decoding options, including EAGLE-2/EAGLE-3,
 - **You have a smaller draft LLM**: Use **STANDALONE** (`--speculative-algorithm STANDALONE`).
 - **No extra model available**: Use **NGRAM** (`--speculative-algorithm NGRAM`, CUDA-only).
 
+All speculative algorithms require `pp_size == 1`. See [PP, HiCache, and speculative decoding compatibility](./pp_hicache_spec_compatibility) for why, and which HiCache / DCP combinations survive.
+
 ### Method comparison (mini table)
 
 <table style={{width: "100%", borderCollapse: "collapse", tableLayout: "fixed"}}>

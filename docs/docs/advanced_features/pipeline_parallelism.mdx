@@ -9,6 +9,8 @@ As Large Language Models (LLMs) scale toward trillion-parameter architectures an
 
 Detailed analysis can be found in this [blog](https://lmsys.org/blog/2026-01-15-chunked-pipeline/).
 
+Pipeline parallelism is compatible with [HiCache](./hicache), but not with [speculative decoding](./speculative_decoding). For the timelines (PP microbatches, draft/verify/extend, HiCache offload) and the Kimi / DeepSeek / GLM recipe matrix, see [PP, HiCache, and speculative decoding compatibility](./pp_hicache_spec_compatibility).
+
 ## Implementation Refactoring based on Async Communication
 With Dynamic Chunked Prefill, pipeline parallelism has the potential to reduce the TTFT of long-context inputs. For each request, its input tokens can be partitioned into multiple chunks, each no longer than the chunked prefill size. Different chunks of the same request can be processed simultaneously by different nodes, thus parallelizing the processing and reducing TTFT. SGLang has supported Pipeline Parallelism (#5724) for some time and made it compatible with the PD Disaggregation feature (#8846), but the implementation was not perfect and had significant room for performance improvements.
 
