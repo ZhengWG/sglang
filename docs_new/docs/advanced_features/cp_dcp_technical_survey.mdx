@@ -16,6 +16,12 @@ description: Prefill Context Parallelism 与 Decode Context Parallelism 的实�
 
 两者**不是**同一套抽象：CP 沿序列把 **Q/hidden** 分到不同 rank 做并行 prefill；DCP 沿序列把 **KV cache** 交错分片，用来消除 TP 下的 KV 复制。
 
+**阅读指引（易混点）：**
+
+- Prefill CP 默认 **每卡物化完整 KV**；因果靠 `cache_seqlens`，**不是** rank 串行等 B0→B6（见 [§4.2](#42-zigzag原-in-seq-split) / [§9.1](#91-prefill-cp每卡是否保留完整-kvattention-怎么并行)）。
+- DCP 各 rank KV **故意不同**；靠 Pass-Q + LSE merge 还原正确 attention（见 [§3](#3-decode-context-parallelismdcp深度解析) / [§9.2](#92-dcp交错分片后各-rank-kv不一样是否有问题)）。
+- `attn_tp = tp/(attn_dp·attn_cp)`，开 CP **会缩小** attn_tp，满配时才为 1；CP Decode Attn TP ≠ DCP（见 [§4.4](#44-cp-decode-attention-tp附属优化)）。
+
 ---
 
 ## 1. 为什么需要 CP / DCP
@@ -62,8 +68,11 @@ tp_size % (dp_size * attn_cp_size) == 0
 
 含义：
 
-- **DCP**：在每个 TP group 内部切 contiguous 子组；
-- **Prefill CP**：把原来的 TP 再拆成 `attn_tp × attn_cp (× attn_dp)`，**缩小有效 attn_tp**，权重在 CP 维度上可能被复制。
+- **DCP**：在每个 TP group 内部切 contiguous 子组；**不改变** attn 权重的 head 切分方式（`attn_tp` 与 DCP 无关）。
+- **Prefill CP**：把原来的 TP 预算再拆成 `attn_tp × attn_cp (× attn_dp)`，**缩小有效 attn_tp**。同一组 GPU 在「按 head 切权重」与「按序列并行」之间分配：
+  - `tp=8, attn_cp=2` → `attn_tp=4`
+  - `tp=8, attn_cp=8` → `attn_tp=1`（attention 权重复制到每张 CP 卡）
+  - Attention 线性层用 `attn_tp_size`（如 `num_local_heads = num_heads // attn_tp_size`），不是裸 `tp_size`。
 
 ### 2.2 DCP 组构造
 
@@ -99,7 +108,7 @@ CP 组内做 hidden / KV 的 all-gather；同组不同 CP rank 持有序列不�
 | `--enable-prefill-cp` | False | 打开 Prefill CP |
 | `--attn-cp-size` | 1 | Prefill CP 组大小 |
 | `--cp-strategy` | None | `zigzag` / `interleave` |
-| `--enable-cp-decode-attn-tp` | False | Prefill CP 下 decode 时把复制权重切片当伪 TP（**不是 DCP**） |
+| `--enable-cp-decode-attn-tp` | False | Prefill CP 使 `attn_tp` 变小/为 1 后，decode 临时按 CP rank 切复制权重（**不是 DCP**） |
 
 平台校验要点（`_handle_dcp_validation`）：
 
@@ -295,7 +304,17 @@ cp3: block3, block4
 
 目的：因果 mask 下每个 rank 的 **early + late** 块负载更均衡（类似 Megatron / Ring Attention 的 zigzag 负载均衡）。
 
-Attention 调用：把 local Q 再拆成 `q_prev` / `q_next`，分别带不同的 `kv_len_*` / `cu_seqlens_*` 跑两次 attn，再 cat。
+**一层内的真实顺序（关键）：**
+
+```
+① 各 rank 并行投影自己的两块 → 得到 local Q/K/V
+② AllGather K/V + 重排 → 每卡 pool 写入完整序 [B0|…|B7]
+③ 本卡对本地 Q 跑 Attention（读已完整的 pool）
+```
+
+因此 **B6 不必等 B0–B5 串行算完**：B0–B5 的 K/V 在 ① 已由各卡并行算出，② gather 齐后再做 ③。因果只约束「读哪些 KV」，不约束「谁先算完」。
+
+**为什么两次 FA：** 本 rank 的 early / late 两段 Q 合法前缀长度不同（如 B1 只看到 B0..B1，B6 看到 B0..B6），而 FA 一次只能带一个 `cache_seqlens`，故 `run_attention` 拆成 `q_prev` / `q_next` 两次再 cat。详见 [§9.1](#91-prefill-cp每卡是否保留完整-kvattention-怎么并行)。
 
 通信：
 
@@ -325,19 +344,26 @@ Gather：AG padded → `index_select` 按 `(flat % cp) * physical_len + flat // 
 
 ### 4.4 CP Decode Attention TP（附属优化）
 
-当 Prefill CP 把 attn 权重复制成 `attn_tp_size=1` 时，decode 阶段每卡算完整 head 浪费算力。`--enable-cp-decode-attn-tp` 在 decode 把 Column/RowParallel 权重按 CP rank 切片，模拟正常 TP GEMM（白名单：DeepSeek-V4 / GLM DSA 等）。**它不改 KV 布局，也不等于 DCP。**
+**≠ DCP，不改 KV。** 解决的是 Prefill CP 把 GPU 预算挪给 `attn_cp` 之后、decode 阶段的算力浪费。
+
+回顾：`attn_tp = tp / (attn_dp · attn_cp)`。满配（如 `tp=8, attn_cp=8`）时 `attn_tp=1`，attention 权重在每张 CP 卡上 **整份复制**——prefill 时合理（各算各的序列块、需要全 head）。Decode 不再走 zigzag/interleave 后，若仍用整份权重，多卡会重复做同一套全 head GEMM。
+
+`--enable-cp-decode-attn-tp`：在 decode forward 的 context manager 里按 `attn_cp_rank` **临时切片** Column/RowParallel 权重（伪 TP），RowParallel 走 all-reduce；结束 restore，留给下次 prefill。Prefill CP 活跃时强制不切。白名单：DeepSeek-V4 / GLM DSA 等（`CP_DECODE_ATTN_TP_SUPPORTED_ARCHS`）。详见 [§9.5](#95-cp-decode-attention-tp-是什么)。
 
 ### 4.5 Prefill CP 与 DCP 能否同开
 
-Server args **没有**硬性互斥。二者用不同通信组与 metadata：
+Server args **没有**硬性互斥，但 **KV 布局哲学相反**，默认不要当成可随意叠加的组合：
 
-| | Prefill CP | DCP |
+| | Prefill CP（默认） | DCP |
 |---|---|---|
 | Group | `_ATTN_CP` | `_DCP` ⊂ TP |
 | Metadata | `attn_cp_metadata` | `attn_dcp_metadata` |
+| 池里 KV | **完整序**（每卡一份，按 attn_tp 切 head） | **仅交错 shard**（`pos % N`） |
 | 主战场 | FA / DSA prefill | Triton MHA / MLA decode |
 
-实践中常按 workload 选：超长 prefill 用 CP；高并发长上下文 decode / MLA 用 DCP。同开时需小心 KV 物化语义与 PD disagg / HiCache 交互（Kimi K3 cookbook 指出 HiCache L3 key 尚不感知 `dcp_rank`，L3 与 DCP 暂不共存）。
+`dcp_kv_buffer` 是 **DCP extend 自己的临时完整视图**（本地 shard AG 上来算 prefix），不是 Prefill CP 组件；仅开 DCP 时 extend 就会用到。详见 [§9.3](#93-prefill-cp-与-dcp-能否共用要不要-global_kv_buffer)。
+
+实践：超长 prefill 用 CP；高并发长上下文 decode / MLA 用 DCP。同开需布局转换或统一写入规则；另需小心 PD disagg / HiCache（L3 key 尚不感知 `dcp_rank`）。
 
 ---
 
