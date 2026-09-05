@@ -525,59 +525,58 @@ PR 系谱（便于追历史）：
 Zigzag / 默认 FA 路径在每层算完本地 K/V 后调用 `materialize_full_kv` / `materialize_full_mla_kv`：all-gather → 按原 token 序重排 → `set_kv_buffer`。随后 `run_attention` 用 **本地 Q 分片** 去读 **池里已是完整序的 KV**。
 
 ```
-序列 token:  t0 t1 t2 t3 t4 t5 t6 t7     (cp_size=4 → 切成 8 块 zigzag)
-             |--B0--|--B1--|--B2--|--B3--|--B4--|--B5--|--B6--|--B7--|
+序列:  |--B0--|--B1--|--B2--|--B3--|--B4--|--B5--|--B6--|--B7--|   (cp_size=4 → 8 块)
 
-cp0 负责算 Q:  B0 + B7
-cp1 负责算 Q:  B1 + B6
-cp2 负责算 Q:  B2 + B5
-cp3 负责算 Q:  B3 + B4
-
-每层流水（各 rank 并行，不是按时间先后串行）:
-
-  ① 本地只跑自己的 token → 得到 local K/V（只有两个 block）
-  ② AllGather + 重排 → 每张卡 KV pool 里都有 [B0|B1|…|B7] 完整序
-  ③ 本地 Q 对完整 KV 做 FA（见下）
-  ④ 层末 Gather hidden（或下一层再 shard）
+cp0 算 Q/K/V: B0 + B7
+cp1 算 Q/K/V: B1 + B6
+cp2 算 Q/K/V: B2 + B5
+cp3 算 Q/K/V: B3 + B4
 ```
 
-**为什么保留完整 KV（而不是像 DCP 只留 1/N）？**
+#### 「B6 不用等 B0–B5 先算完吗？」——不用
 
-1. Prefill CP 的目标是 **分摊 Q/FFN 算力**（每卡只算 `~1/cp_size` 的 token），不是省 decode KV 显存。
-2. Zigzag 算法依赖「池里已是全局 token 序的 KV + 按因果可见长度截断」。
-3. Prefill 结束后进入 decode：默认不再走 CP，需要每卡（在其 attn_tp head 分片上）已有完整序列 KV。
+把两件事分开：
 
-例外：`--enable-dsa-cache-layer-split` 会把 **不同 layer 的 DSA KV** 分到不同 CP rank（省显存），那是另一条优化，不是默认 zigzag 行为。
+| | 含义 |
+|---|---|
+| **因果** | B6 的 query 做 attention 时，只能 **读到** B0…B6 的 K/V |
+| **计算顺序** | B0…B7 的 K/V 由各 rank **同一层内并行算出**，再 AllGather；没有「先算完 B0 才能开算 B1」的跨卡流水线 |
 
-#### 因果「先后关系」如何保证？
-
-关键误解：以为 cp0 必须先算完，cp1 才能算。实际上 **所有 CP rank 同时算**；因果靠 **可见 KV 长度** 表达，不靠 rank 间流水线顺序。
-
-Zigzag 把本 rank 的 Q 再拆成两半（early `q_prev` / late `q_next`），分别限制 `cache_seqlens`：
+一层内真实顺序：
 
 ```
-例：cp_size=4，cp_rank=1 拥有 B1(early) 与 B6(late)
+① 并行投影（同一时刻）
+   cp0 → K/V(B0), K/V(B7)
+   cp1 → K/V(B1), K/V(B6)     ← B6 的 K/V 此刻已算出
+   cp2 → K/V(B2), K/V(B5)
+   cp3 → K/V(B3), K/V(B4)
 
-q_prev = B1 的 queries
-  因果上只能看到 B0..B1
-  → kv_len_prev = |B0|+|B1|
+② AllGather + 重排
+   每卡 pool = 完整 [B0|B1|…|B7]
+   （B6 要「看见」的 B0–B5，来自别卡 gather 过来，不是等它们串行算完）
 
-q_next = B6 的 queries
-  因果上能看到 B0..B6
-  → kv_len_next = |B0|+…+|B6|
-
-        KV pool（每卡都有完整序）:
-        [B0][B1][B2][B3][B4][B5][B6][B7]
-         <--- q_prev 可见 --->
-         <------------- q_next 可见 ------------->
-
-FA 调用两次（见 ZigzagCPStrategy.run_attention）:
-  attn(q_prev, cache_seqlens=kv_len_prev)
-  attn(q_next, cache_seqlens=kv_len_next)
-  → cat → 本 rank 的 attention 输出
+③ 再跑 Attention（只读本地 pool）
 ```
 
-因果正确性来自：KV 已按全局位置排好 + `cache_seqlens` 截到合法前缀 + chunk 内 causal mask；**不需要** rank 之间按时间排队。
+#### 「两次 FA」是什么意思？
+
+每个 zigzag rank 拥有 **两段不相邻** 的 Q（early + late），合法 KV 前缀长度 **不同**。FlashAttention 一次调用只能带 **一个** `cache_seqlens`，所以必须拆两次：
+
+```
+例：cp_rank=1 拥有 B1(early) 与 B6(late)
+
+本卡 Q:  [ B1 (=q_prev) | B6 (=q_next) ]
+
+FA #1: q=B1, cache_seqlens = |B0|+|B1|        // 只能看到 B0..B1
+FA #2: q=B6, cache_seqlens = |B0|+…+|B6|      // 能看到 B0..B6
+→ cat(out1, out2)
+
+KV pool: [B0][B1][B2][B3][B4][B5][B6][B7]
+          <- FA1 ->
+          <----------- FA2 ----------->
+```
+
+两次 FA = **同一卡上两段 Q、两套可见长度**；不是「先全员算完第一段、再算第二段」的跨卡同步。若把 `[B1|B6]` 拼成一次 FA，无法给两段 Q 设不同前缀长度。
 
 ```mermaid
 sequenceDiagram
@@ -585,17 +584,19 @@ sequenceDiagram
   participant C1 as cp1
   participant C2 as cp2
   participant C3 as cp3
-  Note over C0,C3: 同一层，四卡并行
-  C0->>C0: Q/K/V on B0+B7
-  C1->>C1: Q/K/V on B1+B6
-  C2->>C2: Q/K/V on B2+B5
-  C3->>C3: Q/K/V on B3+B4
-  C0<<->>C3: AllGather K/V → 每卡写满完整序
-  C0->>C0: FA(q_prev,q_next) vs full KV
-  C1->>C1: FA(q_prev,q_next) vs full KV
-  C2->>C2: FA(q_prev,q_next) vs full KV
-  C3->>C3: FA(q_prev,q_next) vs full KV
+  Note over C0,C3: ① 并行算各块 K/V（含 B6）
+  C0->>C0: K/V on B0+B7
+  C1->>C1: K/V on B1+B6
+  C2->>C2: K/V on B2+B5
+  C3->>C3: K/V on B3+B4
+  Note over C0,C3: ② AllGather → 每卡写满完整 KV
+  C0<<->>C3: AllGather K/V
+  Note over C0,C3: ③ 各卡本地两次 FA（不同 cache_seqlens）
+  C1->>C1: FA(B1, kv_len=B0..B1)
+  C1->>C1: FA(B6, kv_len=B0..B6)
 ```
+
+**为什么保留完整 KV：** Prefill CP 目标是分摊 Q/FFN 算力，不是省 decode 显存；Zigzag 依赖完整序 KV + 可见长度截断；decode 默认不再走 CP，需要池里已有完整序列。例外：`--enable-dsa-cache-layer-split` 按 layer 切 DSA KV。
 
 ---
 
@@ -735,42 +736,36 @@ Zigzag 多一轮「块配对」是为了缓解因果 attention 下「越靠后�
 
 ### 9.5 CP Decode Attention TP 是什么？
 
-它 **不是 DCP**，也 **不改 KV 布局**。它解决的是 Prefill CP 打开后 decode 阶段的 **算力浪费**。
+它 **不是 DCP**，也 **不改 KV 布局**。它解决 Prefill CP 打开后 decode 阶段的 **算力浪费**。
 
-背景：
+#### 是不是「prefill 开 CP ⇒ attn_tp=1」？
 
-```
-开 Prefill CP 后（示意 tp=8, attn_cp=8）:
-  attn_tp_size = tp / (attn_cp * attn_dp) = 1
-  → 每张卡上的 attention 线性层权重是「整份复制」的（相对正常 TP）
-
-Prefill 时：每卡只算自己的序列分片 Q，需要「完整 head」→ 复制权重合理。
-
-Decode 时：不再走 zigzag/interleave（is_cp_v2_active / dsa_use_prefill_cp 为假），
-  若仍用整份复制权重 → 8 张卡做 8 次完全相同的全 head GEMM → 纯浪费。
-```
-
-`--enable-cp-decode-attn-tp` 做的事：
+**不一定，但会变小；满配 CP 时才是 1。** 公式（`dp_attention.py`）：
 
 ```
-Decode forward 期间（context manager）:
-  把 ColumnParallel / RowParallel 的 weight 按 attn_cp_rank 切一刀
-  （等价于临时恢复「按 head 的 TP」）
-  → 每卡只算 1/N head
-  → RowParallel 输出走 all-reduce（linear.py 里 use_decode_attn_tp 触发）
-  → forward 结束 restore 整份权重（留给下次 Prefill CP 用）
+attn_tp_size = tp_size / (attn_dp_size * attn_cp_size)
 ```
 
-```
-Prefill CP 开着、Decode Attn TP 关着:
-  GPU0: 算全部 H 个 head   GPU1: 算全部 H 个 head  …  （重复劳动）
+| 配置 | attn_tp |
+|---|---|
+| `tp=8, attn_cp=1` | 8（纯按 head 切） |
+| `tp=8, attn_cp=2` | 4 |
+| `tp=8, attn_cp=8` | **1**（权重复制） |
 
-Decode Attn TP 开着:
-  GPU0: 算 head[0, H/N)    GPU1: 算 head[H/N, 2H/N) … 再 AllReduce
-  （恢复正常 TP 的分工；KV 仍是 Prefill CP 物化好的完整序）
+Attention 线性层用 `attn_tp_size` 切 head（如 `num_local_heads = num_heads // attn_tp_size`）。`attn_cp` 变大 = 同一组 TP GPU 里更多维度分给「序列并行」，留给「按 head 切权重」的维度变少。
+
+#### 为什么 Prefill CP 要缩小 attn_tp？
+
+Prefill CP 沿 **序列** 分活：每卡要对本地 token 做（接近）完整 head 上的 QKV。把原来的 TP 度挪一部分/全部给 `attn_cp` 后，`attn_tp=1` 时每卡持有 **整份 attention 权重**——prefill 时合理。
+
+#### Decode 问题与开关
+
+```
+Prefill（CP 开）: 各算各的序列块，需要全 head → 复制权重 OK
+Decode（CP 关）: 若仍 attn_tp=1 用整份权重 → 多卡重复算同一套全 head GEMM
 ```
 
-白名单架构：DeepSeek-V4 / GLM DSA 等（见 `CP_DECODE_ATTN_TP_SUPPORTED_ARCHS`）。Prefill CP 活跃时强制关掉切片（那一步需要全 head）。
+`--enable-cp-decode-attn-tp`：decode forward 里临时按 `attn_cp_rank` 切权重（伪 TP），RowParallel AllReduce；结束 restore。Prefill CP 活跃时强制不切（需要全 head）。白名单：DeepSeek-V4 / GLM DSA 等。
 
 ---
 
