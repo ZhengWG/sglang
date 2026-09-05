@@ -516,12 +516,271 @@ PR 系谱（便于追历史）：
 
 ---
 
-## 9. 总结
+## 9. FAQ 深挖（可视化）
+
+### 9.1 Prefill CP：每卡是否保留完整 KV？Attention 怎么并行？
+
+**默认答案：是，每卡写回完整序列序的 KV（本 attn_tp 的 head 分片）。**
+
+Zigzag / 默认 FA 路径在每层算完本地 K/V 后调用 `materialize_full_kv` / `materialize_full_mla_kv`：all-gather → 按原 token 序重排 → `set_kv_buffer`。随后 `run_attention` 用 **本地 Q 分片** 去读 **池里已是完整序的 KV**。
+
+```
+序列 token:  t0 t1 t2 t3 t4 t5 t6 t7     (cp_size=4 → 切成 8 块 zigzag)
+             |--B0--|--B1--|--B2--|--B3--|--B4--|--B5--|--B6--|--B7--|
+
+cp0 负责算 Q:  B0 + B7
+cp1 负责算 Q:  B1 + B6
+cp2 负责算 Q:  B2 + B5
+cp3 负责算 Q:  B3 + B4
+
+每层流水（各 rank 并行，不是按时间先后串行）:
+
+  ① 本地只跑自己的 token → 得到 local K/V（只有两个 block）
+  ② AllGather + 重排 → 每张卡 KV pool 里都有 [B0|B1|…|B7] 完整序
+  ③ 本地 Q 对完整 KV 做 FA（见下）
+  ④ 层末 Gather hidden（或下一层再 shard）
+```
+
+**为什么保留完整 KV（而不是像 DCP 只留 1/N）？**
+
+1. Prefill CP 的目标是 **分摊 Q/FFN 算力**（每卡只算 `~1/cp_size` 的 token），不是省 decode KV 显存。
+2. Zigzag 算法依赖「池里已是全局 token 序的 KV + 按因果可见长度截断」。
+3. Prefill 结束后进入 decode：默认不再走 CP，需要每卡（在其 attn_tp head 分片上）已有完整序列 KV。
+
+例外：`--enable-dsa-cache-layer-split` 会把 **不同 layer 的 DSA KV** 分到不同 CP rank（省显存），那是另一条优化，不是默认 zigzag 行为。
+
+#### 因果「先后关系」如何保证？
+
+关键误解：以为 cp0 必须先算完，cp1 才能算。实际上 **所有 CP rank 同时算**；因果靠 **可见 KV 长度** 表达，不靠 rank 间流水线顺序。
+
+Zigzag 把本 rank 的 Q 再拆成两半（early `q_prev` / late `q_next`），分别限制 `cache_seqlens`：
+
+```
+例：cp_size=4，cp_rank=1 拥有 B1(early) 与 B6(late)
+
+q_prev = B1 的 queries
+  因果上只能看到 B0..B1
+  → kv_len_prev = |B0|+|B1|
+
+q_next = B6 的 queries
+  因果上能看到 B0..B6
+  → kv_len_next = |B0|+…+|B6|
+
+        KV pool（每卡都有完整序）:
+        [B0][B1][B2][B3][B4][B5][B6][B7]
+         <--- q_prev 可见 --->
+         <------------- q_next 可见 ------------->
+
+FA 调用两次（见 ZigzagCPStrategy.run_attention）:
+  attn(q_prev, cache_seqlens=kv_len_prev)
+  attn(q_next, cache_seqlens=kv_len_next)
+  → cat → 本 rank 的 attention 输出
+```
+
+因果正确性来自：KV 已按全局位置排好 + `cache_seqlens` 截到合法前缀 + chunk 内 causal mask；**不需要** rank 之间按时间排队。
+
+```mermaid
+sequenceDiagram
+  participant C0 as cp0
+  participant C1 as cp1
+  participant C2 as cp2
+  participant C3 as cp3
+  Note over C0,C3: 同一层，四卡并行
+  C0->>C0: Q/K/V on B0+B7
+  C1->>C1: Q/K/V on B1+B6
+  C2->>C2: Q/K/V on B2+B5
+  C3->>C3: Q/K/V on B3+B4
+  C0<<->>C3: AllGather K/V → 每卡写满完整序
+  C0->>C0: FA(q_prev,q_next) vs full KV
+  C1->>C1: FA(q_prev,q_next) vs full KV
+  C2->>C2: FA(q_prev,q_next) vs full KV
+  C3->>C3: FA(q_prev,q_next) vs full KV
+```
+
+---
+
+### 9.2 DCP：交错分片后各 rank KV「不一样」是否有问题？
+
+**不一样是设计目标。** 每卡只存 `pos % N == rank` 的 token，显存降为约 `1/N`。Decode 正确性不靠「每卡 KV 相同」，而靠 **Pass-Q + 分片 Attn + LSE merge**。
+
+#### 为什么用交错而不是「前 T/N / 中 T/N / 后 T/N」？
+
+Decode 每步只新增 **1** 个 token。若按 contiguous chunk：
+
+```
+坏例子（contiguous）: rank0 管 [0,T/4), rank1 管 [T/4,T/2), ...
+新 token 总是落在「当前末尾」那一个 rank → 该 rank KV 暴涨，其它 rank 空转，且所有权边界要不断重划。
+```
+
+交错：
+
+```
+好例子（interleaved）: owner(p) = p % 4
+新 token t=100 → rank 0；t=101 → rank 1；… 自然轮转，负载长期均衡，无需重平衡。
+```
+
+```
+绝对位置:  0  1  2  3  4  5  6  7  8  9 10 11
+owner:     0  1  2  3  0  1  2  3  0  1  2  3
+
+rank0 物理槽: 存 pos 0,4,8,…   → 物理 index = virtual // 4
+rank1 物理槽: 存 pos 1,5,9,…
+rank2 物理槽: 存 pos 2,6,10,…
+rank3 物理槽: 存 pos 3,7,11,…
+```
+
+#### Decode 计算流水（各 rank KV 不同也能得到正确 softmax）
+
+数学直觉：完整 attention 是对 **全部 KV 位置** 做 softmax。把位置集合拆成 N 份后，每份算出局部 `(out_i, lse_i)`，再用 online-softmax / LSE 加权合成全局结果——这是标准的 **分块 attention 归约**，不是「缺 KV 硬算」。
+
+```
+Decode 一步（dcp_size=4）:
+
+  每卡本地只有 1 个新 token 的 partial Q（按 TP/head 切过）
+       │
+       ▼
+  ┌─────────────┐
+  │ AllGather Q │  （或 --dcp-replicate-q-proj：本地直接算满 head）
+  └──────┬──────┘
+         │  每卡都有完整 Q
+         ▼
+  ┌──────────────────────────────────┐
+  │ Attn(Q_full, KV_local_shard)     │
+  │ 只对「自己拥有的」约 T/N 个 KV 打分 │
+  │ 返回 partial_out + LSE           │
+  └──────┬───────────────────────────┘
+         │
+         ▼
+  ┌──────────────────────────────────┐
+  │ Merge（ag_rs 或 a2a / fi_a2a）    │
+  │ 用各 rank 的 LSE 加权合成         │
+  │ 并收回本 rank 该持有的 head 切片  │
+  └──────────────────────────────────┘
+
+可视化（忽略 head，只看序列分片）:
+
+  Q ──┬──► rank0: score vs KV{0,4,8,…}  → (O0, LSE0) ─┐
+      ├──► rank1: score vs KV{1,5,9,…}  → (O1, LSE1) ─┼── LSE-merge → O_full
+      ├──► rank2: score vs KV{2,6,10,…} → (O2, LSE2) ─┤
+      └──► rank3: score vs KV{3,7,11,…} → (O3, LSE3) ─┘
+
+  各 rank 的 KV 状态确实不同；合并后等价于对全集 KV 做 attention。
+```
+
+```mermaid
+flowchart LR
+  subgraph local [每卡本地]
+    Qloc[本地 Q 分片] --> AGQ[AG Q 或 Q-replicate]
+    AGQ --> Attn[Attn vs 本地 KV shard]
+    Attn --> Partial["(partial_O, LSE)"]
+  end
+  Partial --> Merge[AG+RS 或 A2A LSE combine]
+  Merge --> Out[本卡 head 切片输出]
+```
+
+---
+
+### 9.3 Prefill CP 与 DCP 能否共用？要不要 `global_kv_buffer`？
+
+**KV 布局哲学相反，默认不要当成可随意叠加的组合。**
+
+| | Prefill CP（默认） | DCP |
+|---|---|---|
+| Prefill/Extend 后池里有什么 | **完整序 KV**（每卡一份，按 attn_tp 切 head） | **仅本地交错 shard** |
+| 目标 | 加速 prefill 算力 | 省 decode 显存 / 提并发 |
+
+同开时语义冲突：
+
+- Prefill CP 的 `materialize_full_*` 会把完整序列写入 pool；
+- DCP 的写入路径要求 `loc % dcp_size == rank`，物理槽是 `virtual // dcp_size`；
+- DCP 的 decode 元数据 / page table 假定交错所有权。
+
+若坚持「prefill 用 CP、decode 用 DCP」，至少需要一次 **布局转换**（完整序 → 交错 shard），或 prefill 阶段就按 DCP owner 规则写 pool（那就不是现在的 zigzag materialize 路径了）。
+
+**关于 `dcp_kv_buffer`：**  
+这是 **DCP 自己的 extend/prefill 旁路**，不是 Prefill CP 的东西。DCP 在 extend 时因为本地只有交错 shard，算 prefix attention 前会：
+
+1. 用 `dcp_local_prefix_kv_indices` 取出本卡持有的 prefix；
+2. `all_gather_kv_cache_for_*` 填进临时 `attn_dcp_metadata.dcp_kv_buffer`（完整 prefix + 本段 extend）；
+3. 用 buffer 上的 indices 做这次 forward 的 attn。
+
+所以：**仅开 DCP 时，extend 本来就会有临时 global buffer（至少逻辑上是完整 KV 视图）**；稳态 decode 不保留它。  
+**不是**「为了和 Prefill CP 共用才需要」；反过来，Prefill CP 默认已经在 pool 里留了完整 KV，和 DCP 稳态「只留 1/N」打架。
+
+实务建议：长 prefill 算力不够 → Prefill CP；长上下文 decode 显存不够 → DCP。先选一个主矛盾。
+
+---
+
+### 9.4 Zigzag vs Interleave 区别
+
+| | **Zigzag** | **Interleave** |
+|---|---|---|
+| 分片图案 | 每序列切 `2×cp_size` 块；rank r 拿 early 块 r + late 块 `2N-1-r` | rank r 拿 `token r, r+N, r+2N, …` |
+| 负载意图 | 因果下 early 短可见、late 长可见，配对后各卡 FLOPs 更均 | 均匀抽稀；实现简单，和 DCP owner 同构 |
+| Attention | 本策略 `run_attention`：Q 拆 prev/next，两次 FA，依赖 **完整 KV pool** | 主要为 **DSA**；attention 在 DSA 内核内，策略侧 `run_attention` 为空 |
+| 典型模型 | Dense MHA/MLA + FlashAttention / TRTLLM_MHA | DeepSeek DSA / NSA 稀疏检索路径 |
+| CLI | `--cp-strategy zigzag` | `--cp-strategy interleave` |
+
+```
+Zigzag (N=4):     Interleave (N=4):
+rank0: B0 + B7    rank0: t0,t4,t8,t12,…
+rank1: B1 + B6    rank1: t1,t5,t9,t13,…
+rank2: B2 + B5    rank2: t2,t6,t10,t14,…
+rank3: B3 + B4    rank3: t3,t7,t11,t15,…
+```
+
+Zigzag 多一轮「块配对」是为了缓解因果 attention 下「越靠后的 token 可见 KV 越长」带来的负载倾斜；Interleave 把倾斜打散到每个 rank，但和当前 DSA 实现耦合更深。
+
+---
+
+### 9.5 CP Decode Attention TP 是什么？
+
+它 **不是 DCP**，也 **不改 KV 布局**。它解决的是 Prefill CP 打开后 decode 阶段的 **算力浪费**。
+
+背景：
+
+```
+开 Prefill CP 后（示意 tp=8, attn_cp=8）:
+  attn_tp_size = tp / (attn_cp * attn_dp) = 1
+  → 每张卡上的 attention 线性层权重是「整份复制」的（相对正常 TP）
+
+Prefill 时：每卡只算自己的序列分片 Q，需要「完整 head」→ 复制权重合理。
+
+Decode 时：不再走 zigzag/interleave（is_cp_v2_active / dsa_use_prefill_cp 为假），
+  若仍用整份复制权重 → 8 张卡做 8 次完全相同的全 head GEMM → 纯浪费。
+```
+
+`--enable-cp-decode-attn-tp` 做的事：
+
+```
+Decode forward 期间（context manager）:
+  把 ColumnParallel / RowParallel 的 weight 按 attn_cp_rank 切一刀
+  （等价于临时恢复「按 head 的 TP」）
+  → 每卡只算 1/N head
+  → RowParallel 输出走 all-reduce（linear.py 里 use_decode_attn_tp 触发）
+  → forward 结束 restore 整份权重（留给下次 Prefill CP 用）
+```
+
+```
+Prefill CP 开着、Decode Attn TP 关着:
+  GPU0: 算全部 H 个 head   GPU1: 算全部 H 个 head  …  （重复劳动）
+
+Decode Attn TP 开着:
+  GPU0: 算 head[0, H/N)    GPU1: 算 head[H/N, 2H/N) … 再 AllReduce
+  （恢复正常 TP 的分工；KV 仍是 Prefill CP 物化好的完整序）
+```
+
+白名单架构：DeepSeek-V4 / GLM DSA 等（见 `CP_DECODE_ATTN_TP_SUPPORTED_ARCHS`）。Prefill CP 活跃时强制关掉切片（那一步需要全 head）。
+
+---
+
+## 10. 总结
 
 - **DCP** 解决的是「TP 无法继续按 head 切 KV」的显存复制问题：用 `pos % N` 交错分片，decode 用 Pass-Q + LSE merge；通信与序列长度解耦。
-- **Prefill CP** 解决的是长 prefill 的序列并行：zigzag / interleave 两套策略，末尾 gather 物化完整激活/KV。
-- 与 **vLLM DCP** 在数学与通信后端命名上高度对齐（`ag_rs` / `a2a` / Q-replicate / FlashInfer A2A）；差异主要在 **prefill 并行产品化路径**、**缓存/PD/HiCache 集成**，以及 **默认后端与自动选择策略**。
-- 落地时优先明确瓶颈是 **decode KV 容量** 还是 **prefill 序列算力**，再分别打开 `--dcp-size` 或 `--enable-prefill-cp`，并按互联能力选择 `--dcp-comm-backend`。
+- **Prefill CP** 解决的是长 prefill 的序列并行：zigzag / interleave 两套策略；默认 **每卡物化完整 KV**，用可见长度表达因果，而不是 rank 串行。
+- **CP Decode Attn TP** 只是 Prefill CP 下 decode 阶段对复制权重的临时 TP 切片，与 DCP 无关。
+- 与 **vLLM DCP** 在数学与通信后端命名上高度对齐；差异主要在 prefill 产品化路径与缓存/PD 集成。
+- 落地时优先明确瓶颈是 **decode KV 容量** 还是 **prefill 序列算力**，再分别打开 `--dcp-size` 或 `--enable-prefill-cp`。
 
 ---
 
