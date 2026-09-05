@@ -171,7 +171,7 @@ HiCache keeps one widened logical page space across L1 and L2. The controller se
 
 Before H2D or D2H, both index lists keep positions owned by this rank and map `i` to `floor(i / c)`. Transfers cover whole widened pages, and every rank moves its shard independently, with no DCP collective. For Kimi K3 this applies to MLA KV; KDA/Mamba state uses its own request-indexed host pool.
 
-The current scope is MLA L1/L2. L3, LMCache, HiSparse, non-MLA KV host pools, speculative decoding, and PD decode are not supported in this combination.
+The current scope is MLA L1/L2. L3, LMCache, HiSparse, non-MLA KV host pools, speculative decoding other than DSPARK, and PD decode are not supported in this combination. See [PP, HiCache, and speculative decoding compatibility](./pp_hicache_spec_compatibility) for the full matrix.
 
 ## References
 
